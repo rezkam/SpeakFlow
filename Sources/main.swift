@@ -836,30 +836,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         recorder?.start()
     }
 
+    private var micPermissionTimer: Timer?
+
     private func checkMicrophonePermission() {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             log("✅ Microphone permission granted")
+            micPermissionTimer?.invalidate()
+            micPermissionTimer = nil
+            updateStatusIcon()
+            updateMenu(trusted: AXIsProcessTrusted())
         case .notDetermined:
             log("🔔 Requesting microphone permission...")
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     if granted {
                         log("✅ Microphone permission granted")
+                        self?.updateStatusIcon()
+                        self?.updateMenu(trusted: AXIsProcessTrusted())
                     } else {
                         log("⚠️ Microphone permission denied by user")
-                        self.showMicrophonePermissionAlert()
+                        self?.showMicrophonePermissionAlert()
+                        self?.startMicrophonePermissionPolling()
                     }
                 }
             }
+            // Also start polling in case callback doesn't fire
+            startMicrophonePermissionPolling()
         case .denied, .restricted:
             log("⚠️ Microphone permission denied - showing alert")
-            // Delay to let accessibility alert appear first if needed
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.showMicrophonePermissionAlert()
             }
+            startMicrophonePermissionPolling()
         @unknown default:
             log("⚠️ Unknown microphone permission status")
+        }
+    }
+
+    private func startMicrophonePermissionPolling() {
+        micPermissionTimer?.invalidate()
+        micPermissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            if status == .authorized {
+                log("✅ Microphone permission granted (detected via polling)")
+                timer.invalidate()
+                self?.micPermissionTimer = nil
+                self?.updateStatusIcon()
+                self?.updateMenu(trusted: AXIsProcessTrusted())
+            }
         }
     }
 
