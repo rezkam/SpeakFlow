@@ -1,7 +1,7 @@
 import OSLog
 
 // MARK: - Structured Logging
-extension Logger {
+public extension Logger {
     private static let subsystem = Bundle.main.bundleIdentifier ?? "app.monodo.speakflow"
 
     /// Audio recording and processing

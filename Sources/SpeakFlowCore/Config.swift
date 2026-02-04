@@ -1,39 +1,40 @@
 import Foundation
 
 /// Fixed application configuration constants
-enum Config {
+public enum Config {
     // MARK: - Audio Processing (Fixed)
     /// RMS threshold below which audio is considered silence
-    static let silenceThreshold: Float = 0.003
+    public static let silenceThreshold: Float = 0.003
     /// Seconds of silence before triggering chunk send
-    static let silenceDuration: Double = 2.0
+    public static let silenceDuration: Double = 2.0
     /// Minimum ratio of speech frames to total frames
-    static let minSpeechRatio: Float = 0.03
+    public static let minSpeechRatio: Float = 0.03
 
     // MARK: - Audio Limits (Fixed)
     /// Sample rate for audio recording (Hz)
-    static let sampleRate: Double = 16000
+    public static let sampleRate: Double = 16000
     /// Minimum recording duration in milliseconds (matches Codex behavior)
-    static let minRecordingDurationMs: Int = 250
+    public static let minRecordingDurationMs: Int = 250
     /// Maximum audio file size in bytes (25MB - covers ~7 minutes at 16kHz mono 16-bit)
-    static let maxAudioSizeBytes: Int = 25_000_000
+    public static let maxAudioSizeBytes: Int = 25_000_000
     /// Maximum recording duration when chunking is disabled (1 hour, matches Codex)
-    static let maxFullRecordingDuration: Double = 3600.0
+    public static let maxFullRecordingDuration: Double = 3600.0
 
     // MARK: - API Settings (Fixed)
     /// Minimum seconds between API requests (rate limiting)
-    static let minTimeBetweenRequests: Double = 10.0
+    public static let minTimeBetweenRequests: Double = 10.0
     /// Request timeout in seconds
-    static let timeout: Double = 30.0
+    public static let timeout: Double = 30.0
     /// Maximum retry attempts for failed requests
-    static let maxRetries: Int = 2
+    public static let maxRetries: Int = 2
     /// Base delay for exponential backoff (seconds)
-    static let retryBaseDelay: Double = 5.0
+    public static let retryBaseDelay: Double = 5.0
 }
 
 // MARK: - Chunk Duration Options
 
-enum ChunkDuration: Double, CaseIterable {
+public enum ChunkDuration: Double, CaseIterable {
+    public static let allCases: [ChunkDuration] = [.seconds30, .seconds45, .minute1, .minute2, .minute5, .minute7, .fullRecording]
     case seconds30 = 30.0
     case seconds45 = 45.0
     case minute1 = 60.0
@@ -42,7 +43,7 @@ enum ChunkDuration: Double, CaseIterable {
     case minute7 = 420.0
     case fullRecording = 3600.0  // 1 hour max (matches Codex behavior)
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .seconds30: return "30 seconds"
         case .seconds45: return "45 seconds"
@@ -55,12 +56,12 @@ enum ChunkDuration: Double, CaseIterable {
     }
 
     /// Whether this mode effectively disables chunking
-    var isFullRecording: Bool {
+    public var isFullRecording: Bool {
         self == .fullRecording
     }
 
     /// Minimum chunk duration (shorter chunks get buffered)
-    var minDuration: Double {
+    public var minDuration: Double {
         switch self {
         case .fullRecording:
             // For full recording mode, use a very short minimum (250ms like Codex)
@@ -75,18 +76,18 @@ enum ChunkDuration: Double, CaseIterable {
 // MARK: - User Settings
 
 /// User-configurable settings stored in UserDefaults
-final class Settings {
-    static let shared = Settings()
+public final class Settings {
+    public static let shared = Settings()
 
     private enum Keys {
-        static let chunkDuration = "settings.chunkDuration"
-        static let skipSilentChunks = "settings.skipSilentChunks"
+        public static let chunkDuration = "settings.chunkDuration"
+        public static let skipSilentChunks = "settings.skipSilentChunks"
     }
 
     private init() {}
 
     /// Maximum chunk duration before forced send
-    var chunkDuration: ChunkDuration {
+    public var chunkDuration: ChunkDuration {
         get {
             let rawValue = UserDefaults.standard.double(forKey: Keys.chunkDuration)
             return ChunkDuration(rawValue: rawValue) ?? .minute1
@@ -97,7 +98,7 @@ final class Settings {
     }
 
     /// Whether to skip chunks that are mostly silent
-    var skipSilentChunks: Bool {
+    public var skipSilentChunks: Bool {
         get {
             // Default to true if not set
             if UserDefaults.standard.object(forKey: Keys.skipSilentChunks) == nil {
@@ -113,12 +114,12 @@ final class Settings {
     // MARK: - Computed Properties for Audio Processing
 
     /// Maximum seconds before forced chunk send
-    var maxChunkDuration: Double {
+    public var maxChunkDuration: Double {
         chunkDuration.rawValue
     }
 
     /// Minimum seconds of audio before sending to API
-    var minChunkDuration: Double {
+    public var minChunkDuration: Double {
         chunkDuration.minDuration
     }
 }

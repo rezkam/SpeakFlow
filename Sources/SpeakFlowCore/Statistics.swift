@@ -3,8 +3,8 @@ import OSLog
 
 /// Tracks and persists usage statistics for the app
 @MainActor
-final class Statistics {
-    static let shared = Statistics()
+public final class Statistics {
+    public static let shared = Statistics()
 
     // MARK: - UserDefaults Keys
 
@@ -42,7 +42,7 @@ final class Statistics {
     // MARK: - Recording Methods
 
     /// Record a completed transcription
-    func recordTranscription(text: String, audioDurationSeconds: Double) {
+    public func recordTranscription(text: String, audioDurationSeconds: Double) {
         totalSecondsTranscribed += audioDurationSeconds
         totalCharacters += text.count
 
@@ -54,12 +54,12 @@ final class Statistics {
     }
 
     /// Record an API call (success or failure)
-    func recordApiCall() {
+    public func recordApiCall() {
         totalApiCalls += 1
     }
 
     /// Reset all statistics
-    func reset() {
+    public func reset() {
         totalSecondsTranscribed = 0
         totalCharacters = 0
         totalWords = 0
@@ -122,7 +122,7 @@ final class Statistics {
     }
 
     /// Full statistics summary for display
-    var summary: String {
+    public var summary: String {
         """
         📊 Transcription Statistics
 

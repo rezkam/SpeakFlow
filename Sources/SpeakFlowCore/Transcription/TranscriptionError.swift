@@ -1,7 +1,7 @@
 import Foundation
 
 /// Errors that can occur during transcription
-enum TranscriptionError: Error, LocalizedError {
+public enum TranscriptionError: Error, LocalizedError {
     case authenticationFailed(reason: String)
     case networkError(underlying: Error)
     case invalidResponse(data: Data?)
@@ -11,7 +11,7 @@ enum TranscriptionError: Error, LocalizedError {
     case cancelled
     case audioTooLarge(size: Int, maxSize: Int)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .authenticationFailed(let reason):
             return "Authentication failed: \(reason)"
@@ -37,7 +37,7 @@ enum TranscriptionError: Error, LocalizedError {
         }
     }
 
-    var isRetryable: Bool {
+    public var isRetryable: Bool {
         switch self {
         case .networkError:
             return true

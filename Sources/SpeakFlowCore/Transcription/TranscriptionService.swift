@@ -14,7 +14,7 @@ actor TranscriptionService {
     private var activeTasks: [Int: Task<String, Error>] = [:]
 
     /// Transcribe audio with automatic retry and rate limiting
-    func transcribe(audio: Data) async throws -> String {
+    public func transcribe(audio: Data) async throws -> String {
         // Wait for rate limit
         await rateLimiter.waitIfNeeded()
         await rateLimiter.recordRequest()
@@ -157,7 +157,8 @@ actor TranscriptionService {
                 let safeValue = value.replacingOccurrences(of: "\r", with: "")
                     .replacingOccurrences(of: "\n", with: "")
                     .replacingOccurrences(of: ";", with: "")
-                guard !safeKey.isEmpty else { return nil }
+                // P1 Fix: Skip cookies with empty key or value to avoid malformed headers
+                guard !safeKey.isEmpty, !safeValue.isEmpty else { return nil }
                 return "\(safeKey)=\(safeValue)"
             }.joined(separator: "; ")
             if !cookieString.isEmpty {

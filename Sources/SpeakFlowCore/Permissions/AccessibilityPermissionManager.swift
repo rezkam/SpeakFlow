@@ -2,16 +2,25 @@ import AppKit
 import ApplicationServices
 import OSLog
 
+/// Protocol for permission manager delegate callbacks
+@MainActor
+public protocol AccessibilityPermissionDelegate: AnyObject {
+    func updateStatusIcon()
+    func setupHotkey()
+}
+
 /// Manages accessibility permission requests and monitoring
-final class AccessibilityPermissionManager {
+public final class AccessibilityPermissionManager {
     private var permissionCheckTimer: Timer?
     private var hasShownInitialPrompt = false
     private var lastKnownPermissionState: Bool?  // P3 Security: Track permission state changes
     private var pollAttempts = 0
-    private static let maxPollAttempts = 60  // 60 * 2s = 2 minutes timeout
-    weak var delegate: AppDelegate?
+    static let maxPollAttempts = 60  // 60 * 2s = 2 minutes timeout (internal for testing)
+    public weak var delegate: AccessibilityPermissionDelegate?
 
-    func checkAndRequestPermission(showAlertIfNeeded: Bool = true, isAppStart: Bool = false) -> Bool {
+    public init() {}
+
+    public func checkAndRequestPermission(showAlertIfNeeded: Bool = true, isAppStart: Bool = false) -> Bool {
         // P3 Security: Reset prompt flag if permission was revoked since last check
         // This allows re-prompting users who removed the app from the Accessibility list
         let currentState = AXIsProcessTrusted()
@@ -158,7 +167,7 @@ final class AccessibilityPermissionManager {
         }
     }
 
-    func stopPolling() {
+    public func stopPolling() {
         permissionCheckTimer?.invalidate()
         permissionCheckTimer = nil
     }

@@ -1,13 +1,13 @@
 import Foundation
 
 /// Available hotkey activation methods
-enum HotkeyType: String, CaseIterable {
+public enum HotkeyType: String, CaseIterable {
     case doubleTapControl
     case controlOptionD
     case controlOptionSpace
     case commandShiftD
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .doubleTapControl: return "⌃⌃ (double-tap)"
         case .controlOptionD: return "⌃⌥D"
