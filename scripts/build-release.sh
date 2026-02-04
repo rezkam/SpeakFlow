@@ -78,9 +78,15 @@ cat > "$APP_NAME.app/Contents/Info.plist" << EOF
 </plist>
 EOF
 
-# Ad-hoc sign the app
-echo "🔏 Signing app..."
-codesign --force --deep --sign - "$APP_NAME.app"
+# Sign with persistent identity (preserves permissions across rebuilds)
+SIGNING_IDENTITY="SpeakFlow Developer"
+echo "🔏 Signing app with '$SIGNING_IDENTITY'..."
+if security find-identity -v -p codesigning | grep -q "$SIGNING_IDENTITY"; then
+    codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_NAME.app"
+else
+    echo "⚠️  '$SIGNING_IDENTITY' not found, using ad-hoc signing (permissions won't persist)"
+    codesign --force --deep --sign - "$APP_NAME.app"
+fi
 
 # Create DMG
 echo "📦 Creating DMG..."

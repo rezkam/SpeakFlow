@@ -3,6 +3,7 @@ import AVFoundation
 import HotKey
 import Accelerate
 import ApplicationServices
+import Carbon.HIToolbox
 
 let logFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".speakflow.log")
 func log(_ msg: String) {
@@ -29,12 +30,135 @@ struct Config {
     static let silenceThreshold: Float = 0.003
     static let silenceDuration: Double = 2.0       // Wait 2s of silence
     static let minSpeechRatio: Float = 0.03
-    
+
     // API - conservative to avoid rate limits
     static let minTimeBetweenRequests: Double = 10.0  // At least 10s between API calls
     static let timeout: Double = 30.0                  // 30s timeout
     static let maxRetries: Int = 2                     // Only 2 retries
     static let retryBaseDelay: Double = 5.0           // Start with 5s delay
+}
+
+// MARK: - Hotkey Settings
+enum HotkeyType: String, CaseIterable {
+    case doubleTapControl = "doubleTapControl"
+    case controlOptionD = "controlOptionD"
+    case controlOptionSpace = "controlOptionSpace"
+    case commandShiftD = "commandShiftD"
+
+    var displayName: String {
+        switch self {
+        case .doubleTapControl: return "⌃⌃ (double-tap)"
+        case .controlOptionD: return "⌃⌥D"
+        case .controlOptionSpace: return "⌃⌥Space"
+        case .commandShiftD: return "⇧⌘D"
+        }
+    }
+}
+
+class HotkeySettings {
+    static let shared = HotkeySettings()
+
+    private let defaultsKey = "activationHotkey"
+
+    var currentHotkey: HotkeyType {
+        get {
+            if let raw = UserDefaults.standard.string(forKey: defaultsKey),
+               let type = HotkeyType(rawValue: raw) {
+                return type
+            }
+            return .doubleTapControl  // Default
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
+            log("⌨️ Hotkey changed to: \(newValue.displayName)")
+        }
+    }
+}
+
+// MARK: - Double-Tap Control Key Detector
+class DoubleTapControlDetector {
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var lastControlKeyReleaseTime: Date?
+    private var controlWasDown = false
+    private let doubleTapInterval: TimeInterval = 0.4
+
+    var onDoubleTap: (() -> Void)?
+
+    func start() {
+        guard eventTap == nil else { return }
+
+        let eventMask = (1 << CGEventType.flagsChanged.rawValue)
+
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                let detector = Unmanaged<DoubleTapControlDetector>.fromOpaque(refcon).takeUnretainedValue()
+                detector.handleFlagsChanged(event: event)
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+
+        guard let eventTap = eventTap else {
+            log("❌ Could not create event tap for Control key detection (need Accessibility permission)")
+            return
+        }
+
+        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        guard let source = runLoopSource else { return }
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+
+        log("✅ Double-tap Control detector started")
+    }
+
+    func stop() {
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        }
+        eventTap = nil
+        runLoopSource = nil
+    }
+
+    private func handleFlagsChanged(event: CGEvent) {
+        let flags = event.flags
+        let controlDown = flags.contains(.maskControl)
+
+        // Only trigger on Control alone (no other modifiers)
+        let hasOtherModifiers = flags.contains(.maskCommand) ||
+                                flags.contains(.maskAlternate) ||
+                                flags.contains(.maskShift)
+
+        // Detect Control key release (was down, now up) with no other modifiers
+        if controlWasDown && !controlDown && !hasOtherModifiers {
+            let now = Date()
+            if let lastRelease = lastControlKeyReleaseTime,
+               now.timeIntervalSince(lastRelease) < doubleTapInterval {
+                // Double-tap detected!
+                lastControlKeyReleaseTime = nil
+                DispatchQueue.main.async { [weak self] in
+                    self?.onDoubleTap?()
+                }
+            } else {
+                lastControlKeyReleaseTime = now
+            }
+        }
+
+        controlWasDown = controlDown
+    }
+
+    deinit {
+        stop()
+    }
 }
 
 // MARK: - Rate Limiter
@@ -513,24 +637,28 @@ class AccessibilityPermissionManager {
                 log("✅ Accessibility permission granted!")
                 timer.invalidate()
                 self.permissionCheckTimer = nil
-                
+
                 // Update UI
                 self.delegate?.updateStatusIcon()
-                
-                // Ask if user wants to restart
+
+                // Re-setup hotkey now that we have permission (needed for fn key detection)
+                self.delegate?.setupHotkey()
+
+                // Show confirmation
                 self.showPermissionGrantedAlert()
             }
         }
     }
     
     private func showPermissionGrantedAlert() {
+        let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
         DispatchQueue.main.async {
             let alert = NSAlert()
             alert.messageText = "Accessibility Permission Granted"
             alert.informativeText = """
             The app now has permission to insert dictated text into other applications.
 
-            You can start using the dictation feature with ⌃⌥D.
+            You can start using the dictation feature with \(hotkeyName).
             """
             alert.alertStyle = .informational
             alert.icon = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Success")
@@ -555,6 +683,7 @@ class AccessibilityPermissionManager {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var hotKey: HotKey?
+    var controlDetector: DoubleTapControlDetector?
     var recorder: StreamingRecorder?
     var isRecording = false
     var isProcessingFinal = false  // Track if we're waiting for final transcriptions
@@ -581,32 +710,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             log("✅ Accessibility permission granted")
         }
         
-        log("SpeakFlow ready - ⌃⌥D")
+        let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
+        log("SpeakFlow ready - \(hotkeyName)")
         log("Config: min=\(Config.minChunkDuration)s, max=\(Config.maxChunkDuration)s, rate=\(Config.minTimeBetweenRequests)s")
         
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
-        
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Start Dictation (⌃⌥D)", action: #selector(toggle), keyEquivalent: ""))
-        menu.addItem(.separator())
 
-        // Add accessibility status menu item
-        let accessibilityItem = NSMenuItem(title: trusted ? "✅ Accessibility Enabled" : "⚠️ Enable Accessibility...", action: #selector(checkAccessibility), keyEquivalent: "")
-        menu.addItem(accessibilityItem)
-
-        // Add microphone status menu item
-        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        let micTitle = micStatus == .authorized ? "✅ Microphone Enabled" : "⚠️ Enable Microphone..."
-        let micItem = NSMenuItem(title: micTitle, action: #selector(checkMicrophoneAction), keyEquivalent: "")
-        menu.addItem(micItem)
-        menu.addItem(.separator())
-
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
-        statusItem.menu = menu
-        
-        hotKey = HotKey(key: .d, modifiers: [.control, .option])
-        hotKey?.keyDownHandler = { [weak self] in self?.toggle() }
+        buildMenu(trusted: trusted)
+        setupHotkey()
         
         Transcription.shared.queue.onTextReady = { [weak self] text in
             guard let self = self else { return }
@@ -642,11 +754,90 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               app.bundleIdentifier == Bundle.main.bundleIdentifier else {
             return
         }
-        
+
         // Re-check accessibility permission (without showing alert)
         let trusted = AXIsProcessTrusted()
         updateStatusIcon()
         updateMenu(trusted: trusted)
+    }
+
+    private func buildMenu(trusted: Bool) {
+        let menu = NSMenu()
+
+        let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
+        menu.addItem(NSMenuItem(title: "Start Dictation (\(hotkeyName))", action: #selector(toggle), keyEquivalent: ""))
+        menu.addItem(.separator())
+
+        // Add accessibility status menu item
+        let accessibilityItem = NSMenuItem(title: trusted ? "✅ Accessibility Enabled" : "⚠️ Enable Accessibility...", action: #selector(checkAccessibility), keyEquivalent: "")
+        menu.addItem(accessibilityItem)
+
+        // Add microphone status menu item
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let micTitle = micStatus == .authorized ? "✅ Microphone Enabled" : "⚠️ Enable Microphone..."
+        let micItem = NSMenuItem(title: micTitle, action: #selector(checkMicrophoneAction), keyEquivalent: "")
+        menu.addItem(micItem)
+        menu.addItem(.separator())
+
+        // Hotkey submenu
+        let hotkeySubmenu = NSMenu()
+        for type in HotkeyType.allCases {
+            let item = NSMenuItem(title: type.displayName, action: #selector(changeHotkey(_:)), keyEquivalent: "")
+            item.representedObject = type
+            item.state = (type == HotkeySettings.shared.currentHotkey) ? .on : .off
+            hotkeySubmenu.addItem(item)
+        }
+
+        let hotkeyMenuItem = NSMenuItem(title: "Activation Hotkey", action: nil, keyEquivalent: "")
+        hotkeyMenuItem.submenu = hotkeySubmenu
+        menu.addItem(hotkeyMenuItem)
+        menu.addItem(.separator())
+
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+        statusItem.menu = menu
+    }
+
+    @objc private func changeHotkey(_ sender: NSMenuItem) {
+        guard let newType = sender.representedObject as? HotkeyType else { return }
+
+        HotkeySettings.shared.currentHotkey = newType
+        setupHotkey()
+
+        // Rebuild menu to update checkmarks and hotkey display
+        let trusted = AXIsProcessTrusted()
+        buildMenu(trusted: trusted)
+    }
+
+    func setupHotkey() {
+        // Disable previous hotkey handlers
+        hotKey = nil
+        controlDetector?.stop()
+        controlDetector = nil
+
+        let type = HotkeySettings.shared.currentHotkey
+
+        switch type {
+        case .doubleTapControl:
+            controlDetector = DoubleTapControlDetector()
+            controlDetector?.onDoubleTap = { [weak self] in self?.toggle() }
+            controlDetector?.start()
+            log("⌨️ Using double-tap Control activation")
+
+        case .controlOptionD:
+            hotKey = HotKey(key: .d, modifiers: [.control, .option])
+            hotKey?.keyDownHandler = { [weak self] in self?.toggle() }
+            log("⌨️ Using ⌃⌥D activation")
+
+        case .controlOptionSpace:
+            hotKey = HotKey(key: .space, modifiers: [.control, .option])
+            hotKey?.keyDownHandler = { [weak self] in self?.toggle() }
+            log("⌨️ Using ⌃⌥Space activation")
+
+        case .commandShiftD:
+            hotKey = HotKey(key: .d, modifiers: [.command, .shift])
+            hotKey?.keyDownHandler = { [weak self] in self?.toggle() }
+            log("⌨️ Using ⇧⌘D activation")
+        }
     }
     
     func updateStatusIcon() {
@@ -699,20 +890,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return nil
     }
+
     
     private func updateMenu(trusted: Bool) {
-        guard let menu = statusItem.menu else { return }
-
-        // Update the accessibility menu item (it's at index 2)
-        if menu.items.count > 2 {
-            menu.items[2].title = trusted ? "✅ Accessibility Enabled" : "⚠️ Enable Accessibility..."
-        }
-
-        // Update the microphone menu item (it's at index 3)
-        if menu.items.count > 3 {
-            let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-            menu.items[3].title = micStatus == .authorized ? "✅ Microphone Enabled" : "⚠️ Enable Microphone..."
-        }
+        // Rebuild entire menu to ensure proper state
+        buildMenu(trusted: trusted)
     }
     
     @objc func checkAccessibility() {
