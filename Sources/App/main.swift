@@ -6,7 +6,7 @@ import AppKit
 DispatchQueue.main.async {
     let appDelegate = AppDelegate()
     NSApplication.shared.delegate = appDelegate
-    NSApplication.shared.setActivationPolicy(.regular)
+    // P3: Removed duplicate .regular activation policy - AppDelegate sets .accessory
     NSApplication.shared.run()
 }
 

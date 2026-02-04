@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var fullTranscript = ""
     var permissionManager: AccessibilityPermissionManager!
     var targetElement: AXUIElement?  // Store focused element when recording starts
+    private var textInsertionTask: Task<Void, Never>?  // Track ongoing text insertion
 
     // Menu bar icons
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
@@ -41,7 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
         Logger.app.info("SpeakFlow ready - \(hotkeyName)")
-        Logger.app.debug("Config: min=\(Config.minChunkDuration)s, max=\(Config.maxChunkDuration)s, rate=\(Config.minTimeBetweenRequests)s")
+        let settings = Settings.shared
+        Logger.app.debug("Config: min=\(settings.minChunkDuration)s, max=\(settings.maxChunkDuration)s, rate=\(Config.minTimeBetweenRequests)s")
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
@@ -132,6 +134,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMenuItem.submenu = hotkeySubmenu
         menu.addItem(hotkeyMenuItem)
 
+        // Chunk duration submenu
+        let chunkSubmenu = NSMenu()
+        for duration in ChunkDuration.allCases {
+            let item = NSMenuItem(title: duration.displayName, action: #selector(changeChunkDuration(_:)), keyEquivalent: "")
+            item.representedObject = duration
+            item.state = (duration == Settings.shared.chunkDuration) ? .on : .off
+            chunkSubmenu.addItem(item)
+        }
+        let chunkMenuItem = NSMenuItem(title: "Chunk Duration", action: nil, keyEquivalent: "")
+        chunkMenuItem.submenu = chunkSubmenu
+        menu.addItem(chunkMenuItem)
+
+        // Skip silent chunks toggle
+        let skipSilentItem = NSMenuItem(
+            title: "Skip Silent Chunks",
+            action: #selector(toggleSkipSilentChunks(_:)),
+            keyEquivalent: ""
+        )
+        skipSilentItem.state = Settings.shared.skipSilentChunks ? .on : .off
+        menu.addItem(skipSilentItem)
+        menu.addItem(.separator())
+
+        // Statistics
+        menu.addItem(NSMenuItem(title: "View Statistics...", action: #selector(showStatistics), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Reset Statistics...", action: #selector(resetStatistics), keyEquivalent: ""))
+        menu.addItem(.separator())
+
         // Launch at Login toggle
         let launchAtLoginItem = NSMenuItem(
             title: "Launch at Login",
@@ -180,6 +209,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Rebuild menu to update checkmarks and hotkey display
         let trusted = AXIsProcessTrusted()
         buildMenu(trusted: trusted)
+    }
+
+    @objc private func changeChunkDuration(_ sender: NSMenuItem) {
+        guard let newDuration = sender.representedObject as? ChunkDuration else { return }
+
+        Settings.shared.chunkDuration = newDuration
+        Logger.app.info("Chunk duration changed to \(newDuration.displayName)")
+
+        // Rebuild menu to update checkmarks
+        let trusted = AXIsProcessTrusted()
+        buildMenu(trusted: trusted)
+    }
+
+    @objc private func toggleSkipSilentChunks(_ sender: NSMenuItem) {
+        Settings.shared.skipSilentChunks.toggle()
+        sender.state = Settings.shared.skipSilentChunks ? .on : .off
+        Logger.app.info("Skip silent chunks: \(Settings.shared.skipSilentChunks)")
+    }
+
+    @objc private func showStatistics() {
+        let alert = NSAlert()
+        alert.messageText = "Transcription Statistics"
+        alert.informativeText = Statistics.shared.summary
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    @objc private func resetStatistics() {
+        let alert = NSAlert()
+        alert.messageText = "Reset Statistics?"
+        alert.informativeText = "This will permanently reset all transcription statistics to zero."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            Statistics.shared.reset()
+
+            // Show confirmation
+            let confirmAlert = NSAlert()
+            confirmAlert.messageText = "Statistics Reset"
+            confirmAlert.informativeText = "All statistics have been reset to zero."
+            confirmAlert.alertStyle = .informational
+            confirmAlert.addButton(withTitle: "OK")
+            confirmAlert.runModal()
+        }
     }
 
     func setupHotkey() {
@@ -330,22 +406,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Capture the focused element NOW so we can insert text there later
         let systemWide = AXUIElementCreateSystemWide()
-        var focusedElement: AnyObject?
+        var focusedElement: CFTypeRef?
         if AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
            let element = focusedElement {
-            // Force cast is required because AXUIElementCopyAttributeValue returns AnyObject
-            // but kAXFocusedUIElementAttribute is guaranteed to return AXUIElement when successful.
-            // The Accessibility API is a C API that predates Swift's type system.
-            // swiftlint:disable:next force_cast
-            targetElement = (element as! AXUIElement)
+            // P1 Security: Validate type before using
+            // AXUIElementCopyAttributeValue returns CFTypeRef, verify it's an AXUIElement
+            if CFGetTypeID(element) == AXUIElementGetTypeID() {
+                // Safe to use - we verified the type above
+                let axElement = element as! AXUIElement  // swiftlint:disable:this force_cast
+                targetElement = axElement
 
-            // Log element info for debugging
-            if let target = targetElement {
-                var role: AnyObject?
-                var title: AnyObject?
-                AXUIElementCopyAttributeValue(target, kAXRoleAttribute as CFString, &role)
-                AXUIElementCopyAttributeValue(target, kAXTitleAttribute as CFString, &title)
+                // Log element info for debugging
+                var role: CFTypeRef?
+                var title: CFTypeRef?
+                AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &role)
+                AXUIElementCopyAttributeValue(axElement, kAXTitleAttribute as CFString, &title)
                 Logger.audio.debug("Captured target element: role=\(String(describing: role)), title=\(String(describing: title))")
+            } else {
+                targetElement = nil
+                Logger.audio.warning("Focused element is not an AXUIElement (unexpected type)")
             }
         } else {
             targetElement = nil
@@ -356,10 +435,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSSound(named: "Pop")?.play()
 
         recorder = StreamingRecorder()
-        recorder?.onChunkReady = { data in
+        recorder?.onChunkReady = { chunk in
             Task { @MainActor in
                 let seq = await Transcription.shared.queueBridge.nextSequence()
-                Transcription.shared.transcribe(seq: seq, audio: data)
+                Transcription.shared.transcribe(seq: seq, chunk: chunk)
             }
         }
         recorder?.start()
@@ -386,6 +465,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard isRecording || isProcessingFinal else { return }
         isRecording = false
         isProcessingFinal = false
+        fullTranscript = ""  // P2 Security: Reset transcript to prevent stale data
+        targetElement = nil
+        textInsertionTask?.cancel()
+        textInsertionTask = nil
         recorder?.stop()
         recorder = nil
         Transcription.shared.cancelAll()
@@ -393,22 +476,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Logger.audio.info("Recording cancelled")
     }
 
-    func finishIfDone() {
+    /// Maximum retry attempts for finishIfDone to prevent infinite task chains
+    private static let maxFinishRetries = 30  // 30 * 2s = 60s max wait
+
+    func finishIfDone(attempt: Int = 0) {
         guard !isRecording else { return }
+
+        // P1 Security: Prevent infinite task chain with retry limit
+        guard attempt < Self.maxFinishRetries else {
+            Logger.transcription.warning("Exceeded max retries (\(Self.maxFinishRetries)) waiting for transcriptions")
+            isProcessingFinal = false
+            targetElement = nil
+            textInsertionTask = nil
+            updateStatusIcon()
+            return
+        }
 
         Task {
             let pending = await Transcription.shared.queueBridge.getPendingCount()
             if pending > 0 {
-                Logger.transcription.debug("Waiting for \(pending) pending transcriptions")
+                Logger.transcription.debug("Waiting for \(pending) pending transcriptions (attempt \(attempt + 1))")
                 try? await Task.sleep(for: .seconds(2))
-                await MainActor.run { self.finishIfDone() }
+                await MainActor.run { self.finishIfDone(attempt: attempt + 1) }
                 return
             }
+
+            // Wait for all text insertion to complete before playing the completion sound
+            await self.waitForTextInsertion()
 
             await MainActor.run {
                 // All transcriptions complete, stop processing mode
                 self.isProcessingFinal = false
                 self.targetElement = nil  // Clear stored element
+                self.textInsertionTask = nil  // Clear completed task
                 self.updateStatusIcon()
                 guard !self.fullTranscript.isEmpty else { return }
 
@@ -428,21 +528,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let keystrokeDelayMicroseconds: UInt32 = 5000
 
     func insertText(_ text: String) {
-        // Validate text length to prevent DoS
-        guard text.count <= Self.maxTextInsertionLength else {
-            Logger.app.warning("Text too long to insert (\(text.count) chars > \(Self.maxTextInsertionLength))")
-            // Insert truncated text with warning
-            let truncated = String(text.prefix(Self.maxTextInsertionLength))
-            typeText(truncated)
-            return
+        // P2 Security: Filter out control characters that could cause issues with CGEvent
+        // Allow: printable characters, spaces, tabs, and newlines
+        let sanitized = text.filter { char in
+            char.isLetter || char.isNumber || char.isPunctuation ||
+            char.isSymbol || char.isWhitespace || char == "\n" || char == "\t"
         }
 
-        Logger.app.debug("Inserting text: \(text, privacy: .private)")
-        typeText(text)
-        Logger.app.debug("Text typed via CGEvent")
+        // Validate text length to prevent DoS
+        let textToInsert: String
+        if sanitized.count > Self.maxTextInsertionLength {
+            Logger.app.warning("Text too long to insert (\(sanitized.count) chars > \(Self.maxTextInsertionLength))")
+            textToInsert = String(sanitized.prefix(Self.maxTextInsertionLength))
+        } else {
+            textToInsert = sanitized
+        }
+
+        guard !textToInsert.isEmpty else { return }
+
+        Logger.app.debug("Inserting text: \(textToInsert, privacy: .private)")
+
+        // Chain text insertion tasks to ensure they complete in order
+        let previousTask = textInsertionTask
+        textInsertionTask = Task {
+            // Wait for any previous insertion to complete
+            await previousTask?.value
+            await typeTextAsync(textToInsert)
+            Logger.app.debug("Text typed via CGEvent")
+        }
     }
 
-    private func typeText(_ text: String) {
+    /// Wait for all pending text insertions to complete
+    func waitForTextInsertion() async {
+        await textInsertionTask?.value
+    }
+
+    private func typeTextAsync(_ text: String) async {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             Logger.app.error("Could not create CGEventSource")
             return
@@ -461,7 +582,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyDown.post(tap: .cghidEventTap)
             keyUp.post(tap: .cghidEventTap)
 
-            usleep(Self.keystrokeDelayMicroseconds)
+            // Use Task.sleep instead of usleep for proper async behavior
+            try? await Task.sleep(nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000)
         }
     }
 
