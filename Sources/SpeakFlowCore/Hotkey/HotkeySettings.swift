@@ -2,14 +2,14 @@ import Foundation
 import OSLog
 
 /// Manages user preferences for hotkey activation
-final class HotkeySettings {
-    static let shared = HotkeySettings()
+public final class HotkeySettings {
+    public static let shared = HotkeySettings()
 
     private let defaultsKey = "activationHotkey"
 
     private init() {}
 
-    var currentHotkey: HotkeyType {
+    public var currentHotkey: HotkeyType {
         get {
             if let raw = UserDefaults.standard.string(forKey: defaultsKey),
                let type = HotkeyType(rawValue: raw) {

@@ -7,16 +7,24 @@ let package = Package(
         .macOS(.v13)
     ],
     targets: [
+        // Core library with testable business logic
+        .target(
+            name: "SpeakFlowCore",
+            path: "Sources/SpeakFlowCore"
+        ),
+        // Main executable
         .executableTarget(
             name: "SpeakFlow",
-            path: "Sources",
+            dependencies: ["SpeakFlowCore"],
+            path: "Sources/App",
             resources: [
-                .process("Resources")
+                .process("../Resources")
             ]
         ),
-        // Test target for security and functionality tests
+        // Test target that can import the core library
         .testTarget(
             name: "SpeakFlowTests",
+            dependencies: ["SpeakFlowCore"],
             path: "Tests"
         ),
     ]

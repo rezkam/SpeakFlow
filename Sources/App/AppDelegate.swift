@@ -4,10 +4,11 @@ import ApplicationServices
 import Carbon.HIToolbox
 import ServiceManagement
 import OSLog
+import SpeakFlowCore
 
 /// Main application delegate handling UI and lifecycle
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissionDelegate {
     var statusItem: NSStatusItem!
     var hotkeyListener: HotkeyListener?
     var recorder: StreamingRecorder?
@@ -286,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadMenuBarIcon() -> NSImage? {
-        guard let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
               let image = NSImage(contentsOf: url) else {
             Logger.app.warning("Could not load AppIcon.png from bundle")
             return nil
@@ -485,6 +486,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // P1 Security: Prevent infinite task chain with retry limit
         guard attempt < Self.maxFinishRetries else {
             Logger.transcription.warning("Exceeded max retries (\(Self.maxFinishRetries)) waiting for transcriptions")
+            // P1 Fix: Clean up queue state to prevent orphaned pending items
+            Task {
+                await Transcription.shared.queueBridge.checkCompletion()
+            }
             isProcessingFinal = false
             targetElement = nil
             textInsertionTask = nil
@@ -570,6 +575,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         for char in text {
+            // P1 Security: Check for cancellation to stop typing when recording is cancelled
+            // Without this, cancelled tasks continue typing for up to 50s (10k chars × 5ms)
+            do {
+                try Task.checkCancellation()
+            } catch {
+                Logger.app.debug("Text insertion cancelled")
+                return
+            }
+
             var unichar = Array(String(char).utf16)
 
             guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),

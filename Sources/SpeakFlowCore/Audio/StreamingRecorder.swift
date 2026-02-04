@@ -3,13 +3,18 @@ import Accelerate
 import OSLog
 
 /// Audio chunk with metadata
-struct AudioChunk {
-    let wavData: Data
-    let durationSeconds: Double
+public struct AudioChunk {
+    public let wavData: Data
+    public let durationSeconds: Double
+
+    public init(wavData: Data, durationSeconds: Double) {
+        self.wavData = wavData
+        self.durationSeconds = durationSeconds
+    }
 }
 
 /// Records audio and streams chunks for transcription
-final class StreamingRecorder {
+public final class StreamingRecorder {
     private var audioEngine: AVAudioEngine?
     private var audioBuffer: AudioBuffer?
     private var isRecording = false
@@ -18,10 +23,12 @@ final class StreamingRecorder {
     private var silenceTimer: Timer?
 
     /// Callback when a chunk is ready for transcription
-    var onChunkReady: ((AudioChunk) -> Void)?
+    public var onChunkReady: ((AudioChunk) -> Void)?
     private let sampleRate: Double = 16000
 
-    func start() {
+    public init() {}
+
+    public func start() {
         audioEngine = AVAudioEngine()
         guard let engine = audioEngine else { return }
 
@@ -159,7 +166,7 @@ final class StreamingRecorder {
         lastSoundTime = Date()
     }
 
-    func stop() {
+    public func stop() {
         // Invalidate timers FIRST to prevent callbacks seeing stale state
         chunkTimer?.invalidate()
         chunkTimer = nil

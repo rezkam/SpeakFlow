@@ -5,7 +5,7 @@ import OSLog
 ///
 /// This actor handles the sequencing of transcription chunks, ensuring they are
 /// output in the order they were recorded, regardless of when API responses arrive.
-actor TranscriptionQueue {
+public actor TranscriptionQueue {
     private var pendingResults: [UInt64: String] = [:]
     private var nextSeqToOutput: UInt64 = 0
     private var currentSeq: UInt64 = 0
@@ -22,7 +22,7 @@ actor TranscriptionQueue {
         }
     }
 
-    func reset() {
+    public func reset() {
         pendingResults.removeAll()
         nextSeqToOutput = 0
         currentSeq = 0
@@ -30,7 +30,7 @@ actor TranscriptionQueue {
 
     /// Get the next sequence number for a new chunk
     /// Uses UInt64 to handle billions of chunks without overflow
-    func nextSequence() -> UInt64 {
+    public func nextSequence() -> UInt64 {
         let seq = currentSeq
         // Using wrapping addition for safety, though overflow is practically impossible
         // UInt64.max = 18,446,744,073,709,551,615 chunks
@@ -38,13 +38,13 @@ actor TranscriptionQueue {
         return seq
     }
 
-    func getPendingCount() -> Int {
+    public func getPendingCount() -> Int {
         // Safe subtraction - both are UInt64, result fits in Int for practical counts
         let count = currentSeq - nextSeqToOutput
         return count > Int.max ? Int.max : Int(count)
     }
 
-    func submitResult(seq: UInt64, text: String) {
+    public func submitResult(seq: UInt64, text: String) {
         pendingResults[seq] = text
         flushReady()
     }
@@ -98,12 +98,14 @@ actor TranscriptionQueue {
 /// Migration path: When fully migrating to async/await, this bridge can be removed
 /// and callers can use `for await text in queue.textStream` directly.
 @MainActor
-final class TranscriptionQueueBridge {
+public final class TranscriptionQueueBridge {
     let queue = TranscriptionQueue()
     private var streamTask: Task<Void, Never>?
 
-    var onTextReady: ((String) -> Void)?
-    var onAllComplete: (() -> Void)?
+    public var onTextReady: ((String) -> Void)?
+    public var onAllComplete: (() -> Void)?
+
+    public init() {}
 
     func startListening() {
         streamTask = Task {
@@ -118,19 +120,19 @@ final class TranscriptionQueueBridge {
         streamTask = nil
     }
 
-    func reset() async {
+    public func reset() async {
         await queue.reset()
     }
 
-    func nextSequence() async -> UInt64 {
+    public func nextSequence() async -> UInt64 {
         await queue.nextSequence()
     }
 
-    func getPendingCount() async -> Int {
+    public func getPendingCount() async -> Int {
         await queue.getPendingCount()
     }
 
-    func submitResult(seq: UInt64, text: String) async {
+    public func submitResult(seq: UInt64, text: String) async {
         await queue.submitResult(seq: seq, text: text)
     }
 
@@ -138,7 +140,7 @@ final class TranscriptionQueueBridge {
         await queue.markFailed(seq: seq)
     }
 
-    func checkCompletion() async {
+    public func checkCompletion() async {
         let pending = await queue.getPendingCount()
         if pending == 0 {
             onAllComplete?()

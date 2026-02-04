@@ -1,12 +1,12 @@
 import Foundation
 
 /// Authentication credentials loaded from local storage
-struct AuthCredentials: Sendable {
-    let accessToken: String
-    let accountId: String
-    let cookies: [String: String]
+public struct AuthCredentials: Sendable {
+    public let accessToken: String
+    public let accountId: String
+    public let cookies: [String: String]
 
-    static func load() throws -> AuthCredentials {
+    public static func load() throws -> AuthCredentials {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let authURL = home.appendingPathComponent(".codex/auth.json")
         let authPath = authURL.path

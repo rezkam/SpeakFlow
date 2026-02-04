@@ -10,7 +10,7 @@ private enum KeyCode {
 /// Listens for global hotkey events to activate dictation
 /// All state is accessed on the main thread to prevent race conditions
 @MainActor
-final class HotkeyListener {
+public final class HotkeyListener {
     // Event monitors are typed as Any? because NSEvent.addGlobalMonitorForEvents returns Any?
     // This is Apple's API design, not a type erasure choice
     private var globalMonitor: Any?
@@ -26,9 +26,11 @@ final class HotkeyListener {
     // Current hotkey configuration
     private var currentType: HotkeyType = .doubleTapControl
 
-    var onActivate: (() -> Void)?
+    public var onActivate: (() -> Void)?
 
-    func start(type: HotkeyType) {
+    public init() {}
+
+    public func start(type: HotkeyType) {
         stop()
         currentType = type
 
