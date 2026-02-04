@@ -529,38 +529,15 @@ class AccessibilityPermissionManager {
             alert.messageText = "Accessibility Permission Granted"
             alert.informativeText = """
             The app now has permission to insert dictated text into other applications.
-            
+
             You can start using the dictation feature with ⌃⌥D.
-            
-            Some apps work better if you restart this app. Would you like to restart now?
             """
             alert.alertStyle = .informational
             alert.icon = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Success")
-            
-            alert.addButton(withTitle: "Continue Without Restart")
-            alert.addButton(withTitle: "Restart App")
-            
-            let response = alert.runModal()
-            
-            if response == .alertSecondButtonReturn {
-                log("🔄 Restarting app...")
-                self.restartApp()
-            }
-        }
-    }
-    
-    private func restartApp() {
-        // Get the path to the current executable
-        let task = Process()
-        task.launchPath = "/usr/bin/open"
-        task.arguments = [Bundle.main.bundlePath]
-        
-        // Launch new instance
-        task.launch()
-        
-        // Quit current instance
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NSApp.terminate(nil)
+
+            alert.addButton(withTitle: "OK")
+
+            alert.runModal()
         }
     }
     
