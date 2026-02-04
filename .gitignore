@@ -5,3 +5,4 @@
 *.xcodeproj/
 *.xcworkspace/
 DerivedData/
+*.dmg
