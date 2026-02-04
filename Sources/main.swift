@@ -4,6 +4,7 @@ import HotKey
 import Accelerate
 import ApplicationServices
 import Carbon.HIToolbox
+import ServiceManagement
 
 let logFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".speakflow.log")
 func log(_ msg: String) {
@@ -791,10 +792,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyMenuItem = NSMenuItem(title: "Activation Hotkey", action: nil, keyEquivalent: "")
         hotkeyMenuItem.submenu = hotkeySubmenu
         menu.addItem(hotkeyMenuItem)
+
+        // Launch at Login toggle
+        let launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin(_:)), keyEquivalent: "")
+        launchAtLoginItem.state = isLaunchAtLoginEnabled() ? .on : .off
+        menu.addItem(launchAtLoginItem)
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    private func isLaunchAtLoginEnabled() -> Bool {
+        if #available(macOS 13.0, *) {
+            return SMAppService.mainApp.status == .enabled
+        }
+        return false
+    }
+
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        if #available(macOS 13.0, *) {
+            do {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                    sender.state = .off
+                    log("🚀 Disabled launch at login")
+                } else {
+                    try SMAppService.mainApp.register()
+                    sender.state = .on
+                    log("🚀 Enabled launch at login")
+                }
+            } catch {
+                log("❌ Failed to toggle launch at login: \(error)")
+            }
+        }
     }
 
     @objc private func changeHotkey(_ sender: NSMenuItem) {
