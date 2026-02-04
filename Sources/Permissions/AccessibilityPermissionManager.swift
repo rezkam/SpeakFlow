@@ -6,9 +6,21 @@ import OSLog
 final class AccessibilityPermissionManager {
     private var permissionCheckTimer: Timer?
     private var hasShownInitialPrompt = false
+    private var lastKnownPermissionState: Bool?  // P3 Security: Track permission state changes
+    private var pollAttempts = 0
+    private static let maxPollAttempts = 60  // 60 * 2s = 2 minutes timeout
     weak var delegate: AppDelegate?
 
     func checkAndRequestPermission(showAlertIfNeeded: Bool = true, isAppStart: Bool = false) -> Bool {
+        // P3 Security: Reset prompt flag if permission was revoked since last check
+        // This allows re-prompting users who removed the app from the Accessibility list
+        let currentState = AXIsProcessTrusted()
+        if let lastState = lastKnownPermissionState, lastState && !currentState {
+            hasShownInitialPrompt = false
+            Logger.permissions.info("Permission was revoked, resetting prompt state")
+        }
+        lastKnownPermissionState = currentState
+
         // Use AXIsProcessTrustedWithOptions to automatically add app to the list
         // and trigger system prompt on first call
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !hasShownInitialPrompt] as CFDictionary
@@ -88,13 +100,24 @@ final class AccessibilityPermissionManager {
     }
 
     private func startPollingForPermission() {
-        // Stop any existing timer
+        // Stop any existing timer and reset counter
         permissionCheckTimer?.invalidate()
+        pollAttempts = 0
 
         // Check every 2 seconds if permission has been granted
         permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
+                return
+            }
+
+            self.pollAttempts += 1
+
+            // P2 Security: Timeout after max attempts to prevent infinite polling
+            if self.pollAttempts >= Self.maxPollAttempts {
+                Logger.permissions.warning("Permission polling timed out after \(Self.maxPollAttempts) attempts")
+                timer.invalidate()
+                self.permissionCheckTimer = nil
                 return
             }
 

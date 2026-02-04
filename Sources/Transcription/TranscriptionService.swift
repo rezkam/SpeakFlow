@@ -99,7 +99,10 @@ actor TranscriptionService {
 
         // Validate status code
         guard (200...299).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8)
+            // P2 Security: Truncate error bodies to prevent sensitive data logging
+            let body = String(data: data, encoding: .utf8).map { rawBody in
+                rawBody.count > 200 ? String(rawBody.prefix(200)) + "..." : rawBody
+            }
             throw TranscriptionError.httpError(statusCode: httpResponse.statusCode, body: body)
         }
 
@@ -119,6 +122,14 @@ actor TranscriptionService {
 
     /// Build the multipart form request
     private func buildRequest(audio: Data, credentials: AuthCredentials) throws -> URLRequest {
+        // P0 Security: Validate audio size to prevent memory exhaustion and DoS
+        guard audio.count <= Config.maxAudioSizeBytes else {
+            let sizeMB = Double(audio.count) / 1_000_000
+            let maxMB = Double(Config.maxAudioSizeBytes) / 1_000_000
+            Logger.transcription.error("Audio too large: \(String(format: "%.1f", sizeMB))MB > \(String(format: "%.0f", maxMB))MB limit")
+            throw TranscriptionError.audioTooLarge(size: audio.count, maxSize: Config.maxAudioSizeBytes)
+        }
+
         guard let url = URL(string: "https://chatgpt.com/backend-api/transcribe") else {
             throw TranscriptionError.authenticationFailed(reason: "Invalid URL")
         }
@@ -137,8 +148,21 @@ actor TranscriptionService {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         if !credentials.cookies.isEmpty {
-            let cookieString = credentials.cookies.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
-            request.setValue(cookieString, forHTTPHeaderField: "Cookie")
+            // P1 Security: Sanitize cookie values to prevent header injection
+            let cookieString = credentials.cookies.compactMap { key, value -> String? in
+                // Remove any CR/LF that could inject headers
+                let safeKey = key.replacingOccurrences(of: "\r", with: "")
+                    .replacingOccurrences(of: "\n", with: "")
+                    .replacingOccurrences(of: ";", with: "")
+                let safeValue = value.replacingOccurrences(of: "\r", with: "")
+                    .replacingOccurrences(of: "\n", with: "")
+                    .replacingOccurrences(of: ";", with: "")
+                guard !safeKey.isEmpty else { return nil }
+                return "\(safeKey)=\(safeValue)"
+            }.joined(separator: "; ")
+            if !cookieString.isEmpty {
+                request.setValue(cookieString, forHTTPHeaderField: "Cookie")
+            }
         }
 
         // Build multipart body (using Data(_:) for ASCII-safe strings)

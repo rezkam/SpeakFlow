@@ -9,6 +9,7 @@ enum TranscriptionError: Error, LocalizedError {
     case decodingFailed(underlying: Error)
     case rateLimited(retryAfter: TimeInterval?)
     case cancelled
+    case audioTooLarge(size: Int, maxSize: Int)
 
     var errorDescription: String? {
         switch self {
@@ -29,6 +30,10 @@ enum TranscriptionError: Error, LocalizedError {
             return "Rate limited"
         case .cancelled:
             return "Request cancelled"
+        case .audioTooLarge(let size, let maxSize):
+            let sizeMB = Double(size) / 1_000_000
+            let maxMB = Double(maxSize) / 1_000_000
+            return String(format: "Audio too large (%.1fMB > %.0fMB limit)", sizeMB, maxMB)
         }
     }
 

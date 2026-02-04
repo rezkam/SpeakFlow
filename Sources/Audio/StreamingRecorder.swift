@@ -2,6 +2,12 @@ import AVFoundation
 import Accelerate
 import OSLog
 
+/// Audio chunk with metadata
+struct AudioChunk {
+    let wavData: Data
+    let durationSeconds: Double
+}
+
 /// Records audio and streams chunks for transcription
 final class StreamingRecorder {
     private var audioEngine: AVAudioEngine?
@@ -11,7 +17,8 @@ final class StreamingRecorder {
     private var chunkTimer: Timer?
     private var silenceTimer: Timer?
 
-    var onChunkReady: ((Data) -> Void)?
+    /// Callback when a chunk is ready for transcription
+    var onChunkReady: ((AudioChunk) -> Void)?
     private let sampleRate: Double = 16000
 
     func start() {
@@ -57,6 +64,9 @@ final class StreamingRecorder {
 
                 let frameArray = Array(UnsafeBufferPointer(start: channelData, count: frames))
                 Task {
+                    // P1 Security: Double-check recording state inside Task
+                    // The tap callback may fire after stop() is called
+                    guard self.isRecording else { return }
                     await self.audioBuffer?.append(frames: frameArray, hasSpeech: hasSpeech)
                 }
             }
@@ -64,16 +74,25 @@ final class StreamingRecorder {
 
         do {
             try engine.start()
-            Logger.audio.info("Recording started (min \(Config.minChunkDuration)s, max \(Config.maxChunkDuration)s chunks)")
+            let settings = Settings.shared
+            let isFullRecording = settings.chunkDuration.isFullRecording
 
-            // Check for max duration
+            if isFullRecording {
+                Logger.audio.info("Recording started (full recording mode, max \(settings.maxChunkDuration)s)")
+            } else {
+                Logger.audio.info("Recording started (min \(settings.minChunkDuration)s, max \(settings.maxChunkDuration)s chunks)")
+            }
+
+            // Check for max duration (always enabled)
             chunkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
                 self?.checkMaxDuration()
             }
 
-            // Check for silence
-            silenceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                self?.checkSilence()
+            // Check for silence - only in chunking mode, not full recording
+            if !isFullRecording {
+                silenceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                    self?.checkSilence()
+                }
             }
         } catch {
             Logger.audio.error("Failed to start audio engine: \(error.localizedDescription)")
@@ -81,10 +100,14 @@ final class StreamingRecorder {
     }
 
     private func checkMaxDuration() {
+        // P1 Security: Check recording state before spawning async work
+        guard isRecording else { return }
+
         Task {
-            guard let buffer = audioBuffer else { return }
+            // Double-check state inside Task in case stop() was called
+            guard self.isRecording, let buffer = audioBuffer else { return }
             let duration = await buffer.duration
-            if duration >= Config.maxChunkDuration {
+            if duration >= Settings.shared.maxChunkDuration {
                 await sendChunkIfReady(reason: "max duration")
             }
         }
@@ -94,11 +117,13 @@ final class StreamingRecorder {
         guard isRecording else { return }
 
         Task {
-            guard let buffer = audioBuffer else { return }
+            // P1 Security: Double-check state inside Task in case stop() was called
+            guard self.isRecording, let buffer = audioBuffer else { return }
             let duration = await buffer.duration
 
             // Only send on silence if we have minimum duration
-            if duration >= Config.minChunkDuration && Date().timeIntervalSince(lastSoundTime) >= Config.silenceDuration {
+            if duration >= Settings.shared.minChunkDuration &&
+               Date().timeIntervalSince(lastSoundTime) >= Config.silenceDuration {
                 await sendChunkIfReady(reason: "silence")
             }
         }
@@ -110,12 +135,13 @@ final class StreamingRecorder {
         let result = await buffer.takeAll()
         let duration = Double(result.samples.count) / sampleRate
 
-        guard duration >= Config.minChunkDuration else {
-            Logger.audio.debug("Chunk too short (\(String(format: "%.1f", duration))s < \(Config.minChunkDuration)s)")
+        guard duration >= Settings.shared.minChunkDuration else {
+            Logger.audio.debug("Chunk too short (\(String(format: "%.1f", duration))s < \(Settings.shared.minChunkDuration)s)")
             return
         }
 
-        if result.speechRatio < Config.minSpeechRatio {
+        // Check if we should skip silent chunks (configurable)
+        if Settings.shared.skipSilentChunks && result.speechRatio < Config.minSpeechRatio {
             Logger.audio.debug("Skipping silent chunk (\(String(format: "%.0f", result.speechRatio * 100))% speech)")
             return
         }
@@ -123,9 +149,12 @@ final class StreamingRecorder {
         let durationStr = String(format: "%.1f", duration)
         let speechPct = String(format: "%.0f", result.speechRatio * 100)
         Logger.audio.info("Chunk ready (\(reason)): \(durationStr)s, \(speechPct)% speech")
+
         let wavData = createWav(from: result.samples)
+        let chunk = AudioChunk(wavData: wavData, durationSeconds: duration)
+
         await MainActor.run {
-            onChunkReady?(wavData)
+            onChunkReady?(chunk)
         }
         lastSoundTime = Date()
     }
@@ -149,19 +178,32 @@ final class StreamingRecorder {
             let result = await buffer.takeAll()
             let duration = Double(result.samples.count) / sampleRate
 
-            // On stop, send whatever we have (if it has speech)
-            if duration >= 1.0 && result.speechRatio >= Config.minSpeechRatio {
+            // Minimum duration: 250ms for full recording mode, 1s otherwise
+            let minDurationMs = Double(Config.minRecordingDurationMs) / 1000.0
+            let minDuration = Settings.shared.chunkDuration.isFullRecording ? minDurationMs : 1.0
+
+            // On stop, send whatever we have (if it has speech or skip is disabled)
+            let hasEnoughSpeech = result.speechRatio >= Config.minSpeechRatio
+            let shouldSend = duration >= minDuration && (!Settings.shared.skipSilentChunks || hasEnoughSpeech)
+
+            if shouldSend {
                 Logger.audio.info("Final chunk: \(String(format: "%.1f", duration))s")
                 let wavData = createWav(from: result.samples)
+                let chunk = AudioChunk(wavData: wavData, durationSeconds: duration)
                 await MainActor.run {
-                    onChunkReady?(wavData)
+                    onChunkReady?(chunk)
                 }
+            } else if duration < minDuration {
+                Logger.audio.debug("Recording too short (\(String(format: "%.2f", duration))s < \(String(format: "%.2f", minDuration))s)")
             }
             Logger.audio.info("Recording stopped")
         }
     }
 
     private func createWav(from samples: [Float]) -> Data {
+        // P3 Security: Don't create empty WAV files that waste bandwidth
+        guard !samples.isEmpty else { return Data() }
+
         let int16 = samples.map { Int16(max(-1, min(1, $0)) * 32767) }
         var wav = Data()
         let sr = UInt32(sampleRate)

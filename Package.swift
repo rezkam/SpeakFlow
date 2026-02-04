@@ -14,5 +14,10 @@ let package = Package(
                 .process("Resources")
             ]
         ),
+        // Test target for security and functionality tests
+        .testTarget(
+            name: "SpeakFlowTests",
+            path: "Tests"
+        ),
     ]
 )

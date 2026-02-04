@@ -81,6 +81,9 @@ actor TranscriptionQueue {
     }
 
     func finishStream() {
+        // P2 Security: Resume completion continuation before clearing to prevent caller hang
+        completionContinuation?.resume()
+        completionContinuation = nil
         textContinuation?.finish()
         textContinuation = nil
     }

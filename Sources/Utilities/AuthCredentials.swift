@@ -9,6 +9,13 @@ struct AuthCredentials: Sendable {
     static func load() throws -> AuthCredentials {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let authURL = home.appendingPathComponent(".codex/auth.json")
+        let authPath = authURL.path
+
+        // P1 Security: Check for symlink to prevent path traversal attacks
+        let attrs = try? FileManager.default.attributesOfItem(atPath: authPath)
+        if let fileType = attrs?[.type] as? FileAttributeType, fileType == .typeSymbolicLink {
+            throw TranscriptionError.authenticationFailed(reason: "Auth file cannot be a symlink")
+        }
 
         guard let authData = try? Data(contentsOf: authURL) else {
             throw TranscriptionError.authenticationFailed(reason: "Could not read auth.json")
