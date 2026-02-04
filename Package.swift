@@ -6,13 +6,9 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
-    dependencies: [
-        .package(url: "https://github.com/soffes/HotKey", from: "0.2.0"),
-    ],
     targets: [
         .executableTarget(
             name: "SpeakFlow",
-            dependencies: ["HotKey"],
             path: "Sources",
             resources: [
                 .process("Resources")

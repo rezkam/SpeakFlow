@@ -1,27 +1,25 @@
 import AppKit
 import AVFoundation
-import HotKey
 import Accelerate
 import ApplicationServices
 import Carbon.HIToolbox
 import ServiceManagement
+import OSLog
 
-let logFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".speakflow.log")
-func log(_ msg: String) {
-    let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
-    print(line, terminator: "")
-    fflush(stdout)
-    if let data = line.data(using: .utf8) {
-        if FileManager.default.fileExists(atPath: logFile.path) {
-            if let handle = try? FileHandle(forWritingTo: logFile) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                handle.closeFile()
-            }
-        } else {
-            try? data.write(to: logFile)
-        }
-    }
+// MARK: - Structured Logging
+extension Logger {
+    private static let subsystem = Bundle.main.bundleIdentifier ?? "app.monodo.speakflow"
+
+    /// Audio recording and processing
+    static let audio = Logger(subsystem: subsystem, category: "audio")
+    /// Transcription API and queue
+    static let transcription = Logger(subsystem: subsystem, category: "transcription")
+    /// Accessibility and microphone permissions
+    static let permissions = Logger(subsystem: subsystem, category: "permissions")
+    /// Hotkey detection and handling
+    static let hotkey = Logger(subsystem: subsystem, category: "hotkey")
+    /// General app lifecycle
+    static let app = Logger(subsystem: subsystem, category: "app")
 }
 
 struct Config {
@@ -41,10 +39,10 @@ struct Config {
 
 // MARK: - Hotkey Settings
 enum HotkeyType: String, CaseIterable {
-    case doubleTapControl = "doubleTapControl"
-    case controlOptionD = "controlOptionD"
-    case controlOptionSpace = "controlOptionSpace"
-    case commandShiftD = "commandShiftD"
+    case doubleTapControl
+    case controlOptionD
+    case controlOptionSpace
+    case commandShiftD
 
     var displayName: String {
         switch self {
@@ -71,90 +69,136 @@ class HotkeySettings {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
-            log("⌨️ Hotkey changed to: \(newValue.displayName)")
+            Logger.hotkey.info("Hotkey changed to: \(newValue.displayName)")
         }
     }
 }
 
-// MARK: - Double-Tap Control Key Detector
-class DoubleTapControlDetector {
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var lastControlKeyReleaseTime: Date?
+// MARK: - Hotkey Listener (replaces HotKey library)
+class HotkeyListener {
+    private var globalMonitor: Any?
+    private var flagsMonitor: Any?
+
+    // For double-tap detection
+    private var lastControlReleaseTime: Date?
     private var controlWasDown = false
     private let doubleTapInterval: TimeInterval = 0.4
 
-    var onDoubleTap: (() -> Void)?
+    // Current hotkey configuration
+    private var currentType: HotkeyType = .doubleTapControl
 
-    func start() {
-        guard eventTap == nil else { return }
+    var onActivate: (() -> Void)?
 
-        let eventMask = (1 << CGEventType.flagsChanged.rawValue)
+    func start(type: HotkeyType) {
+        stop()
+        currentType = type
 
-        eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(eventMask),
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
-                let detector = Unmanaged<DoubleTapControlDetector>.fromOpaque(refcon).takeUnretainedValue()
-                detector.handleFlagsChanged(event: event)
-                return Unmanaged.passRetained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        )
+        switch type {
+        case .doubleTapControl:
+            startDoubleTapDetection()
 
-        guard let eventTap = eventTap else {
-            log("❌ Could not create event tap for Control key detection (need Accessibility permission)")
-            return
+        case .controlOptionD, .controlOptionSpace, .commandShiftD:
+            startKeyComboDetection(type: type)
         }
-
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-        guard let source = runLoopSource else { return }
-
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        CGEvent.tapEnable(tap: eventTap, enable: true)
-
-        log("✅ Double-tap Control detector started")
     }
 
     func stop() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMonitor = nil
         }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        if let monitor = flagsMonitor {
+            NSEvent.removeMonitor(monitor)
+            flagsMonitor = nil
         }
-        eventTap = nil
-        runLoopSource = nil
     }
 
-    private func handleFlagsChanged(event: CGEvent) {
-        let flags = event.flags
-        let controlDown = flags.contains(.maskControl)
+    // MARK: - Double-tap Control Detection
+
+    private func startDoubleTapDetection() {
+        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.handleFlagsChanged(event: event)
+        }
+
+        if flagsMonitor != nil {
+            Logger.hotkey.info("Double-tap Control listener started")
+        } else {
+            Logger.hotkey.error("Could not create flags monitor (need Accessibility permission)")
+        }
+    }
+
+    private func handleFlagsChanged(event: NSEvent) {
+        let flags = event.modifierFlags
+        let controlDown = flags.contains(.control)
 
         // Only trigger on Control alone (no other modifiers)
-        let hasOtherModifiers = flags.contains(.maskCommand) ||
-                                flags.contains(.maskAlternate) ||
-                                flags.contains(.maskShift)
+        let hasOtherModifiers = flags.contains(.command) ||
+                                flags.contains(.option) ||
+                                flags.contains(.shift)
 
         // Detect Control key release (was down, now up) with no other modifiers
         if controlWasDown && !controlDown && !hasOtherModifiers {
             let now = Date()
-            if let lastRelease = lastControlKeyReleaseTime,
+            if let lastRelease = lastControlReleaseTime,
                now.timeIntervalSince(lastRelease) < doubleTapInterval {
                 // Double-tap detected!
-                lastControlKeyReleaseTime = nil
+                lastControlReleaseTime = nil
                 DispatchQueue.main.async { [weak self] in
-                    self?.onDoubleTap?()
+                    self?.onActivate?()
                 }
             } else {
-                lastControlKeyReleaseTime = now
+                lastControlReleaseTime = now
             }
         }
 
         controlWasDown = controlDown
+    }
+
+    // MARK: - Key Combo Detection
+
+    private func startKeyComboDetection(type: HotkeyType) {
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleKeyDown(event: event, type: type)
+        }
+
+        if globalMonitor != nil {
+            Logger.hotkey.info("Key combo listener started for \(type.displayName)")
+        } else {
+            Logger.hotkey.error("Could not create key monitor (need Accessibility permission)")
+        }
+    }
+
+    private func handleKeyDown(event: NSEvent, type: HotkeyType) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        switch type {
+        case .controlOptionD:
+            // ⌃⌥D
+            if flags == [.control, .option] && event.keyCode == 2 { // 2 = D
+                DispatchQueue.main.async { [weak self] in
+                    self?.onActivate?()
+                }
+            }
+
+        case .controlOptionSpace:
+            // ⌃⌥Space
+            if flags == [.control, .option] && event.keyCode == 49 { // 49 = Space
+                DispatchQueue.main.async { [weak self] in
+                    self?.onActivate?()
+                }
+            }
+
+        case .commandShiftD:
+            // ⇧⌘D
+            if flags == [.command, .shift] && event.keyCode == 2 { // 2 = D
+                DispatchQueue.main.async { [weak self] in
+                    self?.onActivate?()
+                }
+            }
+
+        case .doubleTapControl:
+            break // Handled by flagsChanged
+        }
     }
 
     deinit {
@@ -252,7 +296,7 @@ class TranscriptionQueue {
         lock.unlock()
         
         for text in textsToOutput {
-            log("📝 Output: \"\(text)\"")
+            Logger.transcription.info("Output: \(text, privacy: .private)")
             onTextReady?(text)
         }
         
@@ -277,7 +321,7 @@ class Transcription {
         
         let waitTime = queue.rateLimiter.timeUntilNextAllowed()
         if waitTime > 0 {
-            log("⏳ Rate limit: waiting \(String(format: "%.1f", waitTime))s")
+            Logger.transcription.debug("Rate limit: waiting \(String(format: "%.1f", waitTime))s")
             DispatchQueue.main.asyncAfter(deadline: .now() + waitTime) { [weak self] in
                 self?.processNextIfReady()
             }
@@ -288,7 +332,7 @@ class Transcription {
         let chunk = pendingAudioChunks.removeFirst()
         queue.rateLimiter.recordRequest()
         
-        log("📤 #\(chunk.seq) attempt \(chunk.attempt) (timeout: \(Config.timeout)s)")
+        Logger.transcription.debug("Sending chunk #\(chunk.seq) attempt \(chunk.attempt) (timeout: \(Config.timeout)s)")
         
         makeRequest(audio: chunk.audio) { [weak self] result in
             guard let self = self else { return }
@@ -296,22 +340,22 @@ class Transcription {
             
             switch result {
             case .success(let text):
-                log("✅ #\(chunk.seq): \"\(text)\"")
+                Logger.transcription.info("Chunk #\(chunk.seq) success: \(text, privacy: .private)")
                 self.queue.submitResult(seq: chunk.seq, text: text)
                 
             case .failure(let error):
-                log("❌ #\(chunk.seq): \(error.localizedDescription)")
+                Logger.transcription.error("Chunk #\(chunk.seq) failed: \(error.localizedDescription)")
                 
                 if chunk.attempt < Config.maxRetries {
                     let delay = Config.retryBaseDelay * pow(2.0, Double(chunk.attempt - 1))
-                    log("🔄 #\(chunk.seq) retry in \(delay)s...")
+                    Logger.transcription.warning("Chunk #\(chunk.seq) retry in \(delay)s...")
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         self.pendingAudioChunks.insert((chunk.seq, chunk.audio, chunk.attempt + 1), at: 0)
                         self.processNextIfReady()
                     }
                     return
                 } else {
-                    log("💀 #\(chunk.seq) gave up")
+                    Logger.transcription.error("Chunk #\(chunk.seq) failed permanently")
                     self.queue.markFailed(seq: chunk.seq)
                 }
             }
@@ -398,7 +442,7 @@ class StreamingRecorder {
             guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
             
             var error: NSError?
-            converter.convert(to: convertedBuffer, error: &error) { inNumPackets, outStatus in
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
                 outStatus.pointee = .haveData
                 return buffer
             }
@@ -421,7 +465,7 @@ class StreamingRecorder {
         
         do {
             try engine.start()
-            log("🎙️ Recording (min \(Config.minChunkDuration)s, max \(Config.maxChunkDuration)s chunks)")
+            Logger.audio.info("Recording started (min \(Config.minChunkDuration)s, max \(Config.maxChunkDuration)s chunks)")
             
             // Check for max duration
             chunkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -432,7 +476,7 @@ class StreamingRecorder {
             silenceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                 self?.checkSilence()
             }
-        } catch { log("❌ \(error)") }
+        } catch { Logger.audio.error("Failed to start audio engine: \(error.localizedDescription)") }
     }
     
     private func checkMaxDuration() {
@@ -470,17 +514,17 @@ class StreamingRecorder {
         
         let duration = Double(samples.count) / sampleRate
         guard duration >= Config.minChunkDuration else {
-            log("⏭️ Too short (\(String(format: "%.1f", duration))s < \(Config.minChunkDuration)s)")
+            Logger.audio.debug("Chunk too short (\(String(format: "%.1f", duration))s < \(Config.minChunkDuration)s)")
             return
         }
         
         let speechRatio = total > 0 ? Float(speech) / Float(total) : 0
         if speechRatio < Config.minSpeechRatio {
-            log("⏭️ Skip silent (\(String(format: "%.0f", speechRatio * 100))%)")
+            Logger.audio.debug("Skipping silent chunk (\(String(format: "%.0f", speechRatio * 100))% speech)")
             return
         }
         
-        log("🎤 Chunk (\(reason)): \(String(format: "%.1f", duration))s, \(String(format: "%.0f", speechRatio * 100))% speech")
+        Logger.audio.info("Chunk ready (\(reason)): \(String(format: "%.1f", duration))s, \(String(format: "%.0f", speechRatio * 100))% speech")
         onChunkReady?(createWav(from: samples))
         lastSoundTime = Date()
     }
@@ -504,10 +548,10 @@ class StreamingRecorder {
         
         // On stop, send whatever we have (if it has speech)
         if duration >= 1.0 && speechRatio >= Config.minSpeechRatio {
-            log("🎤 Final chunk: \(String(format: "%.1f", duration))s")
+            Logger.audio.info("Final chunk: \(String(format: "%.1f", duration))s")
             onChunkReady?(createWav(from: samples))
         }
-        log("⏹️ Stopped")
+        Logger.audio.info("Recording stopped")
     }
     
     private func createWav(from samples: [Float]) -> Data {
@@ -546,7 +590,7 @@ class AccessibilityPermissionManager {
         if !hasShownInitialPrompt {
             hasShownInitialPrompt = true
             if !trusted {
-                log("🔔 App added to Accessibility list, system prompt shown")
+                Logger.permissions.info("App added to Accessibility list, system prompt shown")
             }
         }
         
@@ -596,10 +640,10 @@ class AccessibilityPermissionManager {
                 self.openAccessibilitySettings()
                 
             case .alertSecondButtonReturn: // Remind Me Later
-                log("⏰ User postponed accessibility permission")
+                Logger.permissions.info("User postponed accessibility permission")
                 
             case .alertThirdButtonReturn: // Quit
-                log("👋 User chose to quit")
+                Logger.app.info("User chose to quit from permission dialog")
                 NSApp.terminate(nil)
                 
             default:
@@ -619,7 +663,7 @@ class AccessibilityPermissionManager {
             NSWorkspace.shared.open(url)
         }
         
-        log("🔓 Opened System Settings > Privacy & Security > Accessibility")
+        Logger.permissions.debug("Opened System Settings > Privacy & Security > Accessibility")
     }
     
     private func startPollingForPermission() {
@@ -635,7 +679,7 @@ class AccessibilityPermissionManager {
             
             let trusted = AXIsProcessTrusted()
             if trusted {
-                log("✅ Accessibility permission granted!")
+                Logger.permissions.info("Accessibility permission granted")
                 timer.invalidate()
                 self.permissionCheckTimer = nil
 
@@ -683,8 +727,7 @@ class AccessibilityPermissionManager {
 // MARK: - App Delegate
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
-    var hotKey: HotKey?
-    var controlDetector: DoubleTapControlDetector?
+    var hotkeyListener: HotkeyListener?
     var recorder: StreamingRecorder?
     var isRecording = false
     var isProcessingFinal = false  // Track if we're waiting for final transcriptions
@@ -703,17 +746,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Check accessibility permission - ALWAYS show alert on app start if not granted
         let trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true, isAppStart: true)
-        log("AXIsProcessTrusted: \(trusted)")
+        Logger.permissions.debug("AXIsProcessTrusted: \(trusted)")
         
         if !trusted {
-            log("⚠️ No Accessibility permission - showing permission request...")
+            Logger.permissions.warning("No Accessibility permission - showing permission request")
         } else {
-            log("✅ Accessibility permission granted")
+            Logger.permissions.info("Accessibility permission already granted")
         }
         
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
-        log("SpeakFlow ready - \(hotkeyName)")
-        log("Config: min=\(Config.minChunkDuration)s, max=\(Config.maxChunkDuration)s, rate=\(Config.minTimeBetweenRequests)s")
+        Logger.app.info("SpeakFlow ready - \(hotkeyName)")
+        Logger.app.debug("Config: min=\(Config.minChunkDuration)s, max=\(Config.maxChunkDuration)s, rate=\(Config.minTimeBetweenRequests)s")
         
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
@@ -816,14 +859,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if SMAppService.mainApp.status == .enabled {
                     try SMAppService.mainApp.unregister()
                     sender.state = .off
-                    log("🚀 Disabled launch at login")
+                    Logger.app.info("Disabled launch at login")
                 } else {
                     try SMAppService.mainApp.register()
                     sender.state = .on
-                    log("🚀 Enabled launch at login")
+                    Logger.app.info("Enabled launch at login")
                 }
             } catch {
-                log("❌ Failed to toggle launch at login: \(error)")
+                Logger.app.error("Failed to toggle launch at login: \(error.localizedDescription)")
             }
         }
     }
@@ -840,35 +883,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func setupHotkey() {
-        // Disable previous hotkey handlers
-        hotKey = nil
-        controlDetector?.stop()
-        controlDetector = nil
-
         let type = HotkeySettings.shared.currentHotkey
 
-        switch type {
-        case .doubleTapControl:
-            controlDetector = DoubleTapControlDetector()
-            controlDetector?.onDoubleTap = { [weak self] in self?.toggle() }
-            controlDetector?.start()
-            log("⌨️ Using double-tap Control activation")
-
-        case .controlOptionD:
-            hotKey = HotKey(key: .d, modifiers: [.control, .option])
-            hotKey?.keyDownHandler = { [weak self] in self?.toggle() }
-            log("⌨️ Using ⌃⌥D activation")
-
-        case .controlOptionSpace:
-            hotKey = HotKey(key: .space, modifiers: [.control, .option])
-            hotKey?.keyDownHandler = { [weak self] in self?.toggle() }
-            log("⌨️ Using ⌃⌥Space activation")
-
-        case .commandShiftD:
-            hotKey = HotKey(key: .d, modifiers: [.command, .shift])
-            hotKey?.keyDownHandler = { [weak self] in self?.toggle() }
-            log("⌨️ Using ⇧⌘D activation")
+        if hotkeyListener == nil {
+            hotkeyListener = HotkeyListener()
+            hotkeyListener?.onActivate = { [weak self] in self?.toggle() }
         }
+
+        hotkeyListener?.start(type: type)
+        Logger.hotkey.info("Using \(type.displayName) activation")
     }
     
     func updateStatusIcon() {
@@ -887,7 +910,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func loadMenuBarIcon() -> NSImage? {
         guard let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
               let image = NSImage(contentsOf: url) else {
-            log("⚠️ Could not load AppIcon.png from bundle")
+            Logger.app.warning("Could not load AppIcon.png from bundle")
             return nil
         }
 
@@ -961,7 +984,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Check accessibility permission before starting
         if !AXIsProcessTrusted() {
-            log("⚠️ Cannot start recording - accessibility permission required")
+            Logger.permissions.warning("Cannot start recording - accessibility permission required")
             NSSound(named: "Basso")?.play()
             _ = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
             return
@@ -972,7 +995,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .authorized:
             break // Permission granted, continue
         case .notDetermined:
-            log("⚠️ Microphone permission not yet requested")
+            Logger.permissions.info("Microphone permission not yet requested")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     if granted {
@@ -984,12 +1007,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         case .denied, .restricted:
-            log("⚠️ Microphone permission denied")
+            Logger.permissions.warning("Microphone permission denied")
             NSSound(named: "Basso")?.play()
             showMicrophonePermissionAlert()
             return
         @unknown default:
-            log("⚠️ Unknown microphone permission status")
+            Logger.permissions.warning("Unknown microphone permission status")
             return
         }
 
@@ -1001,18 +1024,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Capture the focused element NOW so we can insert text there later
         let systemWide = AXUIElementCreateSystemWide()
         var focusedElement: AnyObject?
-        if AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success {
-            targetElement = (focusedElement as! AXUIElement)
+        if AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
+           let element = focusedElement {
+            // swiftlint:disable:next force_cast
+            targetElement = (element as! AXUIElement)
 
             // Log element info for debugging
-            var role: AnyObject?
-            var title: AnyObject?
-            AXUIElementCopyAttributeValue(targetElement!, kAXRoleAttribute as CFString, &role)
-            AXUIElementCopyAttributeValue(targetElement!, kAXTitleAttribute as CFString, &title)
-            log("🎯 Captured target: role=\(role ?? "?" as AnyObject), title=\(title ?? "?" as AnyObject)")
+            if let target = targetElement {
+                var role: AnyObject?
+                var title: AnyObject?
+                AXUIElementCopyAttributeValue(target, kAXRoleAttribute as CFString, &role)
+                AXUIElementCopyAttributeValue(target, kAXTitleAttribute as CFString, &title)
+                Logger.audio.debug("Captured target element: role=\(String(describing: role)), title=\(String(describing: title))")
+            }
         } else {
             targetElement = nil
-            log("⚠️ Could not capture focused element")
+            Logger.audio.warning("Could not capture focused element")
         }
 
         updateStatusIcon()
@@ -1031,21 +1058,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func checkMicrophonePermission() {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            log("✅ Microphone permission granted")
+            Logger.permissions.info("Microphone permission granted")
             micPermissionTimer?.invalidate()
             micPermissionTimer = nil
             updateStatusIcon()
             updateMenu(trusted: AXIsProcessTrusted())
         case .notDetermined:
-            log("🔔 Requesting microphone permission...")
+            Logger.permissions.info("Requesting microphone permission...")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     if granted {
-                        log("✅ Microphone permission granted")
+                        Logger.permissions.info("Microphone permission granted")
                         self?.updateStatusIcon()
                         self?.updateMenu(trusted: AXIsProcessTrusted())
                     } else {
-                        log("⚠️ Microphone permission denied by user")
+                        Logger.permissions.warning("Microphone permission denied by user")
                         self?.showMicrophonePermissionAlert()
                         self?.startMicrophonePermissionPolling()
                     }
@@ -1054,13 +1081,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Also start polling in case callback doesn't fire
             startMicrophonePermissionPolling()
         case .denied, .restricted:
-            log("⚠️ Microphone permission denied - showing alert")
+            Logger.permissions.warning("Microphone permission denied - showing alert")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.showMicrophonePermissionAlert()
             }
             startMicrophonePermissionPolling()
         @unknown default:
-            log("⚠️ Unknown microphone permission status")
+            Logger.permissions.warning("Unknown microphone permission status")
         }
     }
 
@@ -1069,7 +1096,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         micPermissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
             let status = AVCaptureDevice.authorizationStatus(for: .audio)
             if status == .authorized {
-                log("✅ Microphone permission granted (detected via polling)")
+                Logger.permissions.info("Microphone permission granted (detected via polling)")
                 timer.invalidate()
                 self?.micPermissionTimer = nil
                 self?.updateStatusIcon()
@@ -1128,7 +1155,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let pending = Transcription.shared.queue.getPendingCount()
         if pending > 0 {
-            log("⏳ Waiting for \(pending) pending...")
+            Logger.transcription.debug("Waiting for \(pending) pending transcriptions")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 self?.finishIfDone()
             }
@@ -1141,20 +1168,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusIcon()
         guard !fullTranscript.isEmpty else { return }
 
-        log("📝 Final transcript: \"\(fullTranscript)\"")
+        Logger.transcription.info("Session complete: \(self.fullTranscript, privacy: .private)")
         NSSound(named: "Glass")?.play()
     }
     
     func insertText(_ text: String) {
-        log("📋 Insert: \"\(text)\"")
+        Logger.app.debug("Inserting text: \(text, privacy: .private)")
         // Use CGEvent typing - most reliable method that works across all apps
         typeText(text)
-        log("✅ Typed via CGEvent")
+        Logger.app.debug("Text typed via CGEvent")
     }
     
     func typeText(_ text: String) {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
-            log("❌ Could not create CGEventSource")
+            Logger.app.error("Could not create CGEventSource")
             return
         }
 
@@ -1163,7 +1190,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                   let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
-                log("❌ Could not create CGEvent for char: \(char)")
+                Logger.app.error("Could not create CGEvent for character")
                 continue
             }
 
