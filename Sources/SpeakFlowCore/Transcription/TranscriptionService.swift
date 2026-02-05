@@ -7,8 +7,20 @@ struct TranscriptionResponse: Decodable {
 }
 
 /// Actor-based transcription service with async/await and automatic retry
-actor TranscriptionService {
-    static let shared = TranscriptionService()
+public actor TranscriptionService {
+    public static let shared = TranscriptionService()
+
+    /// P2 Security: Truncate error body Data before converting to String
+    /// This prevents loading multi-megabyte error responses into memory
+    public static func truncateErrorBody(_ data: Data, maxBytes: Int = 200) -> String {
+        if data.count <= maxBytes {
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        // Truncate at Data level to avoid loading full string into memory
+        let truncatedData = data.prefix(maxBytes)
+        let truncatedString = String(data: truncatedData, encoding: .utf8) ?? ""
+        return truncatedString + "..."
+    }
 
     private let rateLimiter = RateLimiter()
     private var activeTasks: [Int: Task<String, Error>] = [:]
@@ -99,11 +111,10 @@ actor TranscriptionService {
 
         // Validate status code
         guard (200...299).contains(httpResponse.statusCode) else {
-            // P2 Security: Truncate error bodies to prevent sensitive data logging
-            let body = String(data: data, encoding: .utf8).map { rawBody in
-                rawBody.count > 200 ? String(rawBody.prefix(200)) + "..." : rawBody
-            }
-            throw TranscriptionError.httpError(statusCode: httpResponse.statusCode, body: body)
+            // P2 Security: Truncate error body at Data level to prevent loading
+            // multi-megabyte responses into memory before truncation
+            let body = Self.truncateErrorBody(data, maxBytes: 200)
+            throw TranscriptionError.httpError(statusCode: httpResponse.statusCode, body: body.isEmpty ? nil : body)
         }
 
         // Decode response
