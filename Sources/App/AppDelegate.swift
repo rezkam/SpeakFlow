@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     var permissionManager: AccessibilityPermissionManager!
     var targetElement: AXUIElement?  // Store focused element when recording starts
     private var textInsertionTask: Task<Void, Never>?  // Track ongoing text insertion
+    private var queuedInsertionCount = 0  // P3 Security: Track queue depth to enforce limit
 
     // Menu bar icons
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
@@ -470,6 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         targetElement = nil
         textInsertionTask?.cancel()
         textInsertionTask = nil
+        queuedInsertionCount = 0  // P3 Security: Reset queue count on cancel
         recorder?.stop()
         recorder = nil
         Transcription.shared.cancelAll()
@@ -493,6 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             isProcessingFinal = false
             targetElement = nil
             textInsertionTask = nil
+            queuedInsertionCount = 0  // P3 Security: Reset queue count on timeout
             updateStatusIcon()
             return
         }
@@ -514,6 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 self.isProcessingFinal = false
                 self.targetElement = nil  // Clear stored element
                 self.textInsertionTask = nil  // Clear completed task
+                self.queuedInsertionCount = 0  // P3 Security: Reset queue count on completion
                 self.updateStatusIcon()
                 guard !self.fullTranscript.isEmpty else { return }
 
@@ -551,14 +555,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
         guard !textToInsert.isEmpty else { return }
 
+        // P3 Security: Enforce queue depth limit to prevent unbounded task chains
+        guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
+            Logger.app.warning("Text insertion queue full (\(Config.maxQueuedTextInsertions) pending), dropping text")
+            return
+        }
+
         Logger.app.debug("Inserting text: \(textToInsert, privacy: .private)")
 
         // Chain text insertion tasks to ensure they complete in order
+        queuedInsertionCount += 1
         let previousTask = textInsertionTask
-        textInsertionTask = Task {
+        textInsertionTask = Task { [weak self] in
+            defer {
+                Task { @MainActor in
+                    self?.queuedInsertionCount -= 1
+                }
+            }
             // Wait for any previous insertion to complete
             await previousTask?.value
-            await typeTextAsync(textToInsert)
+            await self?.typeTextAsync(textToInsert)
             Logger.app.debug("Text typed via CGEvent")
         }
     }

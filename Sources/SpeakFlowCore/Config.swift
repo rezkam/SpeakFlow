@@ -29,6 +29,11 @@ public enum Config {
     public static let maxRetries: Int = 2
     /// Base delay for exponential backoff (seconds)
     public static let retryBaseDelay: Double = 5.0
+
+    // MARK: - Text Insertion Limits (Fixed)
+    /// P3 Security: Maximum queued text insertions to prevent unbounded task chains
+    /// If chunks arrive faster than text can be typed, older insertions are dropped
+    public static let maxQueuedTextInsertions: Int = 10
 }
 
 // MARK: - Chunk Duration Options

@@ -106,6 +106,17 @@ struct SecurityTests {
         #expect(Config.retryBaseDelay == 5.0, "Base retry delay should be 5s")
     }
 
+    // MARK: - P3: Text Insertion Queue Limits
+
+    @Test("Config.maxQueuedTextInsertions limits queue depth")
+    func testMaxQueuedTextInsertions() {
+        // Test that Config has a reasonable limit on queued text insertions
+        // Without this limit, rapid chunk arrivals could create unbounded task chains
+        #expect(Config.maxQueuedTextInsertions > 0, "Must have positive limit")
+        #expect(Config.maxQueuedTextInsertions <= 50, "Limit should be reasonable (not too high)")
+        #expect(Config.maxQueuedTextInsertions >= 5, "Limit should allow some buffering")
+    }
+
     // MARK: - ChunkDuration Tests
 
     @Test("ChunkDuration.fullRecording is 1 hour")
@@ -207,7 +218,58 @@ struct AudioBufferTests {
     }
 }
 
-// MARK: - Statistics Tests
+// MARK: - P2: Error Body Truncation Tests
+
+struct ErrorBodyTruncationTests {
+
+    @Test("Large error body Data is truncated before String conversion")
+    func testErrorBodyDataTruncation() {
+        // Create a 1MB error body
+        let largeBody = String(repeating: "x", count: 1_000_000)
+        let data = Data(largeBody.utf8)
+
+        // Test the truncation helper that should exist in TranscriptionService
+        // This test will FAIL until we add the helper
+        let truncated = TranscriptionService.truncateErrorBody(data, maxBytes: 200)
+
+        #expect(truncated.count <= 203, "Truncated body should be max 200 chars + '...'")
+        #expect(truncated.hasSuffix("..."), "Truncated body should end with ellipsis")
+    }
+
+    @Test("Small error body is not truncated")
+    func testSmallErrorBodyNotTruncated() {
+        let smallBody = "Error: Bad request"
+        let data = Data(smallBody.utf8)
+
+        let result = TranscriptionService.truncateErrorBody(data, maxBytes: 200)
+
+        #expect(result == smallBody, "Small body should not be truncated")
+        #expect(!result.hasSuffix("..."), "Small body should not have ellipsis")
+    }
+}
+
+// MARK: - P3: Statistics Actor Isolation Tests
+
+struct StatisticsActorTests {
+
+    @Test("Statistics can be called from non-MainActor context")
+    func testStatisticsFromBackgroundContext() async {
+        // This test verifies Statistics works correctly from any actor context
+        // After fix: Statistics should be a proper actor, not @MainActor class
+
+        // Call from a detached task (non-MainActor)
+        await Task.detached {
+            await Statistics.shared.recordApiCall()
+            await Statistics.shared.recordTranscription(text: "Test", audioDurationSeconds: 1.0)
+        }.value
+
+        // Should complete without actor isolation issues
+        let summary = await Statistics.shared.summary
+        #expect(summary.contains("API"), "Should track API calls from any context")
+    }
+}
+
+// MARK: - Statistics Tests (MainActor)
 
 @MainActor
 struct StatisticsIntegrationTests {
