@@ -4,12 +4,14 @@ import OSLog
 
 /// Audio chunk with metadata
 public struct AudioChunk {
-    public let wavData: Data
+    public let audioData: Data
     public let durationSeconds: Double
+    public let mimeType: String
 
-    public init(wavData: Data, durationSeconds: Double) {
-        self.wavData = wavData
+    public init(audioData: Data, durationSeconds: Double, mimeType: String = "audio/mp4") {
+        self.audioData = audioData
         self.durationSeconds = durationSeconds
+        self.mimeType = mimeType
     }
 }
 
@@ -167,8 +169,8 @@ public final class StreamingRecorder {
         let speechPct = String(format: "%.0f", result.speechRatio * 100)
         Logger.audio.info("Chunk ready (\(reason)): \(durationStr)s, \(speechPct)% speech")
 
-        let wavData = createWav(from: result.samples)
-        let chunk = AudioChunk(wavData: wavData, durationSeconds: duration)
+        let audioData = await createM4A(from: result.samples)
+        let chunk = AudioChunk(audioData: audioData, durationSeconds: duration)
 
         await MainActor.run {
             onChunkReady?(chunk)
@@ -215,8 +217,8 @@ public final class StreamingRecorder {
 
             if shouldSend {
                 Logger.audio.info("Final chunk: \(String(format: "%.1f", duration))s")
-                let wavData = createWav(from: result.samples)
-                let chunk = AudioChunk(wavData: wavData, durationSeconds: duration)
+                let audioData = await self.createM4A(from: result.samples)
+                let chunk = AudioChunk(audioData: audioData, durationSeconds: duration)
                 await MainActor.run {
                     onChunkReady?(chunk)
                 }
@@ -227,8 +229,73 @@ public final class StreamingRecorder {
         }
     }
 
-    private func createWav(from samples: [Float]) -> Data {
-        // P3 Security: Don't create empty WAV files that waste bandwidth
+    /// Encode samples to M4A (AAC) format - smaller files, ~5x compression vs WAV
+    private func createM4A(from samples: [Float]) async -> Data {
+        // Don't create empty files
+        guard !samples.isEmpty else { return Data() }
+
+        // Create temporary file for AVAudioFile output
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("m4a")
+
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+
+        do {
+            // AAC encoding settings - 32kbps is excellent for voice
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: Config.audioBitrate
+            ]
+
+            let outputFile = try AVAudioFile(forWriting: tempURL, settings: settings)
+
+            // Create PCM buffer from samples
+            guard let format = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sampleRate,
+                channels: 1,
+                interleaved: false
+            ) else {
+                Logger.audio.error("Failed to create audio format for M4A encoding")
+                return createWavFallback(from: samples)
+            }
+
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else {
+                Logger.audio.error("Failed to create PCM buffer for M4A encoding")
+                return createWavFallback(from: samples)
+            }
+
+            // Copy samples to buffer
+            if let channelData = buffer.floatChannelData?[0] {
+                for (index, sample) in samples.enumerated() {
+                    channelData[index] = sample
+                }
+                buffer.frameLength = AVAudioFrameCount(samples.count)
+            }
+
+            // Write to file (this performs AAC encoding)
+            try outputFile.write(from: buffer)
+
+            // Read encoded data
+            let m4aData = try Data(contentsOf: tempURL)
+            let compression = Double(samples.count * 4) / Double(m4aData.count)
+            Logger.audio.debug("M4A encoded: \(m4aData.count) bytes (\(String(format: "%.1f", compression))x compression)")
+
+            return m4aData
+
+        } catch {
+            Logger.audio.error("M4A encoding failed: \(error.localizedDescription), falling back to WAV")
+            return createWavFallback(from: samples)
+        }
+    }
+
+    /// Fallback to WAV if M4A encoding fails
+    private func createWavFallback(from samples: [Float]) -> Data {
         guard !samples.isEmpty else { return Data() }
 
         let int16 = samples.map { Int16(max(-1, min(1, $0)) * 32767) }

@@ -13,9 +13,11 @@ public enum Config {
     // MARK: - Audio Limits (Fixed)
     /// Sample rate for audio recording (Hz)
     public static let sampleRate: Double = 16000
+    /// M4A (AAC) encoding bitrate - 32kbps is excellent for voice
+    public static let audioBitrate: Int = 32000
     /// Minimum recording duration in milliseconds (matches Codex behavior)
     public static let minRecordingDurationMs: Int = 250
-    /// Maximum audio file size in bytes (25MB - covers ~7 minutes at 16kHz mono 16-bit)
+    /// Maximum audio file size in bytes (25MB API limit - covers ~100 min M4A at 32kbps)
     public static let maxAudioSizeBytes: Int = 25_000_000
     /// Maximum recording duration when chunking is disabled (1 hour, matches Codex)
     public static let maxFullRecordingDuration: Double = 3600.0
