@@ -28,6 +28,9 @@ cp ".build/release/$APP_NAME" "$APP_NAME.app/Contents/MacOS/"
 # Copy resources
 cp -r ".build/release/${APP_NAME}_${APP_NAME}.bundle" "$APP_NAME.app/Contents/Resources/" 2>/dev/null || true
 
+# Copy menu bar icon to main Resources (needed for Bundle.main access)
+cp Sources/Resources/AppIcon.png "$APP_NAME.app/Contents/Resources/"
+
 # Create icon
 echo "🎨 Creating app icon..."
 mkdir -p AppIcon.iconset
