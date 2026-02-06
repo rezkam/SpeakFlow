@@ -23,12 +23,12 @@ public enum Config {
     // MARK: - API Settings (Fixed)
     /// Minimum seconds between API requests (rate limiting)
     public static let minTimeBetweenRequests: Double = 10.0
-    /// Request timeout in seconds
-    public static let timeout: Double = 30.0
+    /// Request timeout in seconds (short to allow retries within 30s total)
+    public static let timeout: Double = 8.0
     /// Maximum retry attempts for failed requests
-    public static let maxRetries: Int = 2
+    public static let maxRetries: Int = 3
     /// Base delay for exponential backoff (seconds)
-    public static let retryBaseDelay: Double = 5.0
+    public static let retryBaseDelay: Double = 1.5
 
     // MARK: - Text Insertion Limits (Fixed)
     /// P3 Security: Maximum queued text insertions to prevent unbounded task chains

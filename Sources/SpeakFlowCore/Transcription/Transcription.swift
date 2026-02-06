@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import OSLog
 
@@ -42,6 +43,11 @@ public final class Transcription {
             } catch {
                 Logger.transcription.error("Chunk #\(seq) failed: \(error.localizedDescription)")
                 await self?.queueBridge.markFailed(seq: seq)
+                
+                // Play error sound to notify user that transcription failed
+                await MainActor.run {
+                    NSSound(named: "Basso")?.play()
+                }
             }
 
             await self?.queueBridge.checkCompletion()
