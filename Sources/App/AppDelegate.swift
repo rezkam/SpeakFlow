@@ -160,7 +160,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
         // Statistics
         menu.addItem(NSMenuItem(title: "View Statistics...", action: #selector(showStatistics), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Reset Statistics...", action: #selector(resetStatistics), keyEquivalent: ""))
         menu.addItem(.separator())
 
         // Launch at Login toggle
@@ -236,27 +235,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         alert.informativeText = Statistics.shared.summary
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
+        alert.addButton(withTitle: "Reset...")
 
-    @objc private func resetStatistics() {
-        let alert = NSAlert()
-        alert.messageText = "Reset Statistics?"
-        alert.informativeText = "This will permanently reset all transcription statistics to zero."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Reset")
-        alert.addButton(withTitle: "Cancel")
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            Statistics.shared.reset()
-
-            // Show confirmation
+        if alert.runModal() == .alertSecondButtonReturn {
+            // User clicked Reset - confirm
             let confirmAlert = NSAlert()
-            confirmAlert.messageText = "Statistics Reset"
-            confirmAlert.informativeText = "All statistics have been reset to zero."
-            confirmAlert.alertStyle = .informational
-            confirmAlert.addButton(withTitle: "OK")
-            confirmAlert.runModal()
+            confirmAlert.messageText = "Reset Statistics?"
+            confirmAlert.informativeText = "This will permanently reset all transcription statistics to zero."
+            confirmAlert.alertStyle = .warning
+            confirmAlert.addButton(withTitle: "Reset")
+            confirmAlert.addButton(withTitle: "Cancel")
+
+            if confirmAlert.runModal() == .alertFirstButtonReturn {
+                Statistics.shared.reset()
+            }
         }
     }
 
