@@ -72,8 +72,9 @@ public enum ChunkDuration: Double, CaseIterable {
             // For full recording mode, use a very short minimum (250ms like Codex)
             return 0.25
         default:
-            // Min is roughly 1/6 of max, with a floor of 5 seconds
-            return max(5.0, rawValue / 6.0)
+            // Min equals max - chunks are sent at the selected duration
+            // (silence detection only skips silent chunks, doesn't trigger early sends)
+            return rawValue
         }
     }
 }
