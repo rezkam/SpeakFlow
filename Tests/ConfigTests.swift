@@ -30,10 +30,8 @@ struct ConfigTests {
     
     @Test("Timeout allows retries within 30 seconds")
     func testTimeoutForFastRetries() {
-        // Worst case: timeout + delay + timeout + delay*2 + timeout
-        // = 8 + 1.5 + 8 + 3 + 8 = 28.5 seconds
-        let worstCase = Config.timeout + Config.retryBaseDelay + 
-                        Config.timeout + (Config.retryBaseDelay * 2) + 
+        let worstCase = Config.timeout + Config.retryBaseDelay +
+                        Config.timeout + (Config.retryBaseDelay * 2) +
                         Config.timeout
         #expect(worstCase <= 30.0, "Worst case retry should complete within 30 seconds")
     }
@@ -41,7 +39,7 @@ struct ConfigTests {
     @Test("maxQueuedTextInsertions has reasonable bounds")
     func testMaxQueuedTextInsertions() {
         #expect(Config.maxQueuedTextInsertions > 0, "Must have positive limit")
-        #expect(Config.maxQueuedTextInsertions <= 50, "Limit should be reasonable (not too high)")
+        #expect(Config.maxQueuedTextInsertions <= 50, "Limit should be reasonable")
         #expect(Config.maxQueuedTextInsertions >= 5, "Limit should allow some buffering")
     }
 }
@@ -57,6 +55,7 @@ struct ChunkDurationTests {
     }
     
     @Test("minDuration equals selected duration for chunks")
+    @MainActor
     func testChunkMinDuration() {
         #expect(ChunkDuration.minute1.minDuration == 60.0, "1 min chunk should have 60s min")
         #expect(ChunkDuration.seconds30.minDuration == 30.0, "30s chunk should have 30s min")
@@ -77,6 +76,7 @@ struct ChunkDurationTests {
 struct AccessibilityPermissionManagerTests {
     
     @Test("maxPollAttempts has finite limit")
+    @MainActor
     func testPermissionPollingLimit() {
         #expect(AccessibilityPermissionManager.maxPollAttempts == 60, "Max poll attempts should be 60")
         #expect(AccessibilityPermissionManager.maxPollAttempts > 0, "Must have positive limit")

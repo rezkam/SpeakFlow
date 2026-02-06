@@ -1,5 +1,5 @@
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import OSLog
 
 /// Protocol for permission manager delegate callbacks
@@ -10,6 +10,7 @@ public protocol AccessibilityPermissionDelegate: AnyObject {
 }
 
 /// Manages accessibility permission requests and monitoring
+@MainActor
 public final class AccessibilityPermissionManager {
     private var permissionCheckTimer: Timer?
     private var hasShownInitialPrompt = false
@@ -32,7 +33,9 @@ public final class AccessibilityPermissionManager {
 
         // Use AXIsProcessTrustedWithOptions to automatically add app to the list
         // and trigger system prompt on first call
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !hasShownInitialPrompt] as CFDictionary
+        // Access the accessibility constant - safe on MainActor
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        let options = [promptKey: !hasShownInitialPrompt] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(options)
 
         if !hasShownInitialPrompt {
@@ -170,9 +173,5 @@ public final class AccessibilityPermissionManager {
     public func stopPolling() {
         permissionCheckTimer?.invalidate()
         permissionCheckTimer = nil
-    }
-
-    deinit {
-        stopPolling()
     }
 }

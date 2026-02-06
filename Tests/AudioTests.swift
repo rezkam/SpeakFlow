@@ -7,6 +7,7 @@ import Testing
 struct AudioBufferTests {
     
     @Test("AudioBuffer enforces maximum sample limit")
+    @MainActor
     func testAudioBufferEnforcesMaxSamples() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         let expectedMaxSamples = Int(Config.maxFullRecordingDuration * 16000 * 1.1)
@@ -21,6 +22,7 @@ struct AudioBufferTests {
     }
     
     @Test("AudioBuffer tracks speech ratio correctly")
+    @MainActor
     func testSpeechRatioTracking() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         
@@ -33,6 +35,7 @@ struct AudioBufferTests {
     }
     
     @Test("AudioBuffer.takeAll clears buffer")
+    @MainActor
     func testTakeAllClearsBuffer() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         
@@ -45,6 +48,7 @@ struct AudioBufferTests {
     }
     
     @Test("AudioBuffer.duration is calculated correctly")
+    @MainActor
     func testDurationCalculation() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         
@@ -55,6 +59,7 @@ struct AudioBufferTests {
     }
     
     @Test("AudioBuffer.isAtCapacity works correctly")
+    @MainActor
     func testIsAtCapacity() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         
@@ -74,6 +79,7 @@ struct AudioBufferTests {
 struct StreamingRecorderTests {
     
     @Test("StreamingRecorder has cancel() method")
+    @MainActor
     func testCancelMethodExists() {
         let recorder = StreamingRecorder()
         recorder.cancel()
@@ -81,6 +87,7 @@ struct StreamingRecorderTests {
     }
     
     @Test("cancel() does not emit chunk")
+    @MainActor
     func testCancelDoesNotEmitChunk() async {
         var chunkEmitted = false
         
@@ -96,6 +103,7 @@ struct StreamingRecorderTests {
     }
     
     @Test("cancel() sets internal cancelled flag")
+    @MainActor
     func testCancelSetsFlag() async {
         let recorder = StreamingRecorder()
         var chunkEmitted = false
@@ -111,6 +119,7 @@ struct StreamingRecorderTests {
     }
     
     @Test("cancel() followed by stop() does not double-process")
+    @MainActor
     func testCancelThenStopSafe() async {
         let recorder = StreamingRecorder()
         var emitCount = 0
@@ -128,6 +137,7 @@ struct StreamingRecorderTests {
     }
     
     @Test("Multiple cancel() calls are idempotent")
+    @MainActor
     func testMultipleCancelsIdempotent() async {
         let recorder = StreamingRecorder()
         var emitCount = 0
@@ -146,6 +156,7 @@ struct StreamingRecorderTests {
     }
     
     @Test("onChunkReady callback can be set")
+    @MainActor
     func testCallbackSettable() {
         let recorder = StreamingRecorder()
         

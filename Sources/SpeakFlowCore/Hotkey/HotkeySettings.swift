@@ -2,6 +2,7 @@ import Foundation
 import OSLog
 
 /// Manages user preferences for hotkey activation
+@MainActor
 public final class HotkeySettings {
     public static let shared = HotkeySettings()
 

@@ -1,9 +1,9 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Accelerate
 import OSLog
 
 /// Audio chunk with metadata
-public struct AudioChunk {
+public struct AudioChunk: Sendable {
     public let wavData: Data
     public let durationSeconds: Double
 
@@ -14,6 +14,7 @@ public struct AudioChunk {
 }
 
 /// Records audio and streams chunks for transcription
+@MainActor
 public final class StreamingRecorder {
     private var audioEngine: AVAudioEngine?
     private var audioBuffer: AudioBuffer?

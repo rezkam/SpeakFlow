@@ -38,7 +38,7 @@ public enum Config {
 
 // MARK: - Chunk Duration Options
 
-public enum ChunkDuration: Double, CaseIterable {
+public enum ChunkDuration: Double, CaseIterable, Sendable {
     public static let allCases: [ChunkDuration] = [.seconds30, .seconds45, .minute1, .minute2, .minute5, .minute7, .fullRecording]
     case seconds30 = 30.0
     case seconds45 = 45.0
@@ -82,6 +82,7 @@ public enum ChunkDuration: Double, CaseIterable {
 // MARK: - User Settings
 
 /// User-configurable settings stored in UserDefaults
+@MainActor
 public final class Settings {
     public static let shared = Settings()
 

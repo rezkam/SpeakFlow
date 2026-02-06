@@ -8,6 +8,7 @@ private enum KeyCode {
 }
 
 /// Listens for global hotkey events to activate dictation
+@MainActor
 public final class HotkeyListener {
     // CGEvent tap for double-tap Control detection
     private var eventTap: CFMachPort?
@@ -171,7 +172,4 @@ public final class HotkeyListener {
         }
     }
 
-    deinit {
-        stop()
-    }
 }

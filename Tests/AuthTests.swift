@@ -38,7 +38,6 @@ struct OAuthCallbackServerTests {
 
 struct OAuthStateValidationTests {
     
-    /// Simulates the logic from AppDelegate.promptForManualCode
     private func extractCode(_ inputValue: String, expectedState: String) -> String? {
         if let url = URL(string: inputValue),
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -87,7 +86,6 @@ struct OAuthStateValidationTests {
 
 struct CredentialParsingTests {
     
-    /// Simulates the logic from OpenAICodexAuth.loadCredentials
     private func parseLastRefresh(_ dateString: String) -> Date {
         let iso8601Formatter = ISO8601DateFormatter()
         iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
