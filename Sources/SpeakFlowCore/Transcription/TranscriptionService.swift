@@ -26,17 +26,14 @@ public actor TranscriptionService {
     private var activeTasks: [Int: Task<String, Error>] = [:]
 
     /// Transcribe audio with automatic retry and rate limiting
-    /// - Parameters:
-    ///   - audio: Audio data (M4A or WAV format)
-    ///   - mimeType: MIME type of the audio (e.g., "audio/mp4" for M4A, "audio/wav" for WAV)
-    public func transcribe(audio: Data, mimeType: String = "audio/mp4") async throws -> String {
+    public func transcribe(audio: Data) async throws -> String {
         // Wait for rate limit
         await rateLimiter.waitIfNeeded()
         await rateLimiter.recordRequest()
 
         // Perform request with retry
         return try await withRetry(maxAttempts: Config.maxRetries) {
-            try await self.performRequest(audio: audio, mimeType: mimeType)
+            try await self.performRequest(audio: audio)
         }
     }
 
@@ -87,9 +84,9 @@ public actor TranscriptionService {
     }
 
     /// Perform the actual network request
-    private func performRequest(audio: Data, mimeType: String) async throws -> String {
+    private func performRequest(audio: Data) async throws -> String {
         let credentials = try await AuthCredentials.load()
-        let request = try buildRequest(audio: audio, mimeType: mimeType, credentials: credentials)
+        let request = try buildRequest(audio: audio, credentials: credentials)
 
         let (data, response): (Data, URLResponse)
         do {
@@ -135,7 +132,7 @@ public actor TranscriptionService {
     }
 
     /// Build the multipart form request
-    private func buildRequest(audio: Data, mimeType: String, credentials: AuthCredentials) throws -> URLRequest {
+    private func buildRequest(audio: Data, credentials: AuthCredentials) throws -> URLRequest {
         // P0 Security: Validate audio size to prevent memory exhaustion and DoS
         guard audio.count <= Config.maxAudioSizeBytes else {
             let sizeMB = Double(audio.count) / 1_000_000
@@ -173,26 +170,11 @@ public actor TranscriptionService {
         request.setValue("Codex Desktop/\(codexVersion) (darwin; \(machine))", forHTTPHeaderField: "User-Agent")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-        // Determine file extension from MIME type
-        let fileExtension: String
-        switch mimeType {
-        case "audio/mp4", "audio/m4a", "audio/x-m4a":
-            fileExtension = "m4a"
-        case "audio/mpeg", "audio/mp3":
-            fileExtension = "mp3"
-        case "audio/ogg":
-            fileExtension = "ogg"
-        case "audio/webm":
-            fileExtension = "webm"
-        default:
-            fileExtension = "wav"
-        }
-
         // Build multipart body (using Data(_:) for ASCII-safe strings)
         var body = Data()
         body.append(Data("--\(boundary)\r\n".utf8))
-        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"audio.\(fileExtension)\"\r\n".utf8))
-        body.append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n".utf8))
+        body.append(Data("Content-Type: audio/wav\r\n\r\n".utf8))
         body.append(audio)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 

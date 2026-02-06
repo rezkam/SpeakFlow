@@ -32,7 +32,7 @@ public final class Transcription {
             Statistics.shared.recordApiCall()
 
             do {
-                let text = try await TranscriptionService.shared.transcribe(audio: chunk.audioData, mimeType: chunk.mimeType)
+                let text = try await TranscriptionService.shared.transcribe(audio: chunk.wavData)
                 Logger.transcription.info("Chunk #\(seq) success: \(text, privacy: .private)")
 
                 // Track successful transcription statistics
