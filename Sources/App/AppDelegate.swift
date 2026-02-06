@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     var targetElement: AXUIElement?  // Store focused element when recording starts
     private var textInsertionTask: Task<Void, Never>?  // Track ongoing text insertion
     private var queuedInsertionCount = 0  // P3 Security: Track queue depth to enforce limit
+    private var escapeMonitor: Any?  // Monitor for Escape key during recording
 
     // Menu bar icon
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
@@ -492,6 +493,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         }
     }
 
+    // MARK: - Escape Key Listener (only active during recording)
+
+    private func startEscapeListener() {
+        guard escapeMonitor == nil else { return }
+        escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // Escape key code is 53
+            if event.keyCode == 53 {
+                DispatchQueue.main.async {
+                    self?.cancelRecording()
+                }
+            }
+        }
+        Logger.audio.debug("Escape listener started")
+    }
+
+    private func stopEscapeListener() {
+        if let monitor = escapeMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeMonitor = nil
+            Logger.audio.debug("Escape listener stopped")
+        }
+    }
+
     // MARK: - Recording
 
     @objc func toggle() {
@@ -568,7 +592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         }
 
         updateStatusIcon()
-        NSSound(named: "Pop")?.play()
+        NSSound(named: "Blow")?.play()
 
         recorder = StreamingRecorder()
         recorder?.onChunkReady = { chunk in
@@ -578,14 +602,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             }
         }
         recorder?.start()
+        startEscapeListener()  // Listen for Escape to cancel
     }
 
     func stopRecording() {
+        stopEscapeListener()  // Stop listening for Escape
         guard isRecording else { return }
         isRecording = false
         isProcessingFinal = true  // Keep inserting text while waiting for final transcriptions
         updateStatusIcon()
-        NSSound(named: "Blow")?.play()
+        NSSound(named: "Pop")?.play()
         recorder?.stop()
         recorder = nil
 
@@ -599,6 +625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     @MainActor
     func cancelRecording() {
         guard isRecording || isProcessingFinal else { return }
+        stopEscapeListener()  // Stop listening for Escape
         isRecording = false
         isProcessingFinal = false
         fullTranscript = ""  // P2 Security: Reset transcript to prevent stale data
@@ -610,6 +637,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         recorder = nil
         Transcription.shared.cancelAll()
         updateStatusIcon()
+        NSSound(named: "Glass")?.play()  // Cancel sound
         Logger.audio.info("Recording cancelled")
     }
 
