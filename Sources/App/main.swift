@@ -3,13 +3,10 @@ import SpeakFlowCore
 
 // MARK: - Application Entry Point
 
-// Run on main thread as required by AppKit
-DispatchQueue.main.async {
-    let appDelegate = AppDelegate()
-    NSApplication.shared.delegate = appDelegate
-    // P3: Removed duplicate .regular activation policy - AppDelegate sets .accessory
-    NSApplication.shared.run()
+// AppDelegate is @MainActor, so we use assumeIsolated since we're on main thread
+let appDelegate = MainActor.assumeIsolated {
+    AppDelegate()
 }
-
-// Keep the main thread alive
-dispatchMain()
+NSApplication.shared.delegate = appDelegate
+NSApplication.shared.setActivationPolicy(.accessory)
+NSApplication.shared.run()

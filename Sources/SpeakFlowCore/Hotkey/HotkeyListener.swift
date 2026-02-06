@@ -8,23 +8,18 @@ private enum KeyCode {
 }
 
 /// Listens for global hotkey events to activate dictation
-/// All state is accessed on the main thread to prevent race conditions
-@MainActor
 public final class HotkeyListener {
-    // Event monitors are typed as Any? because NSEvent.addGlobalMonitorForEvents returns Any?
-    // This is Apple's API design, not a type erasure choice
-    private var globalMonitor: Any?
-    private var flagsMonitor: Any?
+    // CGEvent tap for double-tap Control detection
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
 
-    // Double-tap detection state (protected by @MainActor)
+    // NSEvent monitor for key combos
+    private var globalMonitor: Any?
+
+    // Double-tap detection state - track RELEASE time (this was the working approach)
     private var lastControlReleaseTime: Date?
     private var controlWasDown = false
-
-    // Configuration constants
-    private static let doubleTapInterval: TimeInterval = 0.4
-
-    // Current hotkey configuration
-    private var currentType: HotkeyType = .doubleTapControl
+    private let doubleTapInterval: TimeInterval = 0.4
 
     public var onActivate: (() -> Void)?
 
@@ -32,7 +27,6 @@ public final class HotkeyListener {
 
     public func start(type: HotkeyType) {
         stop()
-        currentType = type
 
         switch type {
         case .doubleTapControl:
@@ -43,53 +37,82 @@ public final class HotkeyListener {
         }
     }
 
-    func stop() {
+    public func stop() {
+        // Stop CGEvent tap
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        }
+        eventTap = nil
+        runLoopSource = nil
+
+        // Stop NSEvent monitor
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
             globalMonitor = nil
         }
-        if let monitor = flagsMonitor {
-            NSEvent.removeMonitor(monitor)
-            flagsMonitor = nil
-        }
+
         // Reset state
         lastControlReleaseTime = nil
         controlWasDown = false
     }
 
-    // MARK: - Double-tap Control Detection
+    // MARK: - Double-tap Control Detection (using CGEvent tap)
 
     private func startDoubleTapDetection() {
-        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            // Dispatch to main actor to protect shared state
-            Task { @MainActor in
-                self?.handleFlagsChanged(event: event)
-            }
+        guard eventTap == nil else { return }
+
+        let eventMask = (1 << CGEventType.flagsChanged.rawValue)
+
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                let listener = Unmanaged<HotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
+                listener.handleFlagsChanged(event: event)
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+
+        guard let eventTap = eventTap else {
+            Logger.hotkey.error("Could not create event tap (need Accessibility permission)")
+            return
         }
 
-        if flagsMonitor != nil {
-            Logger.hotkey.info("Double-tap Control listener started")
-        } else {
-            Logger.hotkey.error("Could not create flags monitor (need Accessibility permission)")
-        }
+        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        guard let source = runLoopSource else { return }
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+
+        Logger.hotkey.info("Double-tap Control listener started")
     }
 
-    private func handleFlagsChanged(event: NSEvent) {
-        let flags = event.modifierFlags
-        let controlDown = flags.contains(.control)
+    private func handleFlagsChanged(event: CGEvent) {
+        let flags = event.flags
+        let controlDown = flags.contains(.maskControl)
 
-        // Only trigger on Control alone (no other modifiers except capsLock/numericPad)
-        let significantModifiers: NSEvent.ModifierFlags = [.command, .option, .shift]
-        let hasOtherModifiers = !flags.isDisjoint(with: significantModifiers)
+        // Only trigger on Control alone (no other modifiers)
+        let hasOtherModifiers = flags.contains(.maskCommand) ||
+                                flags.contains(.maskAlternate) ||
+                                flags.contains(.maskShift)
 
-        // Detect Control key release (was down, now up) with no other significant modifiers
+        // Detect Control key RELEASE (was down, now up) with no other modifiers
         if controlWasDown && !controlDown && !hasOtherModifiers {
             let now = Date()
             if let lastRelease = lastControlReleaseTime,
-               now.timeIntervalSince(lastRelease) < Self.doubleTapInterval {
+               now.timeIntervalSince(lastRelease) < doubleTapInterval {
                 // Double-tap detected!
                 lastControlReleaseTime = nil
-                onActivate?()
+                DispatchQueue.main.async { [weak self] in
+                    self?.onActivate?()
+                }
             } else {
                 lastControlReleaseTime = now
             }
@@ -98,13 +121,11 @@ public final class HotkeyListener {
         controlWasDown = controlDown
     }
 
-    // MARK: - Key Combo Detection
+    // MARK: - Key Combo Detection (using NSEvent monitor)
 
     private func startKeyComboDetection(type: HotkeyType) {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            Task { @MainActor in
-                self?.handleKeyDown(event: event, type: type)
-            }
+            self?.handleKeyDown(event: event, type: type)
         }
 
         if globalMonitor != nil {
@@ -115,39 +136,42 @@ public final class HotkeyListener {
     }
 
     private func handleKeyDown(event: NSEvent, type: HotkeyType) {
-        // Get only the significant modifier flags, ignoring capsLock, numericPad, function, etc.
-        let significantFlags: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
-        let activeFlags = event.modifierFlags.intersection(significantFlags)
+        let flags = event.modifierFlags
 
         switch type {
         case .controlOptionD:
-            // ⌃⌥D - check that control and option are present (ignoring capsLock etc.)
-            let required: NSEvent.ModifierFlags = [.control, .option]
-            if activeFlags == required && event.keyCode == KeyCode.d {
-                onActivate?()
+            if flags.contains(.control) && flags.contains(.option) &&
+               !flags.contains(.command) && !flags.contains(.shift) &&
+               event.keyCode == KeyCode.d {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onActivate?()
+                }
             }
 
         case .controlOptionSpace:
-            // ⌃⌥Space
-            let required: NSEvent.ModifierFlags = [.control, .option]
-            if activeFlags == required && event.keyCode == KeyCode.space {
-                onActivate?()
+            if flags.contains(.control) && flags.contains(.option) &&
+               !flags.contains(.command) && !flags.contains(.shift) &&
+               event.keyCode == KeyCode.space {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onActivate?()
+                }
             }
 
         case .commandShiftD:
-            // ⇧⌘D
-            let required: NSEvent.ModifierFlags = [.command, .shift]
-            if activeFlags == required && event.keyCode == KeyCode.d {
-                onActivate?()
+            if flags.contains(.command) && flags.contains(.shift) &&
+               !flags.contains(.control) && !flags.contains(.option) &&
+               event.keyCode == KeyCode.d {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onActivate?()
+                }
             }
 
         case .doubleTapControl:
-            break // Handled by flagsChanged
+            break // Handled by CGEvent tap
         }
     }
 
     deinit {
-        // Note: deinit cannot be @MainActor, but stop() will be called
-        // from main thread in practice since HotkeyListener is @MainActor
+        stop()
     }
 }
