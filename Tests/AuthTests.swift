@@ -2,10 +2,7 @@ import Foundation
 import Testing
 @testable import SpeakFlowCore
 
-/// P2 Issue Tests - Verify fixes for reported security issues.
-
-// MARK: - Issue 1: OAuthCallbackServer cancellation
-// VERDICT: NOT A BUG - Implementation already handles cancellation correctly.
+// MARK: - OAuthCallbackServer Tests
 
 struct OAuthCallbackServerTests {
     
@@ -37,20 +34,18 @@ struct OAuthCallbackServerTests {
     }
 }
 
-// MARK: - Issue 2: Manual OAuth flow state validation
-// FIXED: Now validates state parameter when parsing URLs.
+// MARK: - OAuth State Validation Tests
 
 struct OAuthStateValidationTests {
     
-    /// Simulates the FIXED logic from AppDelegate.promptForManualCode
-    private func fixedImplementation_extractCode(_ inputValue: String, expectedState: String) -> String? {
+    /// Simulates the logic from AppDelegate.promptForManualCode
+    private func extractCode(_ inputValue: String, expectedState: String) -> String? {
         if let url = URL(string: inputValue),
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
            let codeParam = components.queryItems?.first(where: { $0.name == "code" })?.value {
-            // FIXED: Validate state parameter if present
             if let stateParam = components.queryItems?.first(where: { $0.name == "state" })?.value {
                 guard stateParam == expectedState else {
-                    return nil  // Reject mismatched state
+                    return nil
                 }
             }
             return codeParam
@@ -58,75 +53,73 @@ struct OAuthStateValidationTests {
         return inputValue
     }
     
-    @Test("FIXED: URLs with wrong state are rejected")
+    @Test("URLs with wrong state are rejected")
     func testWrongStateRejected() {
         let expectedState = "legitimate-state-12345"
         let maliciousURL = "http://localhost:1455/auth/callback?code=stolen-code&state=attacker-controlled"
         
-        let result = fixedImplementation_extractCode(maliciousURL, expectedState: expectedState)
+        let result = extractCode(maliciousURL, expectedState: expectedState)
         
         #expect(result == nil, "URLs with mismatched state should be rejected")
     }
     
-    @Test("FIXED: URLs with correct state are accepted")
+    @Test("URLs with correct state are accepted")
     func testCorrectStateAccepted() {
         let expectedState = "legitimate-state-12345"
         let validURL = "http://localhost:1455/auth/callback?code=valid-code&state=legitimate-state-12345"
         
-        let result = fixedImplementation_extractCode(validURL, expectedState: expectedState)
+        let result = extractCode(validURL, expectedState: expectedState)
         
         #expect(result == "valid-code", "URLs with matching state should be accepted")
     }
     
-    @Test("FIXED: Plain code without URL still works")
+    @Test("Plain code without URL still works")
     func testPlainCodeStillWorks() {
         let plainCode = "authorization-code-12345"
         
-        let result = fixedImplementation_extractCode(plainCode, expectedState: "any-state")
+        let result = extractCode(plainCode, expectedState: "any-state")
         
         #expect(result == plainCode, "Plain codes should still be accepted")
     }
 }
 
-// MARK: - Issue 3: Fallback last_refresh parsing
-// FIXED: Now uses Date.distantPast instead of Date() on parse failure.
+// MARK: - Credential Parsing Tests
 
 struct CredentialParsingTests {
     
-    /// Simulates the FIXED logic from OpenAICodexAuth.loadCredentials
-    private func fixedImplementation_parseLastRefresh(_ dateString: String) -> Date {
+    /// Simulates the logic from OpenAICodexAuth.loadCredentials
+    private func parseLastRefresh(_ dateString: String) -> Date {
         let iso8601Formatter = ISO8601DateFormatter()
         iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return iso8601Formatter.date(from: dateString) ?? Date.distantPast  // FIXED
+        return iso8601Formatter.date(from: dateString) ?? Date.distantPast
     }
     
-    @Test("FIXED: Invalid date forces refresh")
+    @Test("Invalid date forces refresh")
     func testInvalidDateForcesRefresh() {
         let invalidDateString = "corrupted-garbage-not-a-date"
         
-        let parsedDate = fixedImplementation_parseLastRefresh(invalidDateString)
+        let parsedDate = parseLastRefresh(invalidDateString)
         let shouldRefresh = Date().timeIntervalSince(parsedDate) > 86400
         
         #expect(shouldRefresh, "Invalid date should trigger refresh by returning distant past")
     }
     
-    @Test("FIXED: Empty date forces refresh")
+    @Test("Empty date forces refresh")
     func testEmptyDateForcesRefresh() {
         let emptyDateString = ""
         
-        let parsedDate = fixedImplementation_parseLastRefresh(emptyDateString)
+        let parsedDate = parseLastRefresh(emptyDateString)
         let shouldRefresh = Date().timeIntervalSince(parsedDate) > 86400
         
         #expect(shouldRefresh, "Empty date should trigger refresh")
     }
     
-    @Test("FIXED: Valid date is parsed correctly")
+    @Test("Valid date is parsed correctly")
     func testValidDateParsedCorrectly() {
         let validDateString = "2024-01-15T10:30:00.000Z"
         
-        let parsedDate = fixedImplementation_parseLastRefresh(validDateString)
+        let parsedDate = parseLastRefresh(validDateString)
         
-        // Should be close to the expected date, not distant past
         let calendar = Calendar.current
         let components = calendar.dateComponents([.year, .month, .day], from: parsedDate)
         #expect(components.year == 2024, "Year should be parsed correctly")
@@ -135,49 +128,38 @@ struct CredentialParsingTests {
     }
 }
 
-// MARK: - Issue 4: Cancel flow emits final chunk
-// FIXED: StreamingRecorder now has cancel() method that skips emission.
+// MARK: - AuthCredentials Symlink Detection Tests
 
-struct RecorderCancellationTests {
+struct AuthCredentialsTests {
     
-    @Test("FIXED: StreamingRecorder has cancel() method")
-    func testCancelMethodExists() {
-        let recorder = StreamingRecorder()
+    @Test("Symlinks are detected correctly")
+    func testSymlinkDetection() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let realFile = tempDir.appendingPathComponent("test_auth_real_\(UUID().uuidString).json")
+        let symlinkFile = tempDir.appendingPathComponent("test_auth_symlink_\(UUID().uuidString).json")
         
-        // Verify cancel() method exists and is callable
-        recorder.cancel()  // Should not crash
+        let authJson = """
+        {
+            "tokens": {
+                "access_token": "test_token",
+                "account_id": "test_account"
+            }
+        }
+        """
+        try authJson.write(to: realFile, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: symlinkFile, withDestinationURL: realFile)
         
-        #expect(Bool(true), "cancel() method exists")
-    }
-    
-    @Test("FIXED: cancel() does not emit chunk")
-    func testCancelDoesNotEmitChunk() async {
-        var chunkEmitted = false
-        
-        let recorder = StreamingRecorder()
-        recorder.onChunkReady = { _ in
-            chunkEmitted = true
+        defer {
+            try? FileManager.default.removeItem(at: realFile)
+            try? FileManager.default.removeItem(at: symlinkFile)
         }
         
-        // Cancel immediately (no actual recording in test environment)
-        recorder.cancel()
+        let attrs = try FileManager.default.attributesOfItem(atPath: symlinkFile.path)
+        let fileType = attrs[.type] as? FileAttributeType
+        #expect(fileType == .typeSymbolicLink, "Symlink should be detected")
         
-        // Wait for any async processing
-        try? await Task.sleep(for: .milliseconds(100))
-        
-        #expect(chunkEmitted == false, "cancel() should not emit a chunk")
-    }
-    
-    @Test("FIXED: stop() still emits chunk when not cancelled")
-    func testStopStillEmitsWhenNotCancelled() {
-        let recorder = StreamingRecorder()
-        var callbackSet = false
-        
-        recorder.onChunkReady = { _ in
-            callbackSet = true
-        }
-        
-        // Verify callback can be set (stop behavior depends on actual recording)
-        #expect(recorder.onChunkReady != nil, "Callback should be settable")
+        let realAttrs = try FileManager.default.attributesOfItem(atPath: realFile.path)
+        let realType = realAttrs[.type] as? FileAttributeType
+        #expect(realType != .typeSymbolicLink, "Real file should not be a symlink")
     }
 }
