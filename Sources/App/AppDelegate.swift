@@ -121,6 +121,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         let micTitle = micStatus == .authorized ? "✅ Microphone Enabled" : "⚠️ Enable Microphone..."
         let micItem = NSMenuItem(title: micTitle, action: #selector(checkMicrophoneAction), keyEquivalent: "")
         menu.addItem(micItem)
+        
+        // Add login status menu item
+        let isLoggedIn = OpenAICodexAuth.isLoggedIn
+        let loginTitle = isLoggedIn ? "✅ Logged in to ChatGPT" : "⚠️ Login to ChatGPT..."
+        let loginItem = NSMenuItem(title: loginTitle, action: #selector(handleLoginAction), keyEquivalent: "")
+        menu.addItem(loginItem)
+        
+        if isLoggedIn {
+            let logoutItem = NSMenuItem(title: "Logout", action: #selector(handleLogout), keyEquivalent: "")
+            menu.addItem(logoutItem)
+        }
         menu.addItem(.separator())
 
         // Hotkey submenu
@@ -250,6 +261,154 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 Statistics.shared.reset()
             }
         }
+    }
+
+    @objc private func handleLoginAction() {
+        if OpenAICodexAuth.isLoggedIn {
+            // Already logged in - show status
+            let alert = NSAlert()
+            alert.messageText = "Already Logged In"
+            alert.informativeText = "You are already logged in to ChatGPT."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        } else {
+            // Start login flow
+            startLoginFlow()
+        }
+    }
+
+    @objc private func handleLogout() {
+        let alert = NSAlert()
+        alert.messageText = "Logout from ChatGPT?"
+        alert.informativeText = "This will remove your saved login credentials."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Logout")
+        alert.addButton(withTitle: "Cancel")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            OpenAICodexAuth.deleteCredentials()
+            
+            // Rebuild menu to update login status
+            let trusted = AXIsProcessTrusted()
+            buildMenu(trusted: trusted)
+            
+            let confirmAlert = NSAlert()
+            confirmAlert.messageText = "Logged Out"
+            confirmAlert.informativeText = "You have been logged out from ChatGPT."
+            confirmAlert.alertStyle = .informational
+            confirmAlert.addButton(withTitle: "OK")
+            confirmAlert.runModal()
+        }
+    }
+
+    private func startLoginFlow() {
+        // Create authorization flow
+        let flow = OpenAICodexAuth.createAuthorizationFlow()
+        
+        // Start the callback server
+        let server = OAuthCallbackServer(expectedState: flow.state)
+        
+        // Show instructions
+        let alert = NSAlert()
+        alert.messageText = "Login to ChatGPT"
+        alert.informativeText = """
+        A browser window will open for you to log in to ChatGPT.
+        
+        After logging in, you'll be redirected back automatically.
+        
+        If the redirect doesn't work, copy the URL from your browser and paste it when prompted.
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Open Browser")
+        alert.addButton(withTitle: "Cancel")
+        
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        
+        // Open browser
+        NSWorkspace.shared.open(flow.url)
+        
+        // Wait for callback in background
+        Task {
+            let code = await server.waitForCallback(timeout: 120)
+            
+            await MainActor.run {
+                if let code = code {
+                    // Got code from callback server
+                    self.exchangeCodeForTokens(code: code, flow: flow)
+                } else {
+                    // Callback timed out or failed - ask for manual input
+                    self.promptForManualCode(flow: flow)
+                }
+            }
+        }
+    }
+
+    private func promptForManualCode(flow: OpenAICodexAuth.AuthorizationFlow) {
+        let alert = NSAlert()
+        alert.messageText = "Paste Authorization Code"
+        alert.informativeText = "If the browser didn't redirect automatically, paste the URL or authorization code here:"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Submit")
+        alert.addButton(withTitle: "Cancel")
+        
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.placeholderString = "Paste URL or code here"
+        alert.accessoryView = input
+        
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        
+        let inputValue = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !inputValue.isEmpty else {
+            showError("No code provided")
+            return
+        }
+        
+        // Parse the input - could be full URL or just the code
+        let code: String
+        if let url = URL(string: inputValue),
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let codeParam = components.queryItems?.first(where: { $0.name == "code" })?.value {
+            code = codeParam
+        } else {
+            code = inputValue
+        }
+        
+        exchangeCodeForTokens(code: code, flow: flow)
+    }
+
+    private func exchangeCodeForTokens(code: String, flow: OpenAICodexAuth.AuthorizationFlow) {
+        Task {
+            do {
+                _ = try await OpenAICodexAuth.exchangeCodeForTokens(code: code, flow: flow)
+                
+                await MainActor.run {
+                    // Rebuild menu to update login status
+                    let trusted = AXIsProcessTrusted()
+                    self.buildMenu(trusted: trusted)
+                    
+                    let alert = NSAlert()
+                    alert.messageText = "Login Successful"
+                    alert.informativeText = "You are now logged in to ChatGPT. You can start using voice dictation."
+                    alert.alertStyle = .informational
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+            } catch {
+                await MainActor.run {
+                    self.showError("Login failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Error"
+        alert.informativeText = message
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     func setupHotkey() {
