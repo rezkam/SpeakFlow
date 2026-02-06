@@ -368,6 +368,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         if let url = URL(string: inputValue),
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
            let codeParam = components.queryItems?.first(where: { $0.name == "code" })?.value {
+            // P2 Security: Validate state parameter if present to prevent CSRF attacks
+            if let stateParam = components.queryItems?.first(where: { $0.name == "state" })?.value {
+                guard stateParam == flow.state else {
+                    showError("Invalid state parameter. Please try logging in again.")
+                    return
+                }
+            }
             code = codeParam
         } else {
             code = inputValue
@@ -599,7 +606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         textInsertionTask?.cancel()
         textInsertionTask = nil
         queuedInsertionCount = 0  // P3 Security: Reset queue count on cancel
-        recorder?.stop()
+        recorder?.cancel()  // P2 Security: Use cancel() to skip final chunk emission
         recorder = nil
         Transcription.shared.cancelAll()
         updateStatusIcon()
