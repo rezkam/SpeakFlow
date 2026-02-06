@@ -2,7 +2,7 @@
 set -e
 
 # SpeakFlow Release Build Script
-# Creates a signed DMG installer ready for distribution
+# Creates a ready-to-use app bundle
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -81,21 +81,14 @@ cat > "$APP_NAME.app/Contents/Info.plist" << EOF
 </plist>
 EOF
 
-# Sign with persistent identity (preserves permissions across rebuilds)
-SIGNING_IDENTITY="SpeakFlow Developer"
-echo "🔏 Signing app with '$SIGNING_IDENTITY'..."
-if security find-identity -v -p codesigning | grep -q "$SIGNING_IDENTITY"; then
-    codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_NAME.app"
-else
-    echo "⚠️  '$SIGNING_IDENTITY' not found, using ad-hoc signing (permissions won't persist)"
-    codesign --force --deep --sign - "$APP_NAME.app"
-fi
+# Sign the app (ad-hoc by default, or with certificate if available)
+echo "🔏 Signing app..."
+codesign --force --deep --sign - "$APP_NAME.app"
 
-# Create DMG
-echo "📦 Creating DMG..."
-rm -f "$APP_NAME.dmg"
-
+# Create DMG if create-dmg is available, otherwise skip
 if command -v create-dmg &> /dev/null; then
+    echo "📦 Creating DMG..."
+    rm -f "$APP_NAME.dmg"
     create-dmg \
         --volname "$APP_NAME" \
         --window-pos 200 120 \
@@ -107,18 +100,26 @@ if command -v create-dmg &> /dev/null; then
         --no-internet-enable \
         "$APP_NAME.dmg" \
         "$APP_NAME.app"
+    echo ""
+    echo "✅ Build complete!"
+    echo "   App: $APP_NAME.app"
+    echo "   DMG: $APP_NAME.dmg"
+    ls -lh "$APP_NAME.dmg"
 else
-    echo "⚠️  create-dmg not found, creating basic DMG..."
-    mkdir -p dmg_staging
-    cp -r "$APP_NAME.app" dmg_staging/
-    ln -s /Applications dmg_staging/Applications
-    hdiutil create -volname "$APP_NAME" -srcfolder dmg_staging -ov -format UDZO "$APP_NAME.dmg"
-    rm -rf dmg_staging
+    echo ""
+    echo "✅ Build complete!"
+    echo "   App: $APP_NAME.app"
+    echo ""
+    echo "To install, run:"
+    echo "   cp -r $APP_NAME.app /Applications/"
 fi
 
 echo ""
-echo "✅ Release build complete!"
-echo "   App: $APP_NAME.app"
-echo "   DMG: $APP_NAME.dmg"
-echo "   Version: $VERSION"
-ls -lh "$APP_NAME.dmg"
+echo "📋 Next steps:"
+echo "   1. Move app to /Applications (or run from current location)"
+echo "   2. Launch the app"
+echo "   3. Grant Microphone permission when prompted"
+echo "   4. Grant Accessibility permission in System Settings"
+echo "   5. Login to ChatGPT via the menu bar icon"
+echo ""
+echo "See README.md for detailed permission setup instructions."
