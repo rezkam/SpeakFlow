@@ -20,9 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     private var textInsertionTask: Task<Void, Never>?  // Track ongoing text insertion
     private var queuedInsertionCount = 0  // P3 Security: Track queue depth to enforce limit
 
-    // Menu bar icons
+    // Menu bar icon
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
-    private lazy var warningIcon: NSImage? = createWarningIcon()
 
     // Microphone permission polling timer
     private var micPermissionTimer: Timer?
@@ -426,16 +425,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     // MARK: - Status Icon
 
     func updateStatusIcon() {
-        let accessibilityOK = AXIsProcessTrusted()
-        let microphoneOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-
         statusItem.button?.title = ""
-
-        if !accessibilityOK || !microphoneOK {
-            statusItem.button?.image = warningIcon
-        } else {
-            statusItem.button?.image = defaultIcon
-        }
+        statusItem.button?.image = defaultIcon
     }
 
     private func loadMenuBarIcon() -> NSImage? {
@@ -459,21 +450,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         // Template mode makes icon white in dark mode, black in light mode
         resizedImage.isTemplate = true
         return resizedImage
-    }
-
-    private func createWarningIcon() -> NSImage? {
-        if let icon = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning") {
-            let size = NSSize(width: 18, height: 18)
-            let resized = NSImage(size: size)
-            resized.lockFocus()
-            icon.draw(in: NSRect(origin: .zero, size: size),
-                      from: NSRect(origin: .zero, size: icon.size),
-                      operation: .copy,
-                      fraction: 1.0)
-            resized.unlockFocus()
-            return resized
-        }
-        return nil
     }
 
     private func updateMenu(trusted: Bool) {

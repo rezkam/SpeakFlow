@@ -54,13 +54,6 @@ open SpeakFlow.dmg
 
 Press the hotkey once to start recording, press it again to stop.
 
-### Menu Bar Icon
-
-| Icon | Status |
-|------|--------|
-| App icon | Ready (all permissions granted) |
-| ⚠️ | Missing permissions (microphone or accessibility) |
-
 ### Settings
 
 Access via menu bar icon:
