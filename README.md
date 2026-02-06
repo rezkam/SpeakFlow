@@ -7,13 +7,13 @@ A macOS menu bar app for voice dictation using OpenAI's Whisper API. Press a hot
 
 ## Features
 
-- 🎤 **Voice-to-text dictation** - Press hotkey, speak, text appears
+- 🎤 **Voice-to-text dictation** - Press hotkey to start, press again to stop
 - ⌨️ **Universal text insertion** - Works in any app via accessibility
-- 🔐 **OpenAI OAuth login** - Secure authentication (same as Codex CLI)
+- 🔐 **ChatGPT OAuth login** - Secure authentication (same as Codex CLI)
 - ⚡ **Configurable chunking** - 30s to 7min chunks, or full recording
 - 🔇 **Smart silence detection** - Skips silent audio to save API calls
 - 🚀 **Launch at login** - Optional auto-start
-- 📊 **Usage statistics** - Track transcription time and API calls
+- 📊 **Usage statistics** - Track transcription duration, words, characters, and API calls
 
 ## Quick Start
 
@@ -27,8 +27,8 @@ A macOS menu bar app for voice dictation using OpenAI's Whisper API. Press a hot
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/speakflow.git
-cd speakflow
+git clone https://github.com/rezkam/SpeakFlow.git
+cd SpeakFlow
 
 # Build and create DMG (one command does everything)
 ./scripts/build-release.sh
@@ -43,7 +43,7 @@ open SpeakFlow.dmg
 1. **Launch SpeakFlow** from Applications
 2. **Grant Microphone permission** when prompted
 3. **Grant Accessibility permission** (required for text insertion)
-4. **Login to OpenAI** via the menu bar icon → "Login to OpenAI..."
+4. **Login to ChatGPT** via the menu bar icon → "Login to ChatGPT..."
 5. **Start dictating!** Double-tap Control (or your configured hotkey)
 
 ## Usage
@@ -51,23 +51,26 @@ open SpeakFlow.dmg
 | Action | Default Hotkey |
 |--------|---------------|
 | Start/Stop dictation | Double-tap Control |
-| Cancel recording | Press Escape |
 
-### Menu Bar Icons
+Press the hotkey once to start recording, press it again to stop.
+
+### Menu Bar Icon
 
 | Icon | Status |
 |------|--------|
-| 🎤 | Ready |
-| 🔴 | Recording |
-| ⏳ | Processing |
-| ⚠️ | Missing permissions |
+| App icon | Ready (all permissions granted) |
+| ⚠️ | Missing permissions (microphone or accessibility) |
 
 ### Settings
 
 Access via menu bar icon:
+- **Activation Hotkey** - Choose between:
+  - ⌃⌃ Double-tap Control (default)
+  - ⌃⌥D (Control+Option+D)
+  - ⌃⌥Space (Control+Option+Space)
+  - ⇧⌘D (Command+Shift+D)
 - **Chunk Duration** - How often to send audio for transcription (30s - 7min, or full recording)
 - **Skip Silent Chunks** - Don't transcribe chunks with no speech
-- **Activation Hotkey** - Choose between Double-tap Control, Fn, or Hyper+D
 - **Launch at Login** - Start automatically when you log in
 
 ## Build Options
@@ -126,11 +129,13 @@ Sources/
 │   └── AppDelegate.swift       # UI, menus, hotkey handling
 ├── SpeakFlowCore/
 │   ├── Audio/                  # Recording & audio processing
-│   ├── Auth/                   # OpenAI OAuth
+│   ├── Auth/                   # ChatGPT OAuth
 │   ├── Hotkey/                 # Global hotkey detection
 │   ├── Permissions/            # Accessibility permission handling
 │   ├── Transcription/          # Whisper API integration
-│   └── Config.swift            # Settings & configuration
+│   ├── Utilities/              # Auth credentials, logging
+│   ├── Config.swift            # Settings & configuration
+│   └── Statistics.swift        # Usage tracking
 └── Resources/
     └── AppIcon.png             # App icon source
 ```
@@ -164,7 +169,7 @@ Sources/
 
 ### Login issues
 
-- Ensure you have an active OpenAI account
+- Ensure you have an active OpenAI account with Pro or Max subscription
 - Try logging out and back in via the menu
 
 ## License
