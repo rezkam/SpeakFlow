@@ -53,7 +53,7 @@ struct StreamingRecorderCancellationTests {
         // Verify onChunkReady can be set (actual emission requires real audio)
         recorder.onChunkReady = { chunk in
             // This would be called if there was actual audio data
-            #expect(chunk.audioData.count > 0)
+            #expect(chunk.wavData.count > 0)
         }
         
         #expect(recorder.onChunkReady != nil, "Callback should be settable")
@@ -328,39 +328,5 @@ struct AudioBufferCancellationTests {
         // Second take should be empty (buffer cleared)
         let emptyResult = await buffer.takeAll()
         #expect(emptyResult.samples.count == 0, "Buffer should be empty after takeAll")
-    }
-}
-
-// MARK: - M4A Encoding Tests
-
-struct M4AEncodingTests {
-    
-    @Test("AudioChunk uses M4A format by default")
-    func testAudioChunkDefaultMimeType() {
-        let chunk = AudioChunk(audioData: Data([0x00, 0x01, 0x02]), durationSeconds: 1.0)
-        #expect(chunk.mimeType == "audio/mp4", "Default MIME type should be audio/mp4 (M4A)")
-    }
-    
-    @Test("AudioChunk accepts custom MIME type")
-    func testAudioChunkCustomMimeType() {
-        let chunk = AudioChunk(audioData: Data([0x00]), durationSeconds: 0.5, mimeType: "audio/wav")
-        #expect(chunk.mimeType == "audio/wav", "Custom MIME type should be preserved")
-    }
-    
-    @Test("Config.audioBitrate is set for voice optimization")
-    func testAudioBitrateConfig() {
-        // 32kbps is optimal for voice - good quality, small size
-        #expect(Config.audioBitrate == 32000, "Audio bitrate should be 32kbps for voice")
-    }
-    
-    @Test("25MB limit allows ~100 minutes at 32kbps")
-    func testMaxRecordingDuration() {
-        // Calculate max duration: 25MB / (32kbps / 8) = 25,000,000 / 4,000 = 6,250 seconds
-        let maxBytes = Config.maxAudioSizeBytes
-        let bytesPerSecond = Config.audioBitrate / 8
-        let maxSeconds = maxBytes / bytesPerSecond
-        
-        #expect(maxSeconds >= 6000, "Should support at least 100 minutes of recording")
-        #expect(Config.maxFullRecordingDuration <= Double(maxSeconds), "Full recording duration should fit in size limit")
     }
 }
