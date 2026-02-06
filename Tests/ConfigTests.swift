@@ -24,8 +24,18 @@ struct ConfigTests {
     @Test("Rate limiting settings are correct")
     func testRateLimitingConfig() {
         #expect(Config.minTimeBetweenRequests == 10.0, "Should have 10s between requests")
-        #expect(Config.maxRetries == 2, "Should have max 2 retries")
-        #expect(Config.retryBaseDelay == 5.0, "Base retry delay should be 5s")
+        #expect(Config.maxRetries == 3, "Should have max 3 retries")
+        #expect(Config.retryBaseDelay == 1.5, "Base retry delay should be 1.5s")
+    }
+    
+    @Test("Timeout allows retries within 30 seconds")
+    func testTimeoutForFastRetries() {
+        // Worst case: timeout + delay + timeout + delay*2 + timeout
+        // = 8 + 1.5 + 8 + 3 + 8 = 28.5 seconds
+        let worstCase = Config.timeout + Config.retryBaseDelay + 
+                        Config.timeout + (Config.retryBaseDelay * 2) + 
+                        Config.timeout
+        #expect(worstCase <= 30.0, "Worst case retry should complete within 30 seconds")
     }
     
     @Test("maxQueuedTextInsertions has reasonable bounds")
