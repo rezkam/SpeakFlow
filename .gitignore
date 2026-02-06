@@ -6,3 +6,5 @@
 *.xcworkspace/
 DerivedData/
 *.dmg
+.claude/
+AppIcon.iconset/
