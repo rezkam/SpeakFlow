@@ -6,6 +6,9 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-testing.git", from: "0.12.0"),
+    ],
     targets: [
         // Core library with testable business logic
         .target(
@@ -24,7 +27,10 @@ let package = Package(
         // Test target that can import the core library
         .testTarget(
             name: "SpeakFlowTests",
-            dependencies: ["SpeakFlowCore"],
+            dependencies: [
+                "SpeakFlowCore",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
             path: "Tests"
         ),
     ]
