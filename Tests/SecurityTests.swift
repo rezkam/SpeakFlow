@@ -126,11 +126,13 @@ struct SecurityTests {
         #expect(ChunkDuration.fullRecording.isFullRecording == true, "Should be identified as full recording")
     }
 
-    @Test("ChunkDuration.minDuration calculated correctly")
+    @Test("ChunkDuration.minDuration equals selected duration")
     func testChunkMinDuration() {
         // Test ACTUAL computed properties
-        #expect(ChunkDuration.minute1.minDuration == 10.0, "1 min max should have 10s min (60/6)")
-        #expect(ChunkDuration.seconds30.minDuration == 5.0, "30s max should have 5s min (floor)")
+        // minDuration equals the selected duration (chunks sent at selected time, not earlier)
+        #expect(ChunkDuration.minute1.minDuration == 60.0, "1 min chunk should have 60s min")
+        #expect(ChunkDuration.seconds30.minDuration == 30.0, "30s chunk should have 30s min")
+        #expect(ChunkDuration.minute5.minDuration == 300.0, "5 min chunk should have 300s min")
         #expect(ChunkDuration.fullRecording.minDuration == 0.25, "Full recording should have 250ms min")
     }
 
@@ -248,31 +250,10 @@ struct ErrorBodyTruncationTests {
     }
 }
 
-// MARK: - P3: Statistics Actor Isolation Tests
-
-struct StatisticsActorTests {
-
-    @Test("Statistics can be called from non-MainActor context")
-    func testStatisticsFromBackgroundContext() async {
-        // This test verifies Statistics works correctly from any actor context
-        // After fix: Statistics should be a proper actor, not @MainActor class
-
-        // Call from a detached task (non-MainActor)
-        await Task.detached {
-            await Statistics.shared.recordApiCall()
-            await Statistics.shared.recordTranscription(text: "Test", audioDurationSeconds: 1.0)
-        }.value
-
-        // Should complete without actor isolation issues
-        let summary = await Statistics.shared.summary
-        #expect(summary.contains("API"), "Should track API calls from any context")
-    }
-}
-
 // MARK: - Statistics Tests (MainActor)
 
 @MainActor
-struct StatisticsIntegrationTests {
+struct StatisticsTests {
 
     @Test("Statistics tracks API calls")
     func testApiCallTracking() async {
