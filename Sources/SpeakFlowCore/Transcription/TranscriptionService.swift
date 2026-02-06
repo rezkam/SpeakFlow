@@ -85,7 +85,7 @@ public actor TranscriptionService {
 
     /// Perform the actual network request
     private func performRequest(audio: Data) async throws -> String {
-        let credentials = try AuthCredentials.load()
+        let credentials = try await AuthCredentials.load()
         let request = try buildRequest(audio: audio, credentials: credentials)
 
         let (data, response): (Data, URLResponse)
@@ -152,30 +152,23 @@ public actor TranscriptionService {
         request.timeoutInterval = Config.timeout
 
         // Headers
+        // Headers matching Codex Desktop exactly
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(credentials.accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
         request.setValue("Codex Desktop", forHTTPHeaderField: "originator")
-        request.setValue("Codex Desktop/260202.0859 (darwin; arm64)", forHTTPHeaderField: "User-Agent")
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-
-        if !credentials.cookies.isEmpty {
-            // P1 Security: Sanitize cookie values to prevent header injection
-            let cookieString = credentials.cookies.compactMap { key, value -> String? in
-                // Remove any CR/LF that could inject headers
-                let safeKey = key.replacingOccurrences(of: "\r", with: "")
-                    .replacingOccurrences(of: "\n", with: "")
-                    .replacingOccurrences(of: ";", with: "")
-                let safeValue = value.replacingOccurrences(of: "\r", with: "")
-                    .replacingOccurrences(of: "\n", with: "")
-                    .replacingOccurrences(of: ";", with: "")
-                // P1 Fix: Skip cookies with empty key or value to avoid malformed headers
-                guard !safeKey.isEmpty, !safeValue.isEmpty else { return nil }
-                return "\(safeKey)=\(safeValue)"
-            }.joined(separator: "; ")
-            if !cookieString.isEmpty {
-                request.setValue(cookieString, forHTTPHeaderField: "Cookie")
+        
+        // User-Agent format matching Codex Desktop: Codex Desktop/{version} ({platform}; {arch})
+        var utsname = utsname()
+        uname(&utsname)
+        let machine = withUnsafePointer(to: &utsname.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(_SYS_NAMELEN)) {
+                String(cString: $0)
             }
         }
+        // Use Codex Desktop version format (YYMMDD.HHMM)
+        let codexVersion = "260205.1301"
+        request.setValue("Codex Desktop/\(codexVersion) (darwin; \(machine))", forHTTPHeaderField: "User-Agent")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         // Build multipart body (using Data(_:) for ASCII-safe strings)
         var body = Data()
