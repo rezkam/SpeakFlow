@@ -301,9 +301,10 @@ public final class OpenAICodexAuth {
             let authFile = try JSONDecoder().decode(CodexAuthFile.self, from: data)
             
             // Parse last_refresh date
+            // P2 Security: Use distantPast on parse failure to force refresh, not Date() which skips it
             let iso8601Formatter = ISO8601DateFormatter()
             iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let lastRefresh = iso8601Formatter.date(from: authFile.last_refresh) ?? Date()
+            let lastRefresh = iso8601Formatter.date(from: authFile.last_refresh) ?? Date.distantPast
             
             return OAuthCredentials(
                 accessToken: authFile.tokens.access_token,

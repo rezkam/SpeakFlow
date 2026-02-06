@@ -26,7 +26,17 @@ public final class StreamingRecorder {
     public var onChunkReady: ((AudioChunk) -> Void)?
     private let sampleRate: Double = 16000
 
+    /// Flag to suppress final chunk emission on cancel
+    private var isCancelled = false
+
     public init() {}
+
+    /// Cancel recording without emitting final chunk
+    /// P2 Security: Prevents unwanted API calls and text insertion after user cancels
+    public func cancel() {
+        isCancelled = true
+        stop()
+    }
 
     public func start() {
         audioEngine = AVAudioEngine()
@@ -180,10 +190,20 @@ public final class StreamingRecorder {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
 
+        // P2 Security: Skip final chunk processing if cancelled to prevent unwanted API calls
+        let wasCancelled = isCancelled
+        isCancelled = false  // Reset for next recording
+
         Task {
             guard let buffer = audioBuffer else { return }
             let result = await buffer.takeAll()
             let duration = Double(result.samples.count) / sampleRate
+
+            // Skip emission if recording was cancelled
+            guard !wasCancelled else {
+                Logger.audio.info("Recording cancelled, discarding \(String(format: "%.1f", duration))s of audio")
+                return
+            }
 
             // Minimum duration: 250ms for full recording mode, 1s otherwise
             let minDurationMs = Double(Config.minRecordingDurationMs) / 1000.0
