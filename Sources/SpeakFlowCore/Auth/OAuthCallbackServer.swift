@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 
 /// Local HTTP server to receive OAuth callback
-public final class OAuthCallbackServer {
+public final class OAuthCallbackServer: @unchecked Sendable {
     private var server: (any NSObjectProtocol)?
     private var socket: Int32 = -1
     private var isRunning = false

@@ -188,27 +188,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     private func isLaunchAtLoginEnabled() -> Bool {
-        if #available(macOS 13.0, *) {
-            return SMAppService.mainApp.status == .enabled
-        }
-        return false
+        SMAppService.mainApp.status == .enabled
     }
 
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
-        if #available(macOS 13.0, *) {
-            do {
-                if SMAppService.mainApp.status == .enabled {
-                    try SMAppService.mainApp.unregister()
-                    sender.state = .off
-                    Logger.app.info("Disabled launch at login")
-                } else {
-                    try SMAppService.mainApp.register()
-                    sender.state = .on
-                    Logger.app.info("Enabled launch at login")
-                }
-            } catch {
-                Logger.app.error("Failed to toggle launch at login: \(error.localizedDescription)")
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+                sender.state = .off
+                Logger.app.info("Disabled launch at login")
+            } else {
+                try SMAppService.mainApp.register()
+                sender.state = .on
+                Logger.app.info("Enabled launch at login")
             }
+        } catch {
+            Logger.app.error("Failed to toggle launch at login: \(error.localizedDescription)")
         }
     }
 
