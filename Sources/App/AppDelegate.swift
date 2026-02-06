@@ -717,6 +717,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             return
         }
 
+        // Wait for any modifier keys to be released before typing
+        // This prevents Control key from double-tap hotkey interfering with text insertion
+        await waitForModifiersReleased()
+
         for char in text {
             // P1 Security: Check for cancellation to stop typing when recording is cancelled
             // Without this, cancelled tasks continue typing for up to 50s (10k chars × 5ms)
@@ -726,6 +730,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 Logger.app.debug("Text insertion cancelled")
                 return
             }
+
+            // If modifiers are held mid-typing, wait for release
+            // This handles cases where user taps Control during text insertion
+            await waitForModifiersReleased()
 
             var unichar = Array(String(char).utf16)
 
@@ -742,6 +750,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             // Use Task.sleep instead of usleep for proper async behavior
             try? await Task.sleep(nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000)
         }
+    }
+
+    /// Wait until no modifier keys (Control, Command, Option, Shift) are pressed
+    private func waitForModifiersReleased() async {
+        var attempts = 0
+        let maxAttempts = 100  // 1 second max wait (100 * 10ms)
+
+        while attempts < maxAttempts {
+            let flags = CGEventSource.flagsState(.combinedSessionState)
+            let hasModifiers = flags.contains(.maskControl) ||
+                               flags.contains(.maskCommand) ||
+                               flags.contains(.maskAlternate) ||
+                               flags.contains(.maskShift)
+
+            if !hasModifiers {
+                return
+            }
+
+            attempts += 1
+            try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        }
+
+        Logger.app.warning("Timed out waiting for modifier keys to be released")
     }
 
     // MARK: - Microphone Permission
