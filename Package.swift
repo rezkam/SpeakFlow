@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.2
 import PackageDescription
 
 let package = Package(
@@ -6,10 +6,16 @@ let package = Package(
     platforms: [
         .macOS(.v14)
     ],
+    dependencies: [
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9")
+    ],
     targets: [
         // Core library with testable business logic
         .target(
             name: "SpeakFlowCore",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio")
+            ],
             path: "Sources/SpeakFlowCore"
         ),
         // Main executable
@@ -25,7 +31,20 @@ let package = Package(
         .executableTarget(
             name: "SpeakFlowTestRunner",
             dependencies: ["SpeakFlowCore"],
-            path: "Tests"
+            path: "Tests",
+            exclude: ["VADTests.swift"]  // Uses Swift Testing framework, tests are in TestRunner.swift
+        ),
+        // Live end-to-end test runner (real mic + real transcription API)
+        .executableTarget(
+            name: "SpeakFlowLiveE2E",
+            dependencies: ["SpeakFlowCore"],
+            path: "Sources/LiveE2E"
+        ),
+        .testTarget(
+            name: "SpeakFlowCoreTests",
+            dependencies: ["SpeakFlowCore"],
+            path: "Tests",
+            sources: ["VADTests.swift"]
         ),
     ]
 )

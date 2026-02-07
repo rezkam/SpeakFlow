@@ -78,9 +78,25 @@ swift build
 # Release
 ./scripts/build-release.sh
 
-# Test
-swift test
+# Run all tests (core + swift + UI E2E)
+make test
+
+# Build + full test gate
+make check
+
+# UI test harness (requires full Xcode + UI test target setup)
+./scripts/run-ui-tests.sh
+
+# Live E2E (real microphone + real transcription API)
+make test-live-e2e
+
+# Live E2E auto-end timing suite (short/long/pause/very-long speech)
+make test-live-e2e-autoend
 ```
+
+`make test` and `make check` print concise status lines and always write full logs to a temp file (path printed as `Log: ...`).
+
+See `UITests/README.md` for one-time Xcode UI Testing Bundle setup required by UI E2E tests.
 
 ## Troubleshooting
 
