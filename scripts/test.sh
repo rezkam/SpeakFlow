@@ -6,9 +6,12 @@ unset -f git 2>/dev/null || true
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$ROOT_DIR/.build/module-cache}"
-export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/clang-module-cache}"
-mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" .build
+# Optional module-cache overrides — skip in sandboxed environments
+if mkdir -p "$ROOT_DIR/.build" 2>/dev/null; then
+    export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$ROOT_DIR/.build/module-cache}"
+    export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/clang-module-cache}"
+    mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" 2>/dev/null || true
+fi
 
 LOG_FILE="${SPEAKFLOW_TEST_LOG_FILE:-$(mktemp /tmp/speakflow-test-XXXXXX).log}"
 if [ "${SPEAKFLOW_TEST_LOG_APPEND:-0}" = "1" ]; then
