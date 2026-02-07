@@ -25,8 +25,7 @@ let package = Package(
         .executableTarget(
             name: "SpeakFlowTestRunner",
             dependencies: ["SpeakFlowCore"],
-            path: "Tests",
-            sources: ["TestRunner.swift"]
+            path: "Tests"
         ),
     ]
 )
