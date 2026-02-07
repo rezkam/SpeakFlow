@@ -6,16 +6,10 @@ let package = Package(
     platforms: [
         .macOS(.v14)
     ],
-    dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.0")
-    ],
     targets: [
         // Core library with testable business logic
         .target(
             name: "SpeakFlowCore",
-            dependencies: [
-                .product(name: "FluidAudio", package: "FluidAudio")
-            ],
             path: "Sources/SpeakFlowCore"
         ),
         // Main executable
