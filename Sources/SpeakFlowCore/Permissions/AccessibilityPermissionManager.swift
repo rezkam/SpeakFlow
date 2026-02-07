@@ -51,9 +51,10 @@ public final class AccessibilityPermissionManager {
 
         if shouldShowAlert {
             // Show our detailed alert after a brief delay to let system prompt appear/dismiss
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.showPermissionAlert()
-                self?.startPollingForPermission()
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(300))
+                self.showPermissionAlert()
+                self.startPollingForPermission()
             }
         }
 
@@ -61,45 +62,43 @@ public final class AccessibilityPermissionManager {
     }
 
     private func showPermissionAlert() {
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Enable Accessibility Access"
-            alert.informativeText = """
-            This app needs Accessibility permission to type dictated text into other applications.
+        let alert = NSAlert()
+        alert.messageText = "Enable Accessibility Access"
+        alert.informativeText = """
+        This app needs Accessibility permission to type dictated text into other applications.
 
-            We've already added this app to your Accessibility settings.
+        We've already added this app to your Accessibility settings.
 
-            To enable it:
-            1. Click "Open System Settings" below
-            2. Find this app in the Accessibility list (already added for you)
-            3. Click the toggle switch to turn it ON
-            4. Return to this app — we'll automatically detect when you enable it
+        To enable it:
+        1. Click "Open System Settings" below
+        2. Find this app in the Accessibility list (already added for you)
+        3. Click the toggle switch to turn it ON
+        4. Return to this app — we'll automatically detect when you enable it
 
-            💡 You may need to unlock the settings with your password first.
-            """
-            alert.alertStyle = .informational
-            alert.icon = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: "Permission")
+        💡 You may need to unlock the settings with your password first.
+        """
+        alert.alertStyle = .informational
+        alert.icon = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: "Permission")
 
-            alert.addButton(withTitle: "Open System Settings")
-            alert.addButton(withTitle: "Remind Me Later")
-            alert.addButton(withTitle: "Quit App")
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Remind Me Later")
+        alert.addButton(withTitle: "Quit App")
 
-            let response = alert.runModal()
+        let response = alert.runModal()
 
-            switch response {
-            case .alertFirstButtonReturn: // Open System Settings
-                self.openAccessibilitySettings()
+        switch response {
+        case .alertFirstButtonReturn: // Open System Settings
+            self.openAccessibilitySettings()
 
-            case .alertSecondButtonReturn: // Remind Me Later
-                Logger.permissions.info("User postponed accessibility permission")
+        case .alertSecondButtonReturn: // Remind Me Later
+            Logger.permissions.info("User postponed accessibility permission")
 
-            case .alertThirdButtonReturn: // Quit
-                Logger.app.info("User chose to quit from permission dialog")
-                NSApp.terminate(nil)
+        case .alertThirdButtonReturn: // Quit
+            Logger.app.info("User chose to quit from permission dialog")
+            NSApp.terminate(nil)
 
-            default:
-                break
-            }
+        default:
+            break
         }
     }
 
@@ -153,21 +152,20 @@ public final class AccessibilityPermissionManager {
 
     private func showPermissionGrantedAlert() {
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Accessibility Permission Granted"
-            alert.informativeText = """
-            The app now has permission to insert dictated text into other applications.
+        
+        let alert = NSAlert()
+        alert.messageText = "Accessibility Permission Granted"
+        alert.informativeText = """
+        The app now has permission to insert dictated text into other applications.
 
-            You can start using the dictation feature with \(hotkeyName).
-            """
-            alert.alertStyle = .informational
-            alert.icon = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Success")
+        You can start using the dictation feature with \(hotkeyName).
+        """
+        alert.alertStyle = .informational
+        alert.icon = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Success")
 
-            alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "OK")
 
-            alert.runModal()
-        }
+        alert.runModal()
     }
 
     public func stopPolling() {

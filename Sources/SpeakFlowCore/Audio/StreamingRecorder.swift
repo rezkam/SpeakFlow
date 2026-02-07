@@ -1,4 +1,4 @@
-@preconcurrency import AVFoundation
+import AVFoundation
 import Accelerate
 import OSLog
 
@@ -92,6 +92,33 @@ private final class AudioSampleQueue: @unchecked Sendable {
     }
 }
 
+/// Helper for AVAudioConverter input block that ensures buffer is only supplied once.
+/// Internal for testing.
+///
+/// Uses a class-based flag to avoid capturing a `var` in a `@Sendable` closure,
+/// which is prohibited in Swift 6.2 strict concurrency mode.
+func createOneShotInputBlock(buffer: AVAudioPCMBuffer) -> AVAudioConverterInputBlock {
+    // Wraps both the one-shot flag and the non-Sendable AVAudioPCMBuffer
+    // in a single @unchecked Sendable container. This is safe because the
+    // converter callback is only invoked synchronously during convert().
+    final class OneShotState: @unchecked Sendable {
+        var provided = false
+        let buffer: AVAudioPCMBuffer
+        init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+    }
+    let state = OneShotState(buffer)
+    return { _, outStatus in
+        if !state.provided {
+            state.provided = true
+            outStatus.pointee = .haveData
+            return state.buffer
+        } else {
+            outStatus.pointee = .noDataNow
+            return nil
+        }
+    }
+}
+
 /// Install audio tap outside MainActor context to avoid isolation assertions.
 private func installAudioTap(
     on inputNode: AVAudioInputNode,
@@ -114,10 +141,8 @@ private func installAudioTap(
         }
 
         var error: NSError?
-        converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-            outStatus.pointee = .haveData
-            return buffer
-        }
+        let inputBlock = createOneShotInputBlock(buffer: buffer)
+        converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
 
         if let channelData = convertedBuffer.floatChannelData?[0] {
             let frames = Int(convertedBuffer.frameLength)
@@ -178,10 +203,14 @@ public final class StreamingRecorder {
         stop()
     }
 
-    public func start() async {
+    /// Start recording audio.
+    /// Returns `true` if the audio engine started successfully, `false` on failure.
+    /// On failure, all state is rolled back (engine, buffer, flags cleaned up).
+    @discardableResult
+    public func start() async -> Bool {
         sessionStartDate = Date()
         audioEngine = AVAudioEngine()
-        guard let engine = audioEngine else { return }
+        guard let engine = audioEngine else { return false }
 
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -192,9 +221,14 @@ public final class StreamingRecorder {
             interleaved: false
         ) else {
             Logger.audio.error("Failed to create output audio format")
-            return
+            audioEngine = nil
+            return false
         }
-        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else { return }
+        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            Logger.audio.error("Failed to create audio converter")
+            audioEngine = nil
+            return false
+        }
 
         audioBuffer = AudioBuffer(sampleRate: sampleRate)
         state.setRecording(true)
@@ -210,7 +244,7 @@ public final class StreamingRecorder {
             Logger.audio.info("Recording cancelled during VAD initialization, aborting start")
             audioEngine = nil
             audioBuffer = nil
-            return
+            return false
         }
 
         // Capture references for use in audio callback (NO self capture)
@@ -255,8 +289,18 @@ public final class StreamingRecorder {
                     await self?.periodicCheck()
                 }
             }
+            return true
         } catch {
             Logger.audio.error("Failed to start audio engine: \(error.localizedDescription)")
+            // Rollback all state on failure
+            engine.inputNode.removeTap(onBus: 0)
+            audioEngine = nil
+            audioBuffer = nil
+            state.setRecording(false)
+            vadProcessor = nil
+            sessionController = nil
+            sessionStartDate = nil
+            return false
         }
     }
 
@@ -583,6 +627,62 @@ public final class StreamingRecorder {
         wav.append(withUnsafeBytes(of: sz.littleEndian) { Data($0) })
         int16.forEach { wav.append(withUnsafeBytes(of: $0.littleEndian) { Data($0) }) }
         return wav
+    }
+
+    /// Start a mock recording session using provided audio data.
+    /// Used for E2E testing in environments without microphone hardware.
+    public func startMock(audioData: [Float]) async {
+        sessionStartDate = Date()
+        audioBuffer = AudioBuffer(sampleRate: sampleRate)
+        state.setRecording(true)
+        state.setLastSoundTime(Date())
+
+        await initializeVAD()
+        
+        guard state.getRecording() else { return }
+        Logger.audio.info("Starting MOCK recording with \(audioData.count) samples")
+        
+        // Start timers (same as real recording)
+        processingTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.processQueuedSamples()
+            }
+        }
+        
+        checkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.periodicCheck()
+            }
+        }
+        
+        // Feed samples in a background task
+        Task {
+            let chunkSize = Int(sampleRate * 0.05) // 50ms chunks
+            var offset = 0
+            
+            while state.getRecording() && offset < audioData.count {
+                let end = min(offset + chunkSize, audioData.count)
+                let frames = Array(audioData[offset..<end])
+                
+                var rms: Float = 0
+                vDSP_rmsqv(frames, 1, &rms, vDSP_Length(frames.count))
+                let hasSpeech = rms > Config.silenceThreshold
+                
+                if hasSpeech {
+                    state.updateLastSoundTime()
+                }
+                
+                sampleQueue.enqueue(frames: frames, hasSpeech: hasSpeech)
+                
+                offset = end
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            
+            if offset >= audioData.count {
+                Logger.audio.info("MOCK recording finished feeding samples")
+                // Keep running until stopped externally (by timeout or auto-end)
+            }
+        }
     }
 }
 

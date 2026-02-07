@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "SpeakFlow",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v15)
     ],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9")

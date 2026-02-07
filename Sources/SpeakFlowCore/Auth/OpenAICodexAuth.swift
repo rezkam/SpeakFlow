@@ -3,7 +3,7 @@ import CryptoKit
 import OSLog
 
 /// OAuth credentials for OpenAI Codex (matches ~/.codex/auth.json format)
-public struct OAuthCredentials: Codable {
+public struct OAuthCredentials: Codable, Sendable {
     public var accessToken: String
     public var refreshToken: String
     public var idToken: String?
@@ -33,6 +33,34 @@ private struct CodexAuthFile: Codable {
         var access_token: String
         var refresh_token: String
         var account_id: String
+    }
+}
+
+/// Actor that serializes token refresh operations so concurrent callers share a single in-flight refresh.
+public actor TokenRefreshCoordinator {
+    public static let shared = TokenRefreshCoordinator()
+    
+    private var inFlightRefresh: Task<OAuthCredentials, Error>?
+    
+    /// Refresh tokens, coalescing concurrent callers into a single network request.
+    /// If a refresh is already in flight, all callers await the same result.
+    public func refreshIfNeeded(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
+        // If there's already a refresh in flight, join it
+        if let existing = inFlightRefresh {
+            return try await existing.value
+        }
+        
+        // Start a new refresh
+        let task = Task<OAuthCredentials, Error> {
+            defer { self.clearInFlight() }
+            return try await OpenAICodexAuth.refreshTokens(credentials)
+        }
+        inFlightRefresh = task
+        return try await task.value
+    }
+    
+    private func clearInFlight() {
+        inFlightRefresh = nil
     }
 }
 
@@ -123,6 +151,32 @@ public final class OpenAICodexAuth {
         )
     }
     
+    // MARK: - Form Encoding
+
+    /// Build an `application/x-www-form-urlencoded` body using strict encoding that is
+    /// safe for opaque token values (e.g. values containing `&`, `=`, `+`).
+    ///
+    /// NOTE: `URLComponents.percentEncodedQuery` keeps `+` unescaped, but in
+    /// form-encoded bodies `+` can be interpreted as space. We therefore encode
+    /// with a stricter character set so literal `+` becomes `%2B`.
+    static func formURLEncodedBody(_ params: [String: String]) -> Data {
+        let encoded = params
+            .sorted { $0.key < $1.key }
+            .map { "\(formPercentEncode($0.key))=\(formPercentEncode($0.value))" }
+            .joined(separator: "&")
+        return Data(encoded.utf8)
+    }
+
+    private static let formAllowedCharacters: CharacterSet = {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return allowed
+    }()
+
+    private static func formPercentEncode(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: formAllowedCharacters) ?? ""
+    }
+
     // MARK: - Token Exchange
     
     public static func exchangeCodeForTokens(code: String, flow: AuthorizationFlow) async throws -> OAuthCredentials {
@@ -137,11 +191,8 @@ public final class OpenAICodexAuth {
             "code_verifier": flow.verifier,
             "redirect_uri": redirectURI,
         ]
-        
-        request.httpBody = params
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }
-            .joined(separator: "&")
-            .data(using: .utf8)
+
+        request.httpBody = formURLEncodedBody(params)
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -191,11 +242,8 @@ public final class OpenAICodexAuth {
             "refresh_token": credentials.refreshToken,
             "client_id": clientId,
         ]
-        
-        request.httpBody = params
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }
-            .joined(separator: "&")
-            .data(using: .utf8)
+
+        request.httpBody = formURLEncodedBody(params)
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -324,15 +372,16 @@ public final class OpenAICodexAuth {
         Logger.auth.info("Credentials deleted")
     }
     
-    /// Get valid access token, refreshing if needed
+    /// Get valid access token, refreshing if needed.
+    /// Concurrent callers share a single in-flight refresh via `TokenRefreshCoordinator`.
     public static func getValidAccessToken() async throws -> String {
         guard var credentials = loadCredentials() else {
             throw AuthError.notLoggedIn
         }
         
-        // Refresh if older than 1 hour
+        // Refresh if older than 1 hour — coalesced so concurrent callers share one request
         if credentials.shouldRefresh(after: 3600) {
-            credentials = try await refreshTokens(credentials)
+            credentials = try await TokenRefreshCoordinator.shared.refreshIfNeeded(credentials)
         }
         
         return credentials.accessToken

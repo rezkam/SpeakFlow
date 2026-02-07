@@ -24,7 +24,15 @@ public final class HotkeyListener {
 
     public var onActivate: (() -> Void)?
 
+    #if DEBUG
+    static var _testStopHook: (() -> Void)?
+    #endif
+
     public init() {}
+
+    @MainActor deinit {
+        stop()
+    }
 
     public func start(type: HotkeyType) {
         stop()
@@ -39,6 +47,10 @@ public final class HotkeyListener {
     }
 
     public func stop() {
+        #if DEBUG
+        Self._testStopHook?()
+        #endif
+
         // Stop CGEvent tap
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
