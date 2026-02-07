@@ -10,8 +10,12 @@ export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$ROOT_DIR/.
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/clang-module-cache}"
 mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" .build
 
-LOG_FILE="${SPEAKFLOW_CHECK_LOG_FILE:-$(mktemp /tmp/speakflow-check-XXXXXX).log}"
-: > "$LOG_FILE"
+LOG_FILE="${SPEAKFLOW_TEST_LOG_FILE:-$(mktemp /tmp/speakflow-test-XXXXXX).log}"
+if [ "${SPEAKFLOW_TEST_LOG_APPEND:-0}" = "1" ]; then
+    touch "$LOG_FILE"
+else
+    : > "$LOG_FILE"
+fi
 
 FAILED=0
 FAILED_STEPS=()
@@ -30,16 +34,20 @@ run_step() {
     fi
 }
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  SpeakFlow Check"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  SpeakFlow Test"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+fi
 
-run_step "Build............" swift build
 run_step "Core tests......." swift run SpeakFlowTestRunner
 run_step "Swift tests......" swift test
 run_step "UI E2E tests...." ./scripts/run-ui-tests.sh
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+fi
+
 if [ "$FAILED" -eq 0 ]; then
     echo "Status: ALL OK"
 else

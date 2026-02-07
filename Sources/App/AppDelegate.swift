@@ -22,6 +22,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     private var queuedInsertionCount = 0  // P3 Security: Track queue depth to enforce limit
     private var keyMonitor: Any?  // Monitor for Escape/Enter keys during recording
     private var shouldPressEnterOnComplete = false  // Press Enter after transcription completes
+    private var uiTestHarness: UITestHarnessController?
+    private var uiTestToggleCount = 0
+    private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
+    private let useMockRecordingInUITests = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MOCK_RECORDING"] != "0"
+    private let resetUITestState = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_RESET_STATE"] == "1"
+    private let uiTestHotkeyCycle: [HotkeyType] = [.controlOptionD, .controlOptionSpace, .commandShiftD]
 
     // Menu bar icon
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
@@ -34,14 +40,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         permissionManager = AccessibilityPermissionManager()
         permissionManager.delegate = self
 
-        // Check accessibility permission - ALWAYS show alert on app start if not granted
-        let trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true, isAppStart: true)
-        Logger.permissions.debug("AXIsProcessTrusted: \(trusted)")
-
-        if !trusted {
-            Logger.permissions.warning("No Accessibility permission - showing permission request")
+        let trusted: Bool
+        if isUITestMode {
+            trusted = true
+            Logger.permissions.info("UI test mode enabled; skipping startup permission prompts")
         } else {
-            Logger.permissions.info("Accessibility permission already granted")
+            // Check accessibility permission - ALWAYS show alert on app start if not granted
+            trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true, isAppStart: true)
+            Logger.permissions.debug("AXIsProcessTrusted: \(trusted)")
+
+            if !trusted {
+                Logger.permissions.warning("No Accessibility permission - showing permission request")
+            } else {
+                Logger.permissions.info("Accessibility permission already granted")
+            }
         }
 
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
@@ -57,10 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
         setupTranscriptionCallbacks()
 
-        // Check and request microphone permission on startup
-        checkMicrophonePermission()
+        if !isUITestMode {
+            // Check and request microphone permission on startup
+            checkMicrophonePermission()
+        }
 
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(isUITestMode ? .regular : .accessory)
+        if isUITestMode {
+            setupUITestHarness()
+        }
 
         // Check permission when app becomes active
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -85,6 +102,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         Transcription.shared.queueBridge.onAllComplete = { [weak self] in
             self?.finishIfDone()
         }
+    }
+
+    private func setupUITestHarness() {
+        guard isUITestMode, uiTestHarness == nil else { return }
+
+        if resetUITestState {
+            Statistics.shared.reset()
+            uiTestToggleCount = 0
+        }
+        if resetUITestState || !uiTestHotkeyCycle.contains(HotkeySettings.shared.currentHotkey) {
+            HotkeySettings.shared.currentHotkey = .controlOptionD
+        }
+
+        let harness = UITestHarnessController()
+        harness.onStartClicked = { [weak self] in
+            self?.startRecording()
+        }
+        harness.onStopClicked = { [weak self] in
+            self?.stopRecording(reason: .ui)
+        }
+        harness.onHotkeyTriggered = { [weak self] pressedHotkey in
+            self?.handleUITestHotkey(pressedHotkey)
+        }
+        harness.onNextHotkeyClicked = { [weak self] in
+            self?.cycleUITestHotkey()
+        }
+        harness.onSeedStatsClicked = { [weak self] in
+            self?.seedUITestStatistics()
+        }
+        harness.onResetStatsClicked = { [weak self] in
+            self?.resetUITestStatistics()
+        }
+
+        uiTestHarness = harness
+        refreshUITestHarness()
+        harness.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleUITestHotkey(_ pressedHotkey: HotkeyType?) {
+        if let pressedHotkey, pressedHotkey != HotkeySettings.shared.currentHotkey {
+            return
+        }
+        toggle()
+    }
+
+    private func cycleUITestHotkey() {
+        guard isUITestMode else { return }
+
+        let current = HotkeySettings.shared.currentHotkey
+        guard let currentIndex = uiTestHotkeyCycle.firstIndex(of: current) else {
+            HotkeySettings.shared.currentHotkey = uiTestHotkeyCycle[0]
+            refreshUITestHarness()
+            return
+        }
+
+        let nextIndex = (currentIndex + 1) % uiTestHotkeyCycle.count
+        HotkeySettings.shared.currentHotkey = uiTestHotkeyCycle[nextIndex]
+        refreshUITestHarness()
+    }
+
+    private func seedUITestStatistics() {
+        guard isUITestMode else { return }
+        Statistics.shared.recordApiCall()
+        Statistics.shared.recordTranscription(text: "ui harness seeded stats", audioDurationSeconds: 1.2)
+        refreshUITestHarness()
+    }
+
+    private func resetUITestStatistics() {
+        guard isUITestMode else { return }
+        Statistics.shared.reset()
+        refreshUITestHarness()
+    }
+
+    private func refreshUITestHarness() {
+        guard isUITestMode else { return }
+        uiTestHarness?.updateState(
+            isRecording: isRecording,
+            toggleCount: uiTestToggleCount,
+            mode: useMockRecordingInUITests ? "mock" : "live",
+            hotkeyDisplay: HotkeySettings.shared.currentHotkey.displayName,
+            statsApiCalls: Statistics.shared.apiCallCount,
+            statsWords: Statistics.shared.wordCount
+        )
     }
 
     @objc func applicationDidBecomeActive(_ notification: Notification) {
@@ -218,6 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         // Rebuild menu to update checkmarks and hotkey display
         let trusted = AXIsProcessTrusted()
         buildMenu(trusted: trusted)
+        refreshUITestHarness()
     }
 
     @objc private func changeChunkDuration(_ sender: NSMenuItem) {
@@ -416,6 +518,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     func setupHotkey() {
+        if isUITestMode {
+            hotkeyListener?.stop()
+            hotkeyListener = nil
+            Logger.hotkey.info("UI test mode: skipping global hotkey listener")
+            return
+        }
+
         let type = HotkeySettings.shared.currentHotkey
 
         if hotkeyListener == nil {
@@ -524,50 +633,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         guard isRecording else { return }
         Logger.audio.info("Stopping recording with Enter submit")
         shouldPressEnterOnComplete = true
-        stopRecording()
+        stopRecording(reason: .enter)
     }
 
     // MARK: - Recording
 
     @objc func toggle() {
-        if isRecording { stopRecording() } else { startRecording() }
+        if isUITestMode {
+            uiTestToggleCount += 1
+        }
+
+        if isRecording { stopRecording(reason: .hotkey) } else { startRecording() }
+        refreshUITestHarness()
     }
 
     func startRecording() {
         guard !isRecording else { return }
 
-        // Check accessibility permission before starting
-        if !AXIsProcessTrusted() {
-            Logger.permissions.warning("Cannot start recording - accessibility permission required")
-            NSSound(named: "Basso")?.play()
-            _ = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
+        if isUITestMode && useMockRecordingInUITests {
+            isRecording = true
+            isProcessingFinal = false
+            hasPlayedCompletionSound = false
+            shouldPressEnterOnComplete = false
+            fullTranscript = ""
+            updateStatusIcon()
+            refreshUITestHarness()
             return
         }
 
-        // Check microphone permission before starting
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            break // Permission granted, continue
-        case .notDetermined:
-            Logger.permissions.info("Microphone permission not yet requested")
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                DispatchQueue.main.async {
-                    if granted {
-                        self?.startRecording() // Retry after permission granted
-                    } else {
-                        self?.showMicrophonePermissionAlert()
+        if !isUITestMode {
+            // Check accessibility permission before starting
+            if !AXIsProcessTrusted() {
+                Logger.permissions.warning("Cannot start recording - accessibility permission required")
+                NSSound(named: "Basso")?.play()
+                _ = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
+                return
+            }
+
+            // Check microphone permission before starting
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .authorized:
+                break // Permission granted, continue
+            case .notDetermined:
+                Logger.permissions.info("Microphone permission not yet requested")
+                AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                    DispatchQueue.main.async {
+                        if granted {
+                            self?.startRecording() // Retry after permission granted
+                        } else {
+                            self?.showMicrophonePermissionAlert()
+                        }
                     }
                 }
+                return
+            case .denied, .restricted:
+                Logger.permissions.warning("Microphone permission denied")
+                NSSound(named: "Basso")?.play()
+                showMicrophonePermissionAlert()
+                return
+            @unknown default:
+                Logger.permissions.warning("Unknown microphone permission status")
+                return
             }
-            return
-        case .denied, .restricted:
-            Logger.permissions.warning("Microphone permission denied")
-            NSSound(named: "Basso")?.play()
-            showMicrophonePermissionAlert()
-            return
-        @unknown default:
-            Logger.permissions.warning("Unknown microphone permission status")
-            return
         }
 
         isRecording = true
@@ -614,19 +741,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 Transcription.shared.transcribe(seq: seq, chunk: chunk)
             }
         }
-        recorder?.start()
+        recorder?.onAutoEnd = { [weak self] in
+            Task { @MainActor in
+                Logger.audio.warning("Auto-end triggered by VAD silence detection (autoEndSilenceDuration=\(Settings.shared.autoEndSilenceDuration)s, vadMinSilenceAfterSpeech=\(Config.vadMinSilenceAfterSpeech)s)")
+                self?.stopRecording(reason: .autoEnd)
+            }
+        }
+        Task { @MainActor in
+            await recorder?.start()
+        }
         startKeyListener()  // Listen for Escape (cancel) or Enter (submit)
+        refreshUITestHarness()
     }
 
-    func stopRecording() {
+    /// Why the recording stopped — logged for debugging P0 auto-end bug
+    enum StopReason: String {
+        case hotkey    = "HOTKEY_TOGGLE"
+        case autoEnd   = "VAD_AUTO_END"
+        case enter     = "ENTER_SUBMIT"
+        case escape    = "ESCAPE_CANCEL"
+        case ui        = "UI_BUTTON"
+        case unknown   = "UNKNOWN"
+    }
+
+    func stopRecording(reason: StopReason = .unknown) {
         stopKeyListener()
         guard isRecording else { return }
+
+        Logger.audio.error("🔴 STOP RECORDING reason=\(reason.rawValue) sessionDur=\(String(format: "%.1f", Date().timeIntervalSince(self.recorder?.sessionStartDate ?? Date())))s transcript=\"\(self.fullTranscript.prefix(80))\"")
+
+        if isUITestMode && useMockRecordingInUITests {
+            isRecording = false
+            isProcessingFinal = false
+            updateStatusIcon()
+            refreshUITestHarness()
+            return
+        }
+
         isRecording = false
         isProcessingFinal = true  // Keep inserting text while waiting for final transcriptions
         updateStatusIcon()
         NSSound(named: "Pop")?.play()
         recorder?.stop()
         recorder = nil
+        refreshUITestHarness()
 
         // Wait a moment for final chunks to process, then check completion
         Task {
@@ -638,6 +796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     @MainActor
     func cancelRecording() {
         guard isRecording || isProcessingFinal else { return }
+        Logger.audio.error("🔴 STOP RECORDING reason=ESCAPE_CANCEL")
         stopKeyListener()
         isRecording = false
         isProcessingFinal = false
@@ -651,6 +810,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         recorder = nil
         Transcription.shared.cancelAll()
         updateStatusIcon()
+        refreshUITestHarness()
         Logger.audio.debug("Playing cancel sound (Glass)")
         NSSound(named: "Glass")?.play()
         Logger.audio.info("Recording cancelled")

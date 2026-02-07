@@ -132,4 +132,8 @@ public final class Statistics {
         🌐 API Calls: \(formattedApiCalls)
         """
     }
+
+    /// Raw counters exposed for automation/testing.
+    public var apiCallCount: Int { totalApiCalls }
+    public var wordCount: Int { totalWords }
 }
