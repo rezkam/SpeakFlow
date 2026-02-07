@@ -21,5 +21,12 @@ let package = Package(
                 .process("../Resources")
             ]
         ),
+        // Test executable (runs without XCTest/swift-testing)
+        .executableTarget(
+            name: "SpeakFlowTestRunner",
+            dependencies: ["SpeakFlowCore"],
+            path: "Tests",
+            sources: ["TestRunner.swift"]
+        ),
     ]
 )
