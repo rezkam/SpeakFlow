@@ -20,7 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     var targetElement: AXUIElement?  // Store focused element when recording starts
     private var textInsertionTask: Task<Void, Never>?  // Track ongoing text insertion
     private var queuedInsertionCount = 0  // P3 Security: Track queue depth to enforce limit
-    private var escapeMonitor: Any?  // Monitor for Escape key during recording
+    private var keyMonitor: Any?  // Monitor for Escape/Enter keys during recording
+    private var shouldPressEnterOnComplete = false  // Press Enter after transcription completes
 
     // Menu bar icon
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
@@ -491,25 +492,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     // MARK: - Escape Key Listener (only active during recording)
 
-    private func startEscapeListener() {
-        guard escapeMonitor == nil else { return }
-        escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            // Escape key code is 53
-            if event.keyCode == 53 {
+    private func startKeyListener() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            switch event.keyCode {
+            case 53:  // Escape key
                 DispatchQueue.main.async {
                     self?.cancelRecording()
                 }
+            case 36:  // Enter key
+                DispatchQueue.main.async {
+                    self?.stopRecordingAndSubmit()
+                }
+            default:
+                break
             }
         }
-        Logger.audio.debug("Escape listener started")
+        Logger.audio.debug("Key listener started (Escape=cancel, Enter=submit)")
     }
 
-    private func stopEscapeListener() {
-        if let monitor = escapeMonitor {
+    private func stopKeyListener() {
+        if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
-            escapeMonitor = nil
-            Logger.audio.debug("Escape listener stopped")
+            keyMonitor = nil
+            Logger.audio.debug("Key listener stopped")
         }
+    }
+    
+    /// Stop recording and press Enter after transcription completes (for chat submit)
+    func stopRecordingAndSubmit() {
+        guard isRecording else { return }
+        Logger.audio.info("Stopping recording with Enter submit")
+        shouldPressEnterOnComplete = true
+        stopRecording()
     }
 
     // MARK: - Recording
@@ -558,6 +573,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         isRecording = true
         isProcessingFinal = false  // Reset in case of previous session
         hasPlayedCompletionSound = false  // Reset completion sound guard
+        shouldPressEnterOnComplete = false  // Reset submit flag
         fullTranscript = ""
         Task { await Transcription.shared.queueBridge.reset() }
 
@@ -599,11 +615,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             }
         }
         recorder?.start()
-        startEscapeListener()  // Listen for Escape to cancel
+        startKeyListener()  // Listen for Escape (cancel) or Enter (submit)
     }
 
     func stopRecording() {
-        stopEscapeListener()  // Stop listening for Escape
+        stopKeyListener()
         guard isRecording else { return }
         isRecording = false
         isProcessingFinal = true  // Keep inserting text while waiting for final transcriptions
@@ -622,9 +638,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     @MainActor
     func cancelRecording() {
         guard isRecording || isProcessingFinal else { return }
-        stopEscapeListener()  // Stop listening for Escape
+        stopKeyListener()
         isRecording = false
         isProcessingFinal = false
+        shouldPressEnterOnComplete = false  // Reset submit flag on cancel
         fullTranscript = ""  // P2 Security: Reset transcript to prevent stale data
         targetElement = nil
         textInsertionTask?.cancel()
@@ -688,7 +705,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 Logger.transcription.info("Session complete: \(self.fullTranscript, privacy: .private)")
                 Logger.audio.debug("Playing completion sound (Glass)")
                 NSSound(named: "Glass")?.play()
+                
+                // Press Enter if user stopped with Enter key (for chat submit)
+                if self.shouldPressEnterOnComplete {
+                    self.shouldPressEnterOnComplete = false
+                    self.pressEnterKey()
+                }
             }
+        }
+    }
+    
+    /// Simulate pressing the Enter key (for chat submit after transcription)
+    private func pressEnterKey() {
+        Logger.audio.debug("Pressing Enter key for submit")
+        
+        let keyCode: CGKeyCode = 36  // Enter key
+        
+        // Key down
+        if let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) {
+            keyDown.post(tap: .cghidEventTap)
+        }
+        
+        // Small delay between down and up
+        usleep(10000)  // 10ms
+        
+        // Key up
+        if let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
+            keyUp.post(tap: .cghidEventTap)
         }
     }
 
