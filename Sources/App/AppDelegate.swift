@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     var recorder: StreamingRecorder?
     var isRecording = false
     var isProcessingFinal = false  // Track if we're waiting for final transcriptions
+    var hasPlayedCompletionSound = false  // Guard against playing completion sound twice
     var fullTranscript = ""
     var permissionManager: AccessibilityPermissionManager!
     var targetElement: AXUIElement?  // Store focused element when recording starts
@@ -556,6 +557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
         isRecording = true
         isProcessingFinal = false  // Reset in case of previous session
+        hasPlayedCompletionSound = false  // Reset completion sound guard
         fullTranscript = ""
         Task { await Transcription.shared.queueBridge.reset() }
 
@@ -632,7 +634,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         recorder = nil
         Transcription.shared.cancelAll()
         updateStatusIcon()
-        NSSound(named: "Glass")?.play()  // Cancel sound
+        Logger.audio.debug("Playing cancel sound (Glass)")
+        NSSound(named: "Glass")?.play()
         Logger.audio.info("Recording cancelled")
     }
 
@@ -677,8 +680,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 self.queuedInsertionCount = 0  // P3 Security: Reset queue count on completion
                 self.updateStatusIcon()
                 guard !self.fullTranscript.isEmpty else { return }
+                
+                // Guard against playing completion sound twice
+                guard !self.hasPlayedCompletionSound else { return }
+                self.hasPlayedCompletionSound = true
 
                 Logger.transcription.info("Session complete: \(self.fullTranscript, privacy: .private)")
+                Logger.audio.debug("Playing completion sound (Glass)")
                 NSSound(named: "Glass")?.play()
             }
         }

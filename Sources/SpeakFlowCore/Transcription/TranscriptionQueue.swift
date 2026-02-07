@@ -101,6 +101,13 @@ public actor TranscriptionQueue {
 public final class TranscriptionQueueBridge {
     let queue = TranscriptionQueue()
     private var streamTask: Task<Void, Never>?
+    
+    /// Guard to prevent onAllComplete from firing multiple times per session.
+    /// Reset to false when a new session starts (via reset() or first nextSequence()).
+    private var hasSignaledCompletion = false
+    
+    /// Track whether a session has started (at least one sequence requested)
+    private var sessionStarted = false
 
     public var onTextReady: ((String) -> Void)?
     public var onAllComplete: (() -> Void)?
@@ -122,10 +129,17 @@ public final class TranscriptionQueueBridge {
 
     public func reset() async {
         await queue.reset()
+        hasSignaledCompletion = false
+        sessionStarted = false
     }
 
     public func nextSequence() async -> UInt64 {
-        await queue.nextSequence()
+        // Mark session as started and reset completion flag for new chunks
+        if !sessionStarted {
+            sessionStarted = true
+            hasSignaledCompletion = false
+        }
+        return await queue.nextSequence()
     }
 
     public func getPendingCount() async -> Int {
@@ -141,8 +155,15 @@ public final class TranscriptionQueueBridge {
     }
 
     public func checkCompletion() async {
+        // Guard: only fire completion once per session
+        guard !hasSignaledCompletion else { return }
+        guard sessionStarted else { return }
+        
         let pending = await queue.getPendingCount()
         if pending == 0 {
+            // Double-check after await (another task may have set it during suspension)
+            guard !hasSignaledCompletion else { return }
+            hasSignaledCompletion = true
             onAllComplete?()
         }
     }

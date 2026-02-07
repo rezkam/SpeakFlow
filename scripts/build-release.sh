@@ -14,8 +14,8 @@ cd "$PROJECT_DIR"
 
 echo "🔨 Building $APP_NAME v$VERSION..."
 
-# Build release binary
-swift build -c release
+# Build release binary (only main app, not test runner)
+swift build -c release --product SpeakFlow
 
 # Create app bundle
 rm -rf "$APP_NAME.app"
