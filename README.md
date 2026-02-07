@@ -1,25 +1,28 @@
 # SpeakFlow
 
-A macOS menu bar app for voice dictation using OpenAI's Whisper API. Press a hotkey, speak, and your transcribed text is automatically typed into any application.
+A macOS menu bar app that turns your voice into text — anywhere. Press a hotkey, speak naturally, and your words are transcribed and typed into whatever app you're using. Speech detection runs entirely on-device using a lightweight ML model, so only real speech is sent to the cloud for transcription.
 
-![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)
-![Swift 5.9](https://img.shields.io/badge/Swift-5.9-orange)
+![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
+![Swift 6](https://img.shields.io/badge/Swift-6-orange)
 
 ## Features
 
-- Voice-to-text dictation with hotkey
-- Universal text insertion via accessibility
-- ChatGPT OAuth login
-- Configurable chunking (30s - 1 hour)
-- Smart silence detection
-- Launch at login
-- Usage statistics
+- **Voice-to-text dictation** — press a hotkey, speak, text appears in any app
+- **On-device voice activity detection** — a ~2M parameter model runs locally on Apple Silicon to distinguish speech from silence in real-time, with no audio leaving your machine until speech is confirmed
+- **Smart chunking** — audio is split at natural sentence boundaries using silence detection, not arbitrary time cuts, so the transcriber always gets complete thoughts
+- **Automatic turn detection** — when you stop speaking, SpeakFlow detects the silence and ends the session automatically — no need to press the hotkey again
+- **Noise reduction** — silent and noise-only chunks are filtered out before transcription, saving API calls and improving accuracy
+- **Universal text insertion** — transcribed text is typed into whatever app has focus via macOS Accessibility
+- **ChatGPT OAuth login** — authenticate with your OpenAI account for Whisper API access
+- **Configurable chunk duration** — 15 seconds to unlimited (full recording)
+- **Launch at login** — runs quietly in the menu bar
+- **Usage statistics** — track API calls, words transcribed, and audio processed
 
 ## Quick Start
 
 ### Prerequisites
 
-- macOS 13.0+
+- macOS 15.0+ on Apple Silicon
 - Xcode Command Line Tools (`xcode-select --install`)
 - OpenAI Pro or Max subscription
 
@@ -60,13 +63,23 @@ Required to insert text into applications.
 | Action | Hotkey |
 |--------|--------|
 | Start/Stop dictation | Double-tap Control |
+| Cancel recording | Escape |
+| Stop and submit (press Enter) | Enter |
 
 ### Settings
 
-- **Activation Hotkey** - Double-tap Control, Control+Option+D, Control+Option+Space, or Command+Shift+D
-- **Chunk Duration** - 30s to 1 hour
-- **Skip Silent Chunks** - Save API calls
+- **Activation Hotkey** — Double-tap Control, Control+Option+D, Control+Option+Space, or Command+Shift+D
+- **Chunk Duration** — 15s, 30s, 45s, 1m, 2m, 5m, 10m, 15m, or Unlimited
+- **Skip Silent Chunks** — filter out silence-only audio before sending to API
 - **Launch at Login**
+
+## How It Works
+
+1. **Recording** — audio is captured from your microphone at 16kHz
+2. **On-device VAD** — a small (~2M parameter) voice activity detection model runs on Apple Silicon's Neural Engine to classify each audio frame as speech or silence
+3. **Smart chunking** — when the configured chunk duration is reached, SpeakFlow waits for a natural pause in speech before splitting, so sentences aren't cut mid-word
+4. **Auto-end** — if no speech is detected for 5 seconds after you stop talking, the session ends automatically
+5. **Transcription** — speech chunks are sent to OpenAI's Whisper API; results are reassembled in order and typed into the focused app in real-time
 
 ## Development
 
@@ -78,19 +91,19 @@ swift build
 # Release
 ./scripts/build-release.sh
 
-# Run all tests (core + swift + UI E2E)
+# Run all tests
 make test
 
 # Build + full test gate
 make check
 
-# UI test harness (requires full Xcode + UI test target setup)
+# UI test harness
 ./scripts/run-ui-tests.sh
 
 # Live E2E (real microphone + real transcription API)
 make test-live-e2e
 
-# Live E2E auto-end timing suite (short/long/pause/very-long speech)
+# Live E2E auto-end timing suite
 make test-live-e2e-autoend
 ```
 
