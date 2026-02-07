@@ -44,6 +44,7 @@ let package = Package(
             name: "SpeakFlowCoreTests",
             dependencies: ["SpeakFlowCore"],
             path: "Tests",
+            exclude: ["TestRunner.swift"],
             sources: ["VADTests.swift"]
         ),
     ]
