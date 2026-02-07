@@ -1,16 +1,24 @@
 import Foundation
 import OSLog
+import os
 
-/// Local HTTP server to receive OAuth callback
+/// Local HTTP server to receive OAuth callback.
+///
+/// All mutable shared state is protected by a single unfair lock to prevent races
+/// between start/stop/accept paths and continuation resume.
 public final class OAuthCallbackServer: @unchecked Sendable {
-    private var server: (any NSObjectProtocol)?
-    private var socket: Int32 = -1
-    private var isRunning = false
-    private var continuation: CheckedContinuation<String?, Never>?
-    
-    private let port: UInt16 = 1455
+    private struct State {
+        var socket: Int32 = -1
+        var isRunning = false
+        var continuationConsumed = true
+        var continuation: CheckedContinuation<String?, Never>?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    private let port: UInt16
     private let expectedState: String
-    
+
     private let successHTML = """
     <!doctype html>
     <html lang="en">
@@ -29,181 +37,204 @@ public final class OAuthCallbackServer: @unchecked Sendable {
     </body>
     </html>
     """
-    
-    public init(expectedState: String) {
+
+    public init(expectedState: String, port: UInt16 = 1455) {
         self.expectedState = expectedState
+        self.port = port
     }
-    
+
     deinit {
         stop()
     }
-    
-    /// Start the server and wait for callback
-    /// Returns the authorization code, or nil if cancelled/timeout
+
+    // MARK: - Thread-safe continuation management
+
+    /// Resume the callback continuation exactly once.
+    private func resumeOnce(returning value: String?) {
+        let continuation = state.withLock { state -> CheckedContinuation<String?, Never>? in
+            guard !state.continuationConsumed else { return nil }
+            state.continuationConsumed = true
+            let continuation = state.continuation
+            state.continuation = nil
+            return continuation
+        }
+
+        continuation?.resume(returning: value)
+    }
+
+    /// Start the server and wait for callback.
+    /// Returns authorization code, or nil on timeout/cancellation/error.
     public func waitForCallback(timeout: TimeInterval = 120) async -> String? {
         guard start() else {
             Logger.auth.error("Failed to start OAuth callback server")
             return nil
         }
-        
+
         defer { stop() }
-        
+
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                self.continuation = continuation
-                
-                // Start listening in background
+                state.withLock { state in
+                    state.continuation = continuation
+                    state.continuationConsumed = false
+                }
+
                 Task {
                     await self.acceptConnections(timeout: timeout)
                 }
             }
         } onCancel: {
+            self.resumeOnce(returning: nil)
             self.stop()
         }
     }
-    
+
     private func start() -> Bool {
-        socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard socket >= 0 else {
+        let alreadyRunning = state.withLock { $0.isRunning }
+        guard !alreadyRunning else {
+            Logger.auth.warning("OAuth callback server already running")
+            return false
+        }
+
+        let newSocket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard newSocket >= 0 else {
             Logger.auth.error("Failed to create socket")
             return false
         }
-        
-        // Allow port reuse
+
         var reuse: Int32 = 1
-        setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
-        
-        // Bind to localhost:1455
+        _ = setsockopt(newSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = port.bigEndian
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        
+
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.bind(socket, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Darwin.bind(newSocket, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        
+
         guard bindResult == 0 else {
             Logger.auth.error("Failed to bind to port \(self.port): \(String(cString: strerror(errno)))")
-            Darwin.close(socket)
-            socket = -1
+            Darwin.close(newSocket)
             return false
         }
-        
-        guard Darwin.listen(socket, 1) == 0 else {
+
+        guard Darwin.listen(newSocket, 1) == 0 else {
             Logger.auth.error("Failed to listen on socket")
-            Darwin.close(socket)
-            socket = -1
+            Darwin.close(newSocket)
             return false
         }
-        
-        isRunning = true
+
+        state.withLock { state in
+            state.socket = newSocket
+            state.isRunning = true
+        }
+
         Logger.auth.info("OAuth callback server started on port \(self.port)")
         return true
     }
-    
+
     private func acceptConnections(timeout: TimeInterval) async {
         let deadline = Date().addingTimeInterval(timeout)
-        
-        // Set socket to non-blocking
-        let flags = fcntl(socket, F_GETFL, 0)
-        fcntl(socket, F_SETFL, flags | O_NONBLOCK)
-        
-        while isRunning && Date() < deadline {
+
+        let currentSocket = state.withLock { $0.socket }
+        guard currentSocket >= 0 else {
+            resumeOnce(returning: nil)
+            return
+        }
+
+        let flags = fcntl(currentSocket, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(currentSocket, F_SETFL, flags | O_NONBLOCK)
+        }
+
+        while Date() < deadline {
+            if Task.isCancelled {
+                resumeOnce(returning: nil)
+                return
+            }
+
+            let (running, sock) = state.withLock { ($0.isRunning, $0.socket) }
+            guard running, sock >= 0 else { break }
+
             var clientAddr = sockaddr_in()
             var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-            
+
             let clientSocket = withUnsafeMutablePointer(to: &clientAddr) { ptr in
                 ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    Darwin.accept(socket, sockPtr, &addrLen)
+                    Darwin.accept(sock, sockPtr, &addrLen)
                 }
             }
-            
+
             if clientSocket >= 0 {
                 handleClient(clientSocket)
                 Darwin.close(clientSocket)
                 return
             }
-            
-            // No connection yet, wait a bit
+
             try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
         }
-        
-        // Timeout or stopped
-        continuation?.resume(returning: nil)
-        continuation = nil
+
+        // Timeout or stopped.
+        resumeOnce(returning: nil)
     }
-    
+
     private func handleClient(_ clientSocket: Int32) {
-        // Read request
         var buffer = [UInt8](repeating: 0, count: 4096)
         let bytesRead = Darwin.read(clientSocket, &buffer, buffer.count)
-        
+
         guard bytesRead > 0 else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "No data received")
-            continuation?.resume(returning: nil)
-            continuation = nil
+            resumeOnce(returning: nil)
             return
         }
-        
+
         let request = String(bytes: buffer.prefix(bytesRead), encoding: .utf8) ?? ""
-        
-        // Parse the request line
+
         guard let firstLine = request.split(separator: "\r\n").first,
               let pathPart = firstLine.split(separator: " ").dropFirst().first else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Invalid request")
-            continuation?.resume(returning: nil)
-            continuation = nil
+            resumeOnce(returning: nil)
             return
         }
-        
+
         let path = String(pathPart)
-        
-        // Only handle /auth/callback
+
         guard path.hasPrefix("/auth/callback") else {
             sendResponse(clientSocket, status: "404 Not Found", body: "Not found")
-            continuation?.resume(returning: nil)
-            continuation = nil
+            resumeOnce(returning: nil)
             return
         }
-        
-        // Parse query parameters
+
         guard let queryStart = path.firstIndex(of: "?") else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Missing query parameters")
-            continuation?.resume(returning: nil)
-            continuation = nil
+            resumeOnce(returning: nil)
             return
         }
-        
+
         let queryString = String(path[path.index(after: queryStart)...])
         let params = parseQueryString(queryString)
-        
-        // Verify state
+
         guard let state = params["state"], state == expectedState else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "State mismatch")
-            continuation?.resume(returning: nil)
-            continuation = nil
+            resumeOnce(returning: nil)
             return
         }
-        
-        // Get code
+
         guard let code = params["code"] else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Missing authorization code")
-            continuation?.resume(returning: nil)
-            continuation = nil
+            resumeOnce(returning: nil)
             return
         }
-        
-        // Success!
+
         sendResponse(clientSocket, status: "200 OK", body: successHTML, contentType: "text/html")
-        
         Logger.auth.info("Received OAuth callback with authorization code")
-        continuation?.resume(returning: code)
-        continuation = nil
+        resumeOnce(returning: code)
     }
-    
+
     private func parseQueryString(_ query: String) -> [String: String] {
         var result: [String: String] = [:]
         for pair in query.split(separator: "&") {
@@ -216,7 +247,7 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         }
         return result
     }
-    
+
     private func sendResponse(_ socket: Int32, status: String, body: String, contentType: String = "text/plain") {
         let response = """
         HTTP/1.1 \(status)\r
@@ -226,18 +257,25 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         \r
         \(body)
         """
-        
+
         _ = response.withCString { ptr in
             Darwin.write(socket, ptr, strlen(ptr))
         }
     }
-    
+
     public func stop() {
-        isRunning = false
+        let socket = state.withLock { state -> Int32 in
+            state.isRunning = false
+            let socket = state.socket
+            state.socket = -1
+            return socket
+        }
+
         if socket >= 0 {
             Darwin.close(socket)
-            socket = -1
         }
+
+        resumeOnce(returning: nil)
         Logger.auth.debug("OAuth callback server stopped")
     }
 }

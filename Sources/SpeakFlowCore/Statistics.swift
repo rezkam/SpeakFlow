@@ -100,26 +100,40 @@ public final class Statistics {
         return parts.joined(separator: ", ")
     }
 
-    /// Format character count with thousands separators
-    var formattedCharacters: String {
+    private static let decimalFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
-        return formatter.string(from: NSNumber(value: totalCharacters)) ?? "\(totalCharacters)"
+        return formatter
+    }()
+
+    private func formatCount(_ value: Int) -> String {
+        Self.decimalFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    /// Format character count with thousands separators
+    var formattedCharacters: String {
+        formatCount(totalCharacters)
     }
 
     /// Format word count with thousands separators
     var formattedWords: String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter.string(from: NSNumber(value: totalWords)) ?? "\(totalWords)"
+        formatCount(totalWords)
     }
 
     /// Format API call count with thousands separators
     var formattedApiCalls: String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter.string(from: NSNumber(value: totalApiCalls)) ?? "\(totalApiCalls)"
+        formatCount(totalApiCalls)
     }
+
+#if DEBUG
+    static var _testFormatterIdentity: ObjectIdentifier {
+        ObjectIdentifier(decimalFormatter)
+    }
+
+    static func _testFormatCount(_ value: Int) -> String {
+        decimalFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+#endif
 
     /// Full statistics summary for display
     public var summary: String {

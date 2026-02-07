@@ -606,11 +606,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             switch event.keyCode {
             case 53:  // Escape key
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
                     self?.cancelRecording()
                 }
             case 36:  // Enter key
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
                     self?.stopRecordingAndSubmit()
                 }
             default:
@@ -650,6 +650,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     func startRecording() {
         guard !isRecording else { return }
 
+        // Block restart while previous session is still finalizing transcriptions
+        if isProcessingFinal {
+            Logger.audio.warning("Cannot start recording — previous session still finalizing")
+            NSSound(named: "Basso")?.play()
+            return
+        }
+
         if isUITestMode && useMockRecordingInUITests {
             isRecording = true
             isProcessingFinal = false
@@ -677,7 +684,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             case .notDetermined:
                 Logger.permissions.info("Microphone permission not yet requested")
                 AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                    DispatchQueue.main.async {
+                    Task { @MainActor [weak self] in
                         if granted {
                             self?.startRecording() // Retry after permission granted
                         } else {
@@ -702,7 +709,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         hasPlayedCompletionSound = false  // Reset completion sound guard
         shouldPressEnterOnComplete = false  // Reset submit flag
         fullTranscript = ""
-        Task { await Transcription.shared.queueBridge.reset() }
+        // NOTE: queueBridge.reset() is awaited below in the same Task as recorder.start()
+        // to guarantee reset completes before any new transcription activity begins.
 
         // Capture the focused element NOW so we can insert text there later
         let systemWide = AXUIElementCreateSystemWide()
@@ -737,8 +745,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         recorder = StreamingRecorder()
         recorder?.onChunkReady = { chunk in
             Task { @MainActor in
-                let seq = await Transcription.shared.queueBridge.nextSequence()
-                Transcription.shared.transcribe(seq: seq, chunk: chunk)
+                let ticket = await Transcription.shared.queueBridge.nextSequence()
+                Transcription.shared.transcribe(ticket: ticket, chunk: chunk)
             }
         }
         recorder?.onAutoEnd = { [weak self] in
@@ -748,7 +756,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             }
         }
         Task { @MainActor in
-            await recorder?.start()
+            await Transcription.shared.queueBridge.reset()
+            let started = await recorder?.start() ?? false
+            if !started {
+                Logger.audio.error("Recorder failed to start — rolling back app state")
+                isRecording = false
+                isProcessingFinal = false
+                recorder = nil
+                updateStatusIcon()
+                NSSound(named: "Basso")?.play()
+            }
         }
         startKeyListener()  // Listen for Escape (cancel) or Enter (submit)
         refreshUITestHarness()
@@ -877,6 +894,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     
     /// Simulate pressing the Enter key (for chat submit after transcription)
     private func pressEnterKey() {
+        // P1 Security: Verify focus hasn't changed before pressing Enter
+        guard verifyInsertionTarget() else {
+            Logger.app.warning("Enter key press aborted — target element no longer focused")
+            return
+        }
+
         Logger.audio.debug("Pressing Enter key for submit")
         
         let keyCode: CGKeyCode = 36  // Enter key
@@ -886,12 +909,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             keyDown.post(tap: .cghidEventTap)
         }
         
-        // Small delay between down and up
-        usleep(10000)  // 10ms
-        
-        // Key up
-        if let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
-            keyUp.post(tap: .cghidEventTap)
+        // Use async sleep to avoid blocking the main actor
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+            // Key up
+            if let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
+                keyUp.post(tap: .cghidEventTap)
+            }
         }
     }
 
@@ -952,9 +976,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         await textInsertionTask?.value
     }
 
+    /// Check that the currently focused UI element matches our stored target.
+    /// Returns true if we should proceed with typing, false if focus has changed.
+    private func verifyInsertionTarget() -> Bool {
+        guard let target = targetElement else {
+            // No target captured — allow typing (best-effort)
+            return true
+        }
+
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+              let focused = focusedRef else {
+            Logger.app.warning("Could not read current focused element for target verification")
+            return false
+        }
+
+        guard CFGetTypeID(focused) == AXUIElementGetTypeID() else {
+            Logger.app.warning("Focused element is not an AXUIElement during target verification")
+            return false
+        }
+
+        // Compare AXUIElements — CFEqual checks if they refer to the same element
+        let currentElement = focused as! AXUIElement  // swiftlint:disable:this force_cast
+        if CFEqual(target, currentElement) {
+            return true
+        }
+
+        // Elements don't match — focus changed
+        Logger.app.warning("Focus changed since recording started — dropping text insertion to prevent privacy leak")
+        return false
+    }
+
     private func typeTextAsync(_ text: String) async {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             Logger.app.error("Could not create CGEventSource")
+            return
+        }
+
+        // P1 Security: Verify insertion target before typing
+        // Focus may have changed since recording started; typing into wrong app is a privacy leak
+        let targetValid = await MainActor.run { self.verifyInsertionTarget() }
+        guard targetValid else {
+            Logger.app.warning("Text insertion aborted — target element no longer focused")
             return
         }
 
@@ -1029,7 +1093,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         case .notDetermined:
             Logger.permissions.info("Requesting microphone permission...")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
                     if granted {
                         Logger.permissions.info("Microphone permission granted")
                         self?.updateStatusIcon()
@@ -1045,7 +1109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             startMicrophonePermissionPolling()
         case .denied, .restricted:
             Logger.permissions.warning("Microphone permission denied - showing alert")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
                 self?.showMicrophonePermissionAlert()
             }
             startMicrophonePermissionPolling()
@@ -1071,35 +1136,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     private func showMicrophonePermissionAlert() {
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Microphone Access Required"
-            alert.informativeText = """
-            This app needs microphone permission to record your voice for transcription.
+        let alert = NSAlert()
+        alert.messageText = "Microphone Access Required"
+        alert.informativeText = """
+        This app needs microphone permission to record your voice for transcription.
 
-            To enable it:
-            1. Open System Settings > Privacy & Security > Microphone
-            2. Find this app and enable the toggle
-            3. Try recording again
+        To enable it:
+        1. Open System Settings > Privacy & Security > Microphone
+        2. Find this app and enable the toggle
+        3. Try recording again
 
-            💡 You may need to restart the app after changing permissions.
-            """
-            alert.alertStyle = .warning
-            alert.icon = NSImage(systemSymbolName: "mic.slash.fill", accessibilityDescription: "Microphone Denied")
+        💡 You may need to restart the app after changing permissions.
+        """
+        alert.alertStyle = .warning
+        alert.icon = NSImage(systemSymbolName: "mic.slash.fill", accessibilityDescription: "Microphone Denied")
 
-            alert.addButton(withTitle: "Open System Settings")
-            alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "OK")
 
-            let response = alert.runModal()
+        let response = alert.runModal()
 
-            if response == .alertFirstButtonReturn {
-                // Open Privacy & Security > Microphone
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-                    NSWorkspace.shared.open(url)
-                }
+        if response == .alertFirstButtonReturn {
+            // Open Privacy & Security > Microphone
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
             }
         }
     }
 
     @objc func quit() { NSApp.terminate(nil) }
+
+    // MARK: - Graceful Termination
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Logger.app.info("Application terminating — cleaning up")
+
+        // Stop hotkey listener
+        hotkeyListener?.stop()
+        hotkeyListener = nil
+
+        // Stop key monitor (Escape/Enter)
+        stopKeyListener()
+
+        // Stop/cancel any active recording
+        if isRecording || isProcessingFinal {
+            recorder?.cancel()
+            recorder = nil
+            isRecording = false
+            isProcessingFinal = false
+        }
+
+        // Cancel all in-flight transcription tasks
+        Transcription.shared.cancelAll()
+
+        // Cancel ongoing text insertion
+        textInsertionTask?.cancel()
+        textInsertionTask = nil
+
+        // Stop microphone permission polling
+        micPermissionTimer?.invalidate()
+        micPermissionTimer = nil
+
+        // Remove workspace notification observer
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+
+        Logger.app.info("Cleanup complete")
+    }
 }

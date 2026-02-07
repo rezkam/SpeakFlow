@@ -455,3 +455,289 @@ struct VADErrorTests {
         }
     }
 }
+
+// MARK: - Rate Limiter Tests
+
+struct RateLimiterTests {
+    @Test func testSequentialRequestsAreThrottled() async throws {
+        let interval = 0.05
+        let limiter = RateLimiter(minimumInterval: interval)
+
+        try await limiter.waitAndRecord()
+
+        let start = Date()
+        try await limiter.waitAndRecord()
+        let elapsed = Date().timeIntervalSince(start)
+
+        #expect(elapsed >= interval * 0.8)
+    }
+
+    @Test func testTimeUntilNextAllowedDecreasesOverTime() async throws {
+        let interval = 0.03
+        let limiter = RateLimiter(minimumInterval: interval)
+
+        try await limiter.waitAndRecord()
+        let initialWait = await limiter.timeUntilNextAllowed()
+        #expect(initialWait > 0)
+
+        try? await Task.sleep(for: .milliseconds(20))
+        let laterWait = await limiter.timeUntilNextAllowed()
+
+        #expect(laterWait < initialWait)
+    }
+
+    @Test func testWaitAndRecordThrowsOnCancellation() async throws {
+        let interval = 1.0
+        let limiter = RateLimiter(minimumInterval: interval)
+        try await limiter.waitAndRecord()
+
+        let task = Task {
+            try await limiter.waitAndRecord()
+        }
+
+        try? await Task.sleep(for: .milliseconds(80))
+        let cancelledAt = Date()
+        task.cancel()
+
+        do {
+            try await task.value
+            Issue.record("Expected CancellationError")
+        } catch is CancellationError {
+            let elapsed = Date().timeIntervalSince(cancelledAt)
+            #expect(elapsed < 0.5)
+        }
+    }
+}
+
+// MARK: - Rate Limiter Regression Tests
+
+struct RateLimiterRegressionTests {
+    @Test func testConcurrentRequestsReserveDistinctSlots() async throws {
+        let interval = 0.05
+        let limiter = RateLimiter(minimumInterval: interval)
+
+        // Seed limiter so concurrent calls must both wait and cannot share one slot.
+        try await limiter.waitAndRecord()
+
+        let start = Date()
+        let completionTimes = try await withThrowingTaskGroup(of: TimeInterval.self, returning: [TimeInterval].self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    try await limiter.waitAndRecord()
+                    return Date().timeIntervalSince(start)
+                }
+            }
+
+            var values: [TimeInterval] = []
+            for try await value in group {
+                values.append(value)
+            }
+            return values.sorted()
+        }
+
+        #expect(completionTimes.count == 2)
+
+        let first = completionTimes[0]
+        let second = completionTimes[1]
+
+        // If check/record is split, both calls can complete at ~the same time.
+        // With atomic reservation, completions are spaced by one full interval.
+        #expect(first >= interval * 0.8)
+        #expect(second >= interval * 1.8)
+        #expect((second - first) >= interval * 0.8)
+    }
+}
+
+// MARK: - OAuth Form Encoding Tests
+
+struct OAuthFormEncodingTests {
+    @Test func testFormEncodingEscapesDelimitersInValues() {
+        let bodyData = OpenAICodexAuth.formURLEncodedBody([
+            "grant_type": "refresh_token",
+            "refresh_token": "token=abc&next+value",
+        ])
+
+        let body = String(decoding: bodyData, as: UTF8.self)
+
+        #expect(body.contains("refresh_token=token%3Dabc%26next%2Bvalue"))
+        #expect(!body.contains("refresh_token=token=abc&next+value"))
+    }
+}
+
+struct OAuthFormEncodingRegressionTests {
+    @Test func testOpaqueTokenRoundTripsThroughFormBody() {
+        let opaqueToken = "r3fr3sh+token=abc&scope=openid profile"
+        let bodyData = OpenAICodexAuth.formURLEncodedBody([
+            "grant_type": "refresh_token",
+            "refresh_token": opaqueToken,
+            "client_id": "client",
+        ])
+
+        let body = String(decoding: bodyData, as: UTF8.self)
+        let components = URLComponents(string: "https://example.test/?\(body)")
+        let parsed = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+
+        #expect(parsed["refresh_token"] == opaqueToken)
+        #expect(body.contains("refresh_token=r3fr3sh%2Btoken%3Dabc%26scope%3Dopenid%20profile"))
+    }
+}
+
+// MARK: - OAuth Callback Server Tests
+
+private func randomOAuthTestPort() -> UInt16 {
+    UInt16.random(in: 20_000...59_999)
+}
+
+private func hitOAuthCallback(port: UInt16, query: String) async throws -> Int {
+    let url = URL(string: "http://127.0.0.1:\(port)/auth/callback?\(query)")!
+    let (_, response) = try await URLSession.shared.data(from: url)
+    return (response as? HTTPURLResponse)?.statusCode ?? -1
+}
+
+struct OAuthCallbackServerTests {
+    @Test func testValidCallbackReturnsAuthorizationCode() async throws {
+        let port = randomOAuthTestPort()
+        let expectedState = "test-state"
+        let expectedCode = "auth-code-123"
+        let server = OAuthCallbackServer(expectedState: expectedState, port: port)
+
+        let waitTask = Task { await server.waitForCallback(timeout: 2.0) }
+        try? await Task.sleep(for: .milliseconds(120))
+
+        let status = try await hitOAuthCallback(
+            port: port,
+            query: "code=\(expectedCode)&state=\(expectedState)"
+        )
+
+        let receivedCode = await waitTask.value
+
+        #expect(status == 200)
+        #expect(receivedCode == expectedCode)
+    }
+
+    @Test func testStateMismatchReturnsNil() async throws {
+        let port = randomOAuthTestPort()
+        let server = OAuthCallbackServer(expectedState: "expected", port: port)
+
+        let waitTask = Task { await server.waitForCallback(timeout: 2.0) }
+        try? await Task.sleep(for: .milliseconds(120))
+
+        let status = try await hitOAuthCallback(
+            port: port,
+            query: "code=abc&state=wrong"
+        )
+
+        let receivedCode = await waitTask.value
+
+        #expect(status == 400)
+        #expect(receivedCode == nil)
+    }
+}
+
+struct OAuthCallbackServerRegressionTests {
+    @Test func testConcurrentStopOnlyResumesOnce() async {
+        let port = randomOAuthTestPort()
+        let server = OAuthCallbackServer(expectedState: "state", port: port)
+
+        let waitTask = Task { await server.waitForCallback(timeout: 5.0) }
+        try? await Task.sleep(for: .milliseconds(120))
+
+        let stopStart = Date()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    server.stop()
+                }
+            }
+        }
+
+        let result = await waitTask.value
+        let elapsed = Date().timeIntervalSince(stopStart)
+
+        #expect(result == nil)
+        #expect(elapsed < 2.0)
+    }
+}
+
+// MARK: - Statistics Formatter Tests
+
+struct StatisticsFormatterTests {
+    @Test func testFormattedCountsMatchDecimalFormatterOutput() async {
+        await MainActor.run {
+            let expected = NumberFormatter.localizedString(from: NSNumber(value: 1_234_567), number: .decimal)
+            let actual = Statistics._testFormatCount(1_234_567)
+            #expect(actual == expected)
+        }
+    }
+
+    @Test func testFormatterIdentityIsStableAcrossCalls() async {
+        await MainActor.run {
+            let first = Statistics._testFormatterIdentity
+            _ = Statistics._testFormatCount(1)
+            _ = Statistics._testFormatCount(2)
+            _ = Statistics._testFormatCount(3)
+            let second = Statistics._testFormatterIdentity
+            #expect(first == second)
+        }
+    }
+}
+
+struct StatisticsFormatterRegressionTests {
+    @Test func testCachedFormatterProducesConsistentResultsAfterRepeatedUse() async {
+        await MainActor.run {
+            let baselineId = Statistics._testFormatterIdentity
+
+            for value in [10, 100, 1000, 10_000, 100_000] {
+                let expected = NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal)
+                let actual = Statistics._testFormatCount(value)
+                #expect(actual == expected)
+            }
+
+            let endId = Statistics._testFormatterIdentity
+            #expect(baselineId == endId)
+        }
+    }
+}
+
+// MARK: - Hotkey Listener Cleanup Tests
+
+struct HotkeyListenerCleanupTests {
+    @Test func testStopIsIdempotent() async {
+        await MainActor.run {
+            let listener = HotkeyListener()
+            listener.stop()
+            listener.stop()
+            #expect(true)
+        }
+    }
+}
+
+struct HotkeyListenerCleanupRegressionTests {
+    @Test func testDeinitInvokesStopCleanup() async {
+        await MainActor.run {
+            var stopCalls = 0
+            HotkeyListener._testStopHook = { stopCalls += 1 }
+            defer { HotkeyListener._testStopHook = nil }
+
+            var listener: HotkeyListener? = HotkeyListener()
+            #expect(stopCalls == 0)
+            listener = nil
+
+            #expect(stopCalls == 1)
+        }
+    }
+
+    @Test func testDeinitAfterManualStopRemainsSafe() async {
+        await MainActor.run {
+            var stopCalls = 0
+            HotkeyListener._testStopHook = { stopCalls += 1 }
+            defer { HotkeyListener._testStopHook = nil }
+
+            var listener: HotkeyListener? = HotkeyListener()
+            listener?.stop()
+            listener = nil
+
+            #expect(stopCalls == 2)
+        }
+    }
+}

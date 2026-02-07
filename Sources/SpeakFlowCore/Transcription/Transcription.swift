@@ -16,7 +16,7 @@ public final class Transcription {
         queueBridge.startListening()
     }
 
-    public func transcribe(seq: UInt64, chunk: AudioChunk) {
+    public func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk) {
         // P1 Security: Use UUID to track and clean up tasks to prevent memory leak
         let taskId = UUID()
         let task = Task { [weak self] in
@@ -27,22 +27,22 @@ public final class Transcription {
                 }
             }
 
-            Logger.transcription.debug("Sending chunk #\(seq) (timeout: \(Config.timeout)s)")
+            Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) (timeout: \(Config.timeout)s)")
 
             // Track API call attempt
             Statistics.shared.recordApiCall()
 
             do {
                 let text = try await TranscriptionService.shared.transcribe(audio: chunk.wavData)
-                Logger.transcription.info("Chunk #\(seq) success: \(text, privacy: .private)")
+                Logger.transcription.info("Chunk #\(ticket.seq) success: \(text, privacy: .private)")
 
                 // Track successful transcription statistics
                 Statistics.shared.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
 
-                await self?.queueBridge.submitResult(seq: seq, text: text)
+                await self?.queueBridge.submitResult(ticket: ticket, text: text)
             } catch {
-                Logger.transcription.error("Chunk #\(seq) failed: \(error.localizedDescription)")
-                await self?.queueBridge.markFailed(seq: seq)
+                Logger.transcription.error("Chunk #\(ticket.seq) failed: \(error.localizedDescription)")
+                await self?.queueBridge.markFailed(ticket: ticket)
                 
                 // Play error sound to notify user that transcription failed
                 await MainActor.run {
@@ -60,8 +60,8 @@ public final class Transcription {
             task.cancel()
         }
         processingTasks.removeAll()
-        Task {
-            await TranscriptionService.shared.cancelAll()
-        }
+        // Note: Individual transcription tasks are tracked here in processingTasks.
+        // Cancelling them above is sufficient — the underlying URLSession requests
+        // will be cancelled via cooperative Task cancellation.
     }
 }

@@ -23,26 +23,20 @@ public actor TranscriptionService {
     }
 
     private let rateLimiter = RateLimiter()
-    private var activeTasks: [Int: Task<String, Error>] = [:]
 
     /// Transcribe audio with automatic retry and rate limiting
     public func transcribe(audio: Data) async throws -> String {
-        // Wait for rate limit
-        await rateLimiter.waitIfNeeded()
-        await rateLimiter.recordRequest()
+        // Wait for rate limit and record request atomically
+        do {
+            try await rateLimiter.waitAndRecord()
+        } catch is CancellationError {
+            throw TranscriptionError.cancelled
+        }
 
         // Perform request with retry
         return try await withRetry(maxAttempts: Config.maxRetries) {
             try await self.performRequest(audio: audio)
         }
-    }
-
-    /// Cancel all active transcription tasks
-    func cancelAll() {
-        for task in activeTasks.values {
-            task.cancel()
-        }
-        activeTasks.removeAll()
     }
 
     // MARK: - Private Methods
