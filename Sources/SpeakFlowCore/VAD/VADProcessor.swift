@@ -2,6 +2,90 @@ import Foundation
 import OSLog
 import FluidAudio
 
+// MARK: - Shared VAD Model Cache
+
+/// Caches the expensive-to-load Silero VAD CoreML model so it is only loaded once.
+///
+/// On first launch the model may even need to be downloaded from HuggingFace,
+/// and CoreML compilation adds latency on every cold start.  Call
+/// `VADModelCache.shared.warmUp()` at app launch so subsequent
+/// `VADProcessor.initialize()` calls are near-instant.
+public actor VADModelCache {
+    public static let shared = VADModelCache()
+
+    private var cachedManager: VadManager?
+    private var cachedThreshold: Float?
+    private var warmUpTask: Task<VadManager, Error>?
+    /// Threshold the current warm-up task was started with.
+    /// Checked in getManager to avoid returning a manager with the wrong threshold.
+    private var warmUpThreshold: Float = Config.vadThreshold
+    private let logger = Logger(subsystem: "SpeakFlow", category: "VADCache")
+
+    /// Pre-load the Silero VAD model in the background.
+    /// Safe to call multiple times — concurrent callers coalesce into one load.
+    public func warmUp(threshold: Float = Config.vadThreshold) {
+        guard cachedManager == nil, warmUpTask == nil else { return }
+
+        warmUpThreshold = threshold
+        warmUpTask = Task {
+            do {
+                let start = Date()
+                logger.info("VAD model warm-up starting")
+                let config = VadConfig(defaultThreshold: threshold)
+                let manager = try await VadManager(config: config)
+                let elapsed = Date().timeIntervalSince(start)
+                logger.info("VAD model warm-up complete in \(String(format: "%.2f", elapsed))s")
+                self.cachedManager = manager
+                self.cachedThreshold = threshold
+                self.warmUpTask = nil
+                return manager
+            } catch {
+                // Clear the failed task so subsequent warmUp()/getManager() calls
+                // can retry instead of being permanently stuck on the failed task.
+                self.warmUpTask = nil
+                logger.error("VAD model warm-up failed: \(error.localizedDescription). Will retry on next attempt.")
+                throw error
+            }
+        }
+    }
+
+    /// Get a cached or freshly-loaded VadManager.
+    /// Invalidates the cache when the threshold changes.
+    func getManager(threshold: Float) async throws -> VadManager {
+        if let cached = cachedManager, cachedThreshold == threshold {
+            return cached
+        }
+
+        // Threshold changed — invalidate stale cache
+        if cachedThreshold != nil && cachedThreshold != threshold {
+            logger.info("VAD threshold changed, reloading model")
+            cachedManager = nil
+            cachedThreshold = nil
+            warmUpTask?.cancel()
+            warmUpTask = nil
+        }
+
+        // Await warm-up only if threshold matches
+        if let pending = warmUpTask {
+            if warmUpThreshold == threshold {
+                let manager = try await pending.value
+                return manager
+            } else {
+                pending.cancel()
+                warmUpTask = nil
+            }
+        }
+
+        // Cold path — load on demand
+        logger.warning("VAD model loaded on demand (no warm-up)")
+        let config = VadConfig(defaultThreshold: threshold)
+        let manager = try await VadManager(config: config)
+        cachedManager = manager
+        cachedThreshold = threshold
+        return manager
+    }
+}
+
 /// Voice Activity Detection processor using Silero VAD via FluidAudio
 public actor VADProcessor {
     private var vadManager: VadManager?
@@ -30,8 +114,8 @@ public actor VADProcessor {
         }
 
         do {
-            let vadConfig = VadConfig(defaultThreshold: config.threshold)
-            vadManager = try await VadManager(config: vadConfig)
+            // Use shared cached model instead of loading fresh each time
+            vadManager = try await VADModelCache.shared.getManager(threshold: config.threshold)
             streamState = await vadManager?.makeStreamState()
             isInitialized = true
             logger.info("VAD initialized with FluidAudio Silero on \(PlatformSupport.platformDescription)")

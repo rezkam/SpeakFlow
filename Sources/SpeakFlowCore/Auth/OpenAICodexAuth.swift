@@ -36,29 +36,64 @@ private struct CodexAuthFile: Codable {
     }
 }
 
+/// Protocol abstracting URLSession's `data(for:)` for dependency injection in tests.
+public protocol HTTPDataProvider: Sendable {
+    func data(for request: URLRequest) async throws -> (Data, URLResponse)
+}
+
+extension URLSession: HTTPDataProvider {}
+
 /// Actor that serializes token refresh operations so concurrent callers share a single in-flight refresh.
 public actor TokenRefreshCoordinator {
     public static let shared = TokenRefreshCoordinator()
-    
+
     private var inFlightRefresh: Task<OAuthCredentials, Error>?
-    
+    private let refreshFn: @Sendable (OAuthCredentials) async throws -> OAuthCredentials
+
+    /// Create a coordinator.
+    /// - Parameter refreshFn: The function used to refresh credentials.
+    ///   Defaults to `OpenAICodexAuth.refreshTokens` but can be overridden in tests.
+    public init(refreshFn: @escaping @Sendable (OAuthCredentials) async throws -> OAuthCredentials = { creds in
+        try await OpenAICodexAuth.refreshTokens(creds)
+    }) {
+        self.refreshFn = refreshFn
+    }
+
     /// Refresh tokens, coalescing concurrent callers into a single network request.
     /// If a refresh is already in flight, all callers await the same result.
     public func refreshIfNeeded(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
+        try await _refreshCore(credentials, counted: false)
+    }
+
+    /// Number of times a fresh refresh task was started (test observability).
+    public private(set) var refreshStartCount = 0
+
+    /// Variant that also increments the start counter (for tests).
+    public func refreshIfNeededCounted(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
+        try await _refreshCore(credentials, counted: true)
+    }
+
+    /// Shared refresh implementation. Coalesces concurrent callers into a single
+    /// in-flight task. When `counted` is true, increments `refreshStartCount`
+    /// each time a *new* refresh is started (for test observability).
+    private func _refreshCore(_ credentials: OAuthCredentials, counted: Bool) async throws -> OAuthCredentials {
         // If there's already a refresh in flight, join it
         if let existing = inFlightRefresh {
             return try await existing.value
         }
-        
+
+        if counted { refreshStartCount += 1 }
+
         // Start a new refresh
+        let refreshFn = self.refreshFn
         let task = Task<OAuthCredentials, Error> {
             defer { self.clearInFlight() }
-            return try await OpenAICodexAuth.refreshTokens(credentials)
+            return try await refreshFn(credentials)
         }
         inFlightRefresh = task
         return try await task.value
     }
-    
+
     private func clearInFlight() {
         inFlightRefresh = nil
     }
@@ -73,6 +108,17 @@ public final class OpenAICodexAuth {
     private static let redirectURI = "http://localhost:1455/auth/callback"
     private static let scope = "openid profile email offline_access"
     private static let jwtClaimPath = "https://api.openai.com/auth"
+
+    /// HTTP data provider — defaults to `URLSession.shared`.
+    /// Override in tests to inject a mock (e.g. one returning canned responses).
+    /// - Important: Set this **only** in test setUp before any concurrent access.
+    /// Protected by OSAllocatedUnfairLock to prevent data races on concurrent reads/writes.
+    private static let _httpProviderLock = OSAllocatedUnfairLock<any HTTPDataProvider>(initialState: URLSession.shared)
+
+    public static var httpProvider: any HTTPDataProvider {
+        get { _httpProviderLock.withLock { $0 } }
+        set { _httpProviderLock.withLock { $0 = newValue } }
+    }
     
     // Credential storage path: ~/.speakflow/auth.json (SpeakFlow's own storage)
     private static var credentialsURL: URL {
@@ -194,7 +240,7 @@ public final class OpenAICodexAuth {
 
         request.httpBody = formURLEncodedBody(params)
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await httpProvider.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
@@ -245,7 +291,7 @@ public final class OpenAICodexAuth {
 
         request.httpBody = formURLEncodedBody(params)
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await httpProvider.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
@@ -406,17 +452,17 @@ public enum AuthError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notLoggedIn:
-            return "Not logged in to OpenAI. Please login first."
+            return String(localized: "Not logged in to OpenAI. Please login first.")
         case .tokenExchangeFailed(let message):
-            return "Failed to exchange authorization code: \(message)"
+            return String(localized: "Failed to exchange authorization code: \(message)")
         case .tokenRefreshFailed(let message):
-            return "Failed to refresh token: \(message)"
+            return String(localized: "Failed to refresh token: \(message)")
         case .missingAccountId:
-            return "Could not extract account ID from token"
+            return String(localized: "Could not extract account ID from token")
         case .stateMismatch:
-            return "OAuth state mismatch - possible security issue"
+            return String(localized: "OAuth state mismatch - possible security issue")
         case .missingCode:
-            return "Missing authorization code"
+            return String(localized: "Missing authorization code")
         }
     }
 }

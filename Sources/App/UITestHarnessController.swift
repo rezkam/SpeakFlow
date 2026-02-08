@@ -10,10 +10,10 @@ final class UITestHarnessController: NSWindowController, NSWindowDelegate {
     var onSeedStatsClicked: (() -> Void)?
     var onResetStatsClicked: (() -> Void)?
 
-    private let statusValueLabel = NSTextField(labelWithString: "idle")
+    private let statusValueLabel = NSTextField(labelWithString: String(localized: "idle"))
     private let toggleCountValueLabel = NSTextField(labelWithString: "0")
-    private let modeValueLabel = NSTextField(labelWithString: "mock")
-    private let hotkeyValueLabel = NSTextField(labelWithString: "⌃⌃ (double-tap)")
+    private let modeValueLabel = NSTextField(labelWithString: String(localized: "mock"))
+    private let hotkeyValueLabel = NSTextField(labelWithString: String(localized: "⌃⌃ (double-tap)"))
     private let statsApiCallsValueLabel = NSTextField(labelWithString: "0")
     private let statsWordsValueLabel = NSTextField(labelWithString: "0")
     private var localKeyMonitor: Any?
@@ -25,7 +25,7 @@ final class UITestHarnessController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "SpeakFlow UI Test Harness"
+        window.title = String(localized: "SpeakFlow UI Test Harness")
         window.center()
         super.init(window: window)
         window.delegate = self
@@ -53,7 +53,7 @@ final class UITestHarnessController: NSWindowController, NSWindowDelegate {
         statsApiCalls: Int,
         statsWords: Int
     ) {
-        statusValueLabel.stringValue = isRecording ? "recording" : "idle"
+        statusValueLabel.stringValue = isRecording ? String(localized: "recording") : String(localized: "idle")
         toggleCountValueLabel.stringValue = String(toggleCount)
         modeValueLabel.stringValue = mode
         hotkeyValueLabel.stringValue = hotkeyDisplay
@@ -64,38 +64,50 @@ final class UITestHarnessController: NSWindowController, NSWindowDelegate {
     private func setupUI() {
         guard let contentView = window?.contentView else { return }
 
-        let titleLabel = NSTextField(labelWithString: "UI Harness")
+        let titleLabel = NSTextField(labelWithString: String(localized: "UI Harness"))
         titleLabel.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
-        let hintLabel = NSTextField(labelWithString: "Hotkey in harness: ⌃⌥D / ⌘⇧D / ⌃⌥Space")
+        let hintLabel = NSTextField(labelWithString: String(localized: "Hotkey in harness: ⌃⌥D / ⌘⇧D / ⌃⌥Space"))
         hintLabel.textColor = .secondaryLabelColor
 
-        let statusLabel = NSTextField(labelWithString: "Status:")
-        let toggleCountLabel = NSTextField(labelWithString: "Toggle Count:")
-        let modeLabel = NSTextField(labelWithString: "Recording Mode:")
-        let hotkeyLabel = NSTextField(labelWithString: "Current Hotkey:")
-        let statsApiCallsLabel = NSTextField(labelWithString: "Stats API Calls:")
-        let statsWordsLabel = NSTextField(labelWithString: "Stats Words:")
+        let statusLabel = NSTextField(labelWithString: String(localized: "Status:"))
+        let toggleCountLabel = NSTextField(labelWithString: String(localized: "Toggle Count:"))
+        let modeLabel = NSTextField(labelWithString: String(localized: "Recording Mode:"))
+        let hotkeyLabel = NSTextField(labelWithString: String(localized: "Current Hotkey:"))
+        let statsApiCallsLabel = NSTextField(labelWithString: String(localized: "Stats API Calls:"))
+        let statsWordsLabel = NSTextField(labelWithString: String(localized: "Stats Words:"))
 
         statusValueLabel.setAccessibilityIdentifier("ui_test.status_value")
+        statusValueLabel.setAccessibilityLabel("Current recording status value")
         toggleCountValueLabel.setAccessibilityIdentifier("ui_test.toggle_count_value")
+        toggleCountValueLabel.setAccessibilityLabel("Number of hotkey toggles")
         modeValueLabel.setAccessibilityIdentifier("ui_test.mode_value")
+        modeValueLabel.setAccessibilityLabel("Current recording mode value")
         hotkeyValueLabel.setAccessibilityIdentifier("ui_test.hotkey_value")
+        hotkeyValueLabel.setAccessibilityLabel("Current hotkey value")
         statsApiCallsValueLabel.setAccessibilityIdentifier("ui_test.stats_api_calls_value")
+        statsApiCallsValueLabel.setAccessibilityLabel("Current API call count value")
         statsWordsValueLabel.setAccessibilityIdentifier("ui_test.stats_words_value")
+        statsWordsValueLabel.setAccessibilityLabel("Current transcribed word count value")
 
-        let startButton = NSButton(title: "Start Dictation", target: self, action: #selector(startClicked))
+        let startButton = NSButton(title: String(localized: "Start Dictation"), target: self, action: #selector(startClicked))
         startButton.setAccessibilityIdentifier("ui_test.start_button")
-        let stopButton = NSButton(title: "Stop Dictation", target: self, action: #selector(stopClicked))
+        startButton.setAccessibilityLabel(String(localized: "Start dictation"))
+        let stopButton = NSButton(title: String(localized: "Stop Dictation"), target: self, action: #selector(stopClicked))
         stopButton.setAccessibilityIdentifier("ui_test.stop_button")
-        let hotkeyButton = NSButton(title: "Trigger Hotkey", target: self, action: #selector(hotkeyClicked))
+        stopButton.setAccessibilityLabel(String(localized: "Stop dictation"))
+        let hotkeyButton = NSButton(title: String(localized: "Trigger Hotkey"), target: self, action: #selector(hotkeyClicked))
         hotkeyButton.setAccessibilityIdentifier("ui_test.hotkey_button")
-        let nextHotkeyButton = NSButton(title: "Next Hotkey", target: self, action: #selector(nextHotkeyClicked))
+        hotkeyButton.setAccessibilityLabel(String(localized: "Trigger configured hotkey"))
+        let nextHotkeyButton = NSButton(title: String(localized: "Next Hotkey"), target: self, action: #selector(nextHotkeyClicked))
         nextHotkeyButton.setAccessibilityIdentifier("ui_test.next_hotkey_button")
-        let seedStatsButton = NSButton(title: "Seed Stats", target: self, action: #selector(seedStatsClicked))
+        nextHotkeyButton.setAccessibilityLabel(String(localized: "Cycle to next hotkey option"))
+        let seedStatsButton = NSButton(title: String(localized: "Seed Stats"), target: self, action: #selector(seedStatsClicked))
         seedStatsButton.setAccessibilityIdentifier("ui_test.seed_stats_button")
-        let resetStatsButton = NSButton(title: "Reset Stats", target: self, action: #selector(resetStatsClicked))
+        seedStatsButton.setAccessibilityLabel(String(localized: "Seed sample statistics"))
+        let resetStatsButton = NSButton(title: String(localized: "Reset Stats"), target: self, action: #selector(resetStatsClicked))
         resetStatsButton.setAccessibilityIdentifier("ui_test.reset_stats_button")
+        resetStatsButton.setAccessibilityLabel(String(localized: "Reset statistics"))
 
         let headerStack = NSStackView(views: [titleLabel, hintLabel])
         headerStack.orientation = .vertical
@@ -162,6 +174,7 @@ final class UITestHarnessController: NSWindowController, NSWindowDelegate {
 
         contentView.addSubview(rootStack)
         contentView.setAccessibilityIdentifier("ui_test.window")
+        contentView.setAccessibilityLabel("SpeakFlow UI test harness window")
 
         NSLayoutConstraint.activate([
             rootStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),

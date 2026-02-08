@@ -3,7 +3,7 @@ import OSLog
 
 /// Actor-based rate limiter to prevent API overload
 actor RateLimiter {
-    /// Last reserved request slot. This is updated *before* any suspension in waitAndRecord()
+    /// Last reserved request slot. Updated *before* any suspension in waitAndRecord()
     /// so concurrent callers cannot reserve the same slot.
     private var lastRequestTime: Date?
     private let minimumInterval: TimeInterval
@@ -20,28 +20,42 @@ actor RateLimiter {
 
     /// Atomically reserve the next request slot and wait until that slot is reached.
     ///
-    /// Reserving the slot before suspension prevents reentrant callers from bypassing
-    /// throttling under concurrent load.
-    func waitAndRecord() async throws {
+    /// The nonisolated entry point checks cancellation before entering the actor queue,
+    /// ensuring pre-cancelled tasks throw immediately without waiting for actor scheduling.
+    /// Each concurrent caller gets a distinct slot spaced by minimumInterval.
+    nonisolated func waitAndRecord() async throws {
+        // Check cancellation *before* entering the actor queue — pre-cancelled
+        // tasks throw immediately without waiting for actor scheduling.
+        try Task.checkCancellation()
+        try await _reserveAndWait()
+    }
+
+    /// Actor-isolated core: reserve the next slot then sleep until it is due.
+    private func _reserveAndWait() async throws {
         try Task.checkCancellation()
 
         let now = Date()
         let scheduledTime: Date
 
         if let last = lastRequestTime {
+            // Schedule relative to the last reserved slot for proper spacing
             let nextAllowed = last.addingTimeInterval(minimumInterval)
             scheduledTime = max(now, nextAllowed)
         } else {
+            // First call — no wait
             scheduledTime = now
         }
 
-        // Reserve this slot before any await to prevent races with reentrant calls.
+        // Reserve this slot BEFORE any suspension point.
+        // This is the critical line that prevents concurrent callers
+        // from getting the same slot.
         lastRequestTime = scheduledTime
 
         let waitTime = scheduledTime.timeIntervalSince(now)
         if waitTime > 0 {
-            Logger.transcription.debug("Rate limit: waiting \(String(format: "%.1f", waitTime))s")
-            try await Task.sleep(for: .seconds(waitTime))
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: UInt64(waitTime * 1_000_000_000))
+            try Task.checkCancellation()
         }
     }
 }

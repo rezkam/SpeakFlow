@@ -12,7 +12,7 @@ public protocol AccessibilityPermissionDelegate: AnyObject {
 /// Manages accessibility permission requests and monitoring
 @MainActor
 public final class AccessibilityPermissionManager {
-    private var permissionCheckTimer: Timer?
+    private var permissionCheckTask: Task<Void, Never>?
     private var hasShownInitialPrompt = false
     private var lastKnownPermissionState: Bool?  // P3 Security: Track permission state changes
     private var pollAttempts = 0
@@ -63,8 +63,8 @@ public final class AccessibilityPermissionManager {
 
     private func showPermissionAlert() {
         let alert = NSAlert()
-        alert.messageText = "Enable Accessibility Access"
-        alert.informativeText = """
+        alert.messageText = String(localized: "Enable Accessibility Access")
+        alert.informativeText = String(localized: """
         This app needs Accessibility permission to type dictated text into other applications.
 
         We've already added this app to your Accessibility settings.
@@ -76,13 +76,13 @@ public final class AccessibilityPermissionManager {
         4. Return to this app — we'll automatically detect when you enable it
 
         💡 You may need to unlock the settings with your password first.
-        """
+        """)
         alert.alertStyle = .informational
         alert.icon = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: "Permission")
 
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Remind Me Later")
-        alert.addButton(withTitle: "Quit App")
+        alert.addButton(withTitle: String(localized: "Open System Settings"))
+        alert.addButton(withTitle: String(localized: "Remind Me Later"))
+        alert.addButton(withTitle: String(localized: "Quit App"))
 
         let response = alert.runModal()
 
@@ -111,65 +111,64 @@ public final class AccessibilityPermissionManager {
     }
 
     private func startPollingForPermission() {
-        // Stop any existing timer and reset counter
-        permissionCheckTimer?.invalidate()
+        // Stop any existing polling task and reset counter
+        permissionCheckTask?.cancel()
         pollAttempts = 0
 
-        // Check every 2 seconds if permission has been granted
-        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
-            guard let self = self else {
-                timer.invalidate()
-                return
-            }
+        // Poll every 2 seconds using a MainActor Task loop.
+        // This avoids Timer's @Sendable closure which cannot safely
+        // access @MainActor state in Swift 6.
+        permissionCheckTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self = self else { return }
 
-            self.pollAttempts += 1
+                self.pollAttempts += 1
 
-            // P2 Security: Timeout after max attempts to prevent infinite polling
-            if self.pollAttempts >= Self.maxPollAttempts {
-                Logger.permissions.warning("Permission polling timed out after \(Self.maxPollAttempts) attempts")
-                timer.invalidate()
-                self.permissionCheckTimer = nil
-                return
-            }
-
-            let trusted = AXIsProcessTrusted()
-            if trusted {
-                Logger.permissions.info("Accessibility permission granted")
-                timer.invalidate()
-                self.permissionCheckTimer = nil
-
-                // Update UI on main actor
-                Task { @MainActor in
-                    self.delegate?.updateStatusIcon()
-                    self.delegate?.setupHotkey()
+                // P2 Security: Timeout after max attempts to prevent infinite polling
+                if self.pollAttempts >= Self.maxPollAttempts {
+                    Logger.permissions.warning("Permission polling timed out after \(Self.maxPollAttempts) attempts")
+                    self.permissionCheckTask = nil
+                    return
                 }
 
-                // Show confirmation
-                self.showPermissionGrantedAlert()
+                let trusted = AXIsProcessTrusted()
+                if trusted {
+                    Logger.permissions.info("Accessibility permission granted")
+                    self.permissionCheckTask = nil
+
+                    // Update UI — already on MainActor
+                    self.delegate?.updateStatusIcon()
+                    self.delegate?.setupHotkey()
+
+                    // Show confirmation
+                    self.showPermissionGrantedAlert()
+                    return
+                }
             }
         }
     }
 
     private func showPermissionGrantedAlert() {
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
-        
+
         let alert = NSAlert()
-        alert.messageText = "Accessibility Permission Granted"
-        alert.informativeText = """
+        alert.messageText = String(localized: "Accessibility Permission Granted")
+        alert.informativeText = String(localized: """
         The app now has permission to insert dictated text into other applications.
 
         You can start using the dictation feature with \(hotkeyName).
-        """
+        """)
         alert.alertStyle = .informational
         alert.icon = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Success")
 
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: String(localized: "OK"))
 
         alert.runModal()
     }
 
     public func stopPolling() {
-        permissionCheckTimer?.invalidate()
-        permissionCheckTimer = nil
+        permissionCheckTask?.cancel()
+        permissionCheckTask = nil
     }
 }

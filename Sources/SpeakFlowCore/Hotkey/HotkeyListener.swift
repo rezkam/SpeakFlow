@@ -123,7 +123,7 @@ public final class HotkeyListener {
                now.timeIntervalSince(lastRelease) < doubleTapInterval {
                 // Double-tap detected!
                 lastControlReleaseTime = nil
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onActivate?()
                 }
             } else {
@@ -156,7 +156,7 @@ public final class HotkeyListener {
             if flags.contains(.control) && flags.contains(.option) &&
                !flags.contains(.command) && !flags.contains(.shift) &&
                event.keyCode == KeyCode.d {
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onActivate?()
                 }
             }
@@ -165,7 +165,7 @@ public final class HotkeyListener {
             if flags.contains(.control) && flags.contains(.option) &&
                !flags.contains(.command) && !flags.contains(.shift) &&
                event.keyCode == KeyCode.space {
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onActivate?()
                 }
             }
@@ -174,7 +174,7 @@ public final class HotkeyListener {
             if flags.contains(.command) && flags.contains(.shift) &&
                !flags.contains(.control) && !flags.contains(.option) &&
                event.keyCode == KeyCode.d {
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onActivate?()
                 }
             }

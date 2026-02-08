@@ -447,6 +447,14 @@ public final class StreamingRecorder {
                 if !isSpeaking {
                     let sent = await sendChunkIfReady(reason: "max duration + silence")
                     if sent { await session.chunkSent() }
+                } else if duration >= settings.maxChunkDuration * Config.forceSendChunkMultiplier {
+                    // Hard upper limit: force-send even during continuous speech to prevent
+                    // unbounded buffer accumulation. Without this, a user speaking non-stop
+                    // for minutes would get all audio in one huge chunk that may timeout
+                    // on the API or produce poor transcription quality.
+                    Logger.audio.warning("⚠️ FORCE CHUNK: buffer=\(String(format: "%.1f", duration), privacy: .public)s exceeds \(String(format: "%.1f", settings.maxChunkDuration * Config.forceSendChunkMultiplier), privacy: .public)s hard limit (user still speaking)")
+                    let sent = await sendChunkIfReady(reason: "forced: continuous speech exceeded \(String(format: "%.0f", Config.forceSendChunkMultiplier))× max duration")
+                    if sent { await session.chunkSent() }
                 }
             }
         } else {
@@ -475,12 +483,15 @@ public final class StreamingRecorder {
             return false
         }
 
-        let result = await buffer.takeAll()
-        let duration = Double(result.samples.count) / sampleRate
-        let energySpeechRatio = result.speechRatio
-
-        let speechProbability: Float
+        // ── Skip check BEFORE draining buffer ──────────────────────────
+        // Previously, the buffer was drained (via takeAll) before the skip
+        // decision, permanently losing audio when a chunk was skipped. Now
+        // we evaluate the speech probability first so that skipped chunks
+        // leave the buffer intact for the next check cycle.
         let vadActive = state.getVADActive()
+        let speechProbability: Float
+        let energySpeechRatio = await buffer.speechRatio
+
         if vadActive, let vad = vadProcessor {
             let vadProb = await vad.averageSpeechProbability
             // When VAD is active AND has actually processed chunks, trust the neural
@@ -489,7 +500,6 @@ public final class StreamingRecorder {
             // If VAD never processed any chunks (e.g. very short recording), fall back
             // to energy-based speech ratio since VAD was never actually consulted.
             speechProbability = vadProb > 0 ? vadProb : energySpeechRatio
-            await vad.resetChunk()
         } else {
             speechProbability = energySpeechRatio
         }
@@ -497,9 +507,39 @@ public final class StreamingRecorder {
         // Use VAD-specific threshold when VAD is active (0.30) vs energy threshold (0.03)
         // This filters broadband noise (~0.26 VAD probability) while passing real speech (>0.5)
         let skipThreshold = vadActive ? Config.minVADSpeechProbability : Settings.shared.minSpeechRatio
-        if Settings.shared.skipSilentChunks && speechProbability < skipThreshold {
+
+        // If speech was detected at any point in this session, always send
+        // intermediate chunks. This mirrors the final-chunk protection in stop().
+        // Without this, a chunk with mixed speech + silence (e.g. 8s speech + 7s pause)
+        // can have an average probability below the threshold, causing the audio to be
+        // silently discarded — the "first chunk lost on long speech" bug.
+        let speechDetectedInSession: Bool
+        if let session = sessionController {
+            speechDetectedInSession = await session.hasSpoken
+        } else {
+            speechDetectedInSession = false
+        }
+
+        if Settings.shared.skipSilentChunks && speechProbability < skipThreshold && !speechDetectedInSession {
+            // No speech detected in session at all — safe to skip this truly silent chunk.
+            // Buffer is NOT drained, so audio is preserved for the next check cycle.
+            // Reset VAD chunk accumulator even on skip — prevents stale samples from
+            // accumulating across consecutive skipped chunks, which would bloat memory
+            // and skew future speech probability calculations.
+            if vadActive {
+                await vadProcessor?.resetChunk()
+            }
             Logger.audio.debug("Skipping silent chunk (\(String(format: "%.0f", speechProbability * 100))% speech, threshold=\(String(format: "%.0f", skipThreshold * 100))%, vadActive=\(vadActive))")
             return false
+        }
+
+        // ── Drain buffer and send ──────────────────────────────────────
+        let result = await buffer.takeAll()
+        let duration = Double(result.samples.count) / sampleRate
+
+        // Reset VAD chunk accumulator after draining (only when we commit to sending)
+        if vadActive {
+            await vadProcessor?.resetChunk()
         }
 
         let durationStr = String(format: "%.1f", duration)

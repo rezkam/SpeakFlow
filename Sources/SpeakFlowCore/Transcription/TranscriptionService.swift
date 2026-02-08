@@ -24,6 +24,24 @@ public actor TranscriptionService {
 
     private let rateLimiter = RateLimiter()
 
+    /// Compute timeout scaled to audio data size.
+    ///
+    /// Small files (≤ `baseTimeoutDataSize`, ~480KB / ~15s) use the base 10s timeout.
+    /// Larger files scale linearly up to `maxTimeout` (30s) at `maxAudioSizeBytes` (25MB).
+    /// This keeps short chunks snappy while giving large uploads enough time.
+    ///
+    /// Formula (above threshold):
+    ///   timeout = base + (max - base) × (size - baseSize) / (maxSize - baseSize)
+    public static func timeout(forDataSize dataSize: Int) -> Double {
+        guard dataSize > Config.baseTimeoutDataSize else {
+            return Config.timeout
+        }
+        let range = Double(Config.maxAudioSizeBytes - Config.baseTimeoutDataSize)
+        let excess = Double(min(dataSize, Config.maxAudioSizeBytes) - Config.baseTimeoutDataSize)
+        let scaled = Config.timeout + (Config.maxTimeout - Config.timeout) * (excess / range)
+        return min(scaled, Config.maxTimeout)
+    }
+
     /// Transcribe audio with automatic retry and rate limiting
     public func transcribe(audio: Data) async throws -> String {
         // Wait for rate limit and record request atomically
@@ -33,9 +51,11 @@ public actor TranscriptionService {
             throw TranscriptionError.cancelled
         }
 
+        let requestTimeout = Self.timeout(forDataSize: audio.count)
+
         // Perform request with retry
         return try await withRetry(maxAttempts: Config.maxRetries) {
-            try await self.performRequest(audio: audio)
+            try await self.performRequest(audio: audio, timeout: requestTimeout)
         }
     }
 
@@ -78,9 +98,9 @@ public actor TranscriptionService {
     }
 
     /// Perform the actual network request
-    private func performRequest(audio: Data) async throws -> String {
+    private func performRequest(audio: Data, timeout: Double = Config.timeout) async throws -> String {
         let credentials = try await AuthCredentials.load()
-        let request = try buildRequest(audio: audio, credentials: credentials)
+        let request = try buildRequest(audio: audio, credentials: credentials, timeout: timeout)
 
         let (data, response): (Data, URLResponse)
         do {
@@ -126,7 +146,7 @@ public actor TranscriptionService {
     }
 
     /// Build the multipart form request
-    private func buildRequest(audio: Data, credentials: AuthCredentials) throws -> URLRequest {
+    private func buildRequest(audio: Data, credentials: AuthCredentials, timeout: Double = Config.timeout) throws -> URLRequest {
         // P0 Security: Validate audio size to prevent memory exhaustion and DoS
         guard audio.count <= Config.maxAudioSizeBytes else {
             let sizeMB = Double(audio.count) / 1_000_000
@@ -143,7 +163,7 @@ public actor TranscriptionService {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = Config.timeout
+        request.timeoutInterval = timeout
 
         // Headers
         // Headers matching Codex Desktop exactly
