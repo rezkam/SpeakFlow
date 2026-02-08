@@ -8,11 +8,13 @@ public enum Config {
     /// Seconds of silence before triggering chunk send
     public static let silenceDuration: Double = 2.0
     /// Minimum ratio of speech frames to total frames (energy-based, used when VAD is inactive)
-    public static let minSpeechRatio: Float = 0.03
+    public static let minSpeechRatio: Float = 0.01
     /// Minimum VAD probability to consider a chunk as containing real speech.
     /// When VAD is active, this replaces minSpeechRatio for skip decisions.
-    /// Filters broadband noise (white noise ~0.26) while passing real speech (typically >0.5).
-    public static let minVADSpeechProbability: Float = 0.30
+    /// Only skip a chunk if we are ≥80% confident it is pure silence.
+    /// VAD probability < 0.20 means the model sees <20% chance of speech,
+    /// so we are 80%+ sure it's silent. Previously 0.30 (only 70% confident).
+    public static let minVADSpeechProbability: Float = 0.20
 
     // MARK: - Audio Limits (Fixed)
     /// Sample rate for audio recording (Hz)
@@ -47,8 +49,17 @@ public enum Config {
     public static let maxQueuedTextInsertions: Int = 10
 
     // MARK: - VAD Settings
-    public static let vadThreshold: Float = 0.3
-    public static let vadMinSilenceAfterSpeech: Double = 1.0
+    /// Positive threshold for Silero VAD: probability ≥ this triggers speechStart.
+    /// Lowered from 0.30 to 0.15 because real mic speech often registers 0.07-0.25
+    /// (Silero's default is 0.85 — our value is already very sensitive).
+    /// The negative threshold (speechEnd) is derived as threshold - 0.15 offset,
+    /// clamped to 0.01 minimum by FluidAudio.
+    public static let vadThreshold: Float = 0.15
+    /// Minimum duration of below-negative-threshold probability before a speechEnd
+    /// event fires. Increased from 1.0s to 3.0s to prevent false speechEnd events
+    /// during natural sentence pauses (user's speech regularly dips below threshold
+    /// for 1-2s between sentences).
+    public static let vadMinSilenceAfterSpeech: Double = 3.0
     public static let vadMinSpeechDuration: Double = 0.25
     public static let autoEndSilenceDuration: Double = 5.0
     public static let autoEndMinSessionDuration: Double = 2.0
@@ -181,8 +192,8 @@ public final class Settings {
             // Only use stored value if the key actually exists (user explicitly changed it)
             if UserDefaults.standard.object(forKey: Keys.vadThreshold) != nil {
                 let value = UserDefaults.standard.float(forKey: Keys.vadThreshold)
-                // Migrate: if user had old default of 0.5, use new default of 0.3
-                if value == 0.5 {
+                // Migrate: if user had old defaults (0.5 or 0.3), use new default (0.15)
+                if value == 0.5 || value == 0.3 {
                     UserDefaults.standard.removeObject(forKey: Keys.vadThreshold)
                     return Config.vadThreshold
                 }

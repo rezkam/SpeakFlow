@@ -196,3 +196,16 @@ public actor TranscriptionService {
         return request
     }
 }
+
+#if DEBUG
+extension TranscriptionService {
+    /// Test seam for validating request construction behavior without real network calls.
+    func _testBuildRequest(
+        audio: Data,
+        credentials: AuthCredentials,
+        timeout: Double = Config.timeout
+    ) throws -> URLRequest {
+        try buildRequest(audio: audio, credentials: credentials, timeout: timeout)
+    }
+}
+#endif

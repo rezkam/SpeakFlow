@@ -490,23 +490,16 @@ public final class StreamingRecorder {
         // leave the buffer intact for the next check cycle.
         let vadActive = state.getVADActive()
         let speechProbability: Float
-        let energySpeechRatio = await buffer.speechRatio
 
         if vadActive, let vad = vadProcessor {
-            let vadProb = await vad.averageSpeechProbability
-            // When VAD is active AND has actually processed chunks, trust the neural
-            // model probability alone. Don't inflate with energySpeechRatio — white
-            // noise has high energy but low VAD probability.
-            // If VAD never processed any chunks (e.g. very short recording), fall back
-            // to energy-based speech ratio since VAD was never actually consulted.
-            speechProbability = vadProb > 0 ? vadProb : energySpeechRatio
+            speechProbability = await vad.averageSpeechProbability
         } else {
-            speechProbability = energySpeechRatio
+            // VAD inactive — no reliable way to judge speech. Never skip.
+            speechProbability = 1.0
         }
 
-        // Use VAD-specific threshold when VAD is active (0.30) vs energy threshold (0.03)
-        // This filters broadband noise (~0.26 VAD probability) while passing real speech (>0.5)
-        let skipThreshold = vadActive ? Config.minVADSpeechProbability : Settings.shared.minSpeechRatio
+        // Only skip based on VAD probability. No RMS/energy fallback.
+        let skipThreshold = Config.minVADSpeechProbability
 
         // If speech was detected at any point in this session, always send
         // intermediate chunks. This mirrors the final-chunk protection in stop().
@@ -588,7 +581,6 @@ public final class StreamingRecorder {
 
             let result = await buffer.takeAll()
             let duration = Double(result.samples.count) / self.sampleRate
-            let energySpeechRatio = result.speechRatio
 
             guard !wasCancelled else {
                 Logger.audio.info("Recording cancelled, discarding \(String(format: "%.1f", duration))s of audio")
@@ -600,15 +592,10 @@ public final class StreamingRecorder {
 
             let speechProbability: Float
             if hadVADActive, let vad = self.vadProcessor {
-                let vadProb = await vad.averageSpeechProbability
-                // When VAD is active AND has processed chunks, trust neural model
-                // probability alone. Don't inflate with energySpeechRatio — broadband
-                // noise has high energy but low VAD probability.
-                // If VAD never processed any chunks (very short recording), fall back
-                // to energy-based speech ratio since VAD was never actually consulted.
-                speechProbability = vadProb > 0 ? vadProb : energySpeechRatio
+                speechProbability = await vad.averageSpeechProbability
             } else {
-                speechProbability = energySpeechRatio
+                // VAD inactive — no reliable way to judge speech. Always send.
+                speechProbability = 1.0
             }
             await self.vadProcessor?.resetSession()
 
@@ -623,8 +610,8 @@ public final class StreamingRecorder {
                 speechDetectedInSession = false
             }
 
-            // Use VAD-specific threshold when VAD was active
-            let skipThreshold = hadVADActive ? Config.minVADSpeechProbability : Settings.shared.minSpeechRatio
+            // Only skip based on VAD probability. No RMS/energy fallback.
+            let skipThreshold = Config.minVADSpeechProbability
             let hasEnoughSpeech = speechProbability >= skipThreshold
             let shouldSend = duration >= minDuration &&
                 (!Settings.shared.skipSilentChunks || hasEnoughSpeech || speechDetectedInSession)
