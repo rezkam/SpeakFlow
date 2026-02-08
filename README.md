@@ -1,6 +1,6 @@
 # SpeakFlow
 
-A macOS menu bar app that turns your voice into text — anywhere. Press a hotkey, speak naturally, and your words are transcribed and typed into whatever app you're using. Speech detection runs entirely on-device using a lightweight ML model, so only real speech is sent to the cloud for transcription.
+A macOS menu bar app that turns your voice into text — anywhere. Press a hotkey, speak naturally, and your words are transcribed and typed into whatever app you're using.
 
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
 ![Swift 6](https://img.shields.io/badge/Swift-6-orange)
@@ -8,127 +8,34 @@ A macOS menu bar app that turns your voice into text — anywhere. Press a hotke
 ## Features
 
 - **Voice-to-text dictation** — press a hotkey, speak, text appears in any app
-- **On-device voice activity detection** — a ~2M parameter model runs locally on Apple Silicon to distinguish speech from silence in real-time, with no audio leaving your machine until speech is confirmed
-- **Smart chunking** — audio is split at natural sentence boundaries using silence detection, not arbitrary time cuts, so the transcriber always gets complete thoughts
-- **Automatic turn detection** — when you stop speaking, SpeakFlow detects the silence and ends the session automatically — no need to press the hotkey again
-- **Noise reduction** — silent and noise-only chunks are filtered out before transcription, saving API calls and improving accuracy
-- **Universal text insertion** — transcribed text is typed into whatever app has focus via macOS Accessibility
-- **ChatGPT OAuth login** — authenticate with your OpenAI account for Whisper API access
-- **Configurable chunk duration** — 15 seconds to unlimited (full recording)
+- **On-device voice activity detection** — a neural network model runs locally on Apple Silicon to distinguish speech from silence in real-time; no audio leaves your machine until speech is confirmed
+- **Smart chunking** — audio is split at natural sentence boundaries detected by silence analysis, not arbitrary time cuts
+- **Automatic turn detection** — when you stop speaking, silence is detected and the session ends automatically
+- **Noise filtering** — silent and noise-only chunks are filtered before transcription, saving API calls and improving accuracy
+- **Universal text insertion** — transcribed text is typed into the focused app via macOS Accessibility
+- **Configurable chunk duration** — 15 seconds up to 10 minutes
 - **Launch at login** — runs quietly in the menu bar
-- **Usage statistics** — track API calls, words transcribed, and audio processed
 
-## Quick Start
+## Audio Pipeline
 
-### Prerequisites
+1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+2. **Voice activity detection** — a lightweight (~2M parameter) neural model runs on Apple Neural Engine, classifying 32ms audio frames as speech or silence
+3. **Speech segmentation** — the model uses hysteresis thresholds with a 3-second silence debounce to avoid false speech-end events during natural pauses
+4. **Chunking** — audio is buffered and sent at the configured interval, always waiting for a natural pause so sentences aren't cut mid-word
+5. **Auto-end** — after confirmed silence of 5+ seconds following speech, the session ends automatically
+6. **Transcription** — speech chunks are sent to the Whisper API; results arrive in order and are typed into the active app
 
-- macOS 15.0+ on Apple Silicon
-- Xcode Command Line Tools (`xcode-select --install`)
-- OpenAI Pro or Max subscription
+## Audio Format
 
-### Build & Install
-
-```bash
-git clone https://github.com/rezkam/SpeakFlow.git
-cd SpeakFlow
-./scripts/build-release.sh
-cp -r SpeakFlow.app /Applications/
-open /Applications/SpeakFlow.app
-```
-
-## Required Permissions
-
-### Microphone Access
-
-Required to record your voice. Grant when prompted, or enable in **System Settings → Privacy & Security → Microphone**.
-
-### Accessibility Access
-
-Required to insert text into applications.
-
-1. Open **System Settings → Privacy & Security → Accessibility**
-2. Enable **SpeakFlow**
-3. Restart the app
-
-> **Note:** Rebuilding the app resets this permission.
-
-### ChatGPT Login
-
-1. Click menu bar icon → "Login to ChatGPT..."
-2. Log in via browser
-3. Redirects back automatically
-
-## Usage
-
-| Action | Hotkey |
-|--------|--------|
-| Start/Stop dictation | Double-tap Control |
-| Cancel recording | Escape |
-| Stop and submit (press Enter) | Enter |
-
-### Settings
-
-- **Activation Hotkey** — Double-tap Control, Control+Option+D, Control+Option+Space, or Command+Shift+D
-- **Chunk Duration** — 15s, 30s, 45s, 1m, 2m, 5m, 10m, 15m, or Unlimited
-- **Skip Silent Chunks** — filter out silence-only audio before sending to API
-- **Launch at Login**
-
-## How It Works
-
-1. **Recording** — audio is captured from your microphone at 16kHz
-2. **On-device VAD** — a small (~2M parameter) voice activity detection model runs on Apple Silicon's Neural Engine to classify each audio frame as speech or silence
-3. **Smart chunking** — when the configured chunk duration is reached, SpeakFlow waits for a natural pause in speech before splitting, so sentences aren't cut mid-word
-4. **Auto-end** — if no speech is detected for 5 seconds after you stop talking, the session ends automatically
-5. **Transcription** — speech chunks are sent to OpenAI's Whisper API; results are reassembled in order and typed into the focused app in real-time
-
-## Development
-
-```bash
-# Debug
-swift build
-.build/debug/SpeakFlow
-
-# Release
-./scripts/build-release.sh
-
-# Run all tests
-make test
-
-# Build + full test gate
-make check
-
-# UI test harness
-./scripts/run-ui-tests.sh
-
-# Live E2E (real microphone + real transcription API)
-make test-live-e2e
-
-# Live E2E auto-end timing suite
-make test-live-e2e-autoend
-```
-
-`make test` and `make check` print concise status lines and always write full logs to a temp file (path printed as `Log: ...`).
-
-See `UITests/README.md` for one-time Xcode UI Testing Bundle setup required by UI E2E tests.
-
-## Troubleshooting
-
-### Accessibility Permission Required
-
-Open **System Settings → Privacy & Security → Accessibility**, enable SpeakFlow, restart app.
-
-### Text not inserting
-
-Check accessibility permission, ensure target app has focus.
-
-### Microphone not working
-
-Enable in **System Settings → Privacy & Security → Microphone**, restart app.
-
-### Login issues
-
-Ensure active OpenAI Pro/Max subscription. Try logout and login again.
+| Parameter | Value |
+|-----------|-------|
+| Sample rate | 16,000 Hz |
+| Channels | 1 (mono) |
+| Bit depth | 16-bit signed integer |
+| Byte rate | 32 KB/s |
+| 1 minute | ~1.9 MB |
+| 10 minutes (max chunk) | ~19.2 MB |
 
 ## License
 
-MIT License
+Apache License, Version 2.0
