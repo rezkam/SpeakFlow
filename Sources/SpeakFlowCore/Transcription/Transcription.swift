@@ -27,7 +27,8 @@ public final class Transcription {
                 }
             }
 
-            Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) (timeout: \(Config.timeout)s)")
+            let effectiveTimeout = TranscriptionService.timeout(forDataSize: chunk.wavData.count)
+            Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) duration=\(String(format: "%.1f", chunk.durationSeconds))s size=\(chunk.wavData.count)B (timeout: \(String(format: "%.1f", effectiveTimeout))s)")
 
             // Track API call attempt
             Statistics.shared.recordApiCall()
@@ -45,7 +46,7 @@ public final class Transcription {
                 await self?.queueBridge.markFailed(ticket: ticket)
                 
                 // Play error sound to notify user that transcription failed
-                await MainActor.run {
+                _ = await MainActor.run {
                     NSSound(named: "Basso")?.play()
                 }
             }

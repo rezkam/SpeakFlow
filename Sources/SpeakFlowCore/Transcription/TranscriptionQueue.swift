@@ -158,7 +158,7 @@ public final class TranscriptionQueueBridge {
         }
     }
 
-    func stopListening() {
+    public func stopListening() {
         streamTask?.cancel()
         streamTask = nil
     }

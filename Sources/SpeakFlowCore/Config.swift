@@ -27,8 +27,15 @@ public enum Config {
     // MARK: - API Settings (Fixed)
     /// Minimum seconds between API requests (rate limiting)
     public static let minTimeBetweenRequests: Double = 10.0
-    /// Request timeout in seconds (short to allow retries within 30s total)
-    public static let timeout: Double = 8.0
+    /// Base request timeout in seconds for small audio files (≤ baseTimeoutDataSize).
+    /// 10s is comfortable for typical 15s chunks (~480KB WAV) — OpenAI usually
+    /// responds in 2–5s, but cold starts and network hiccups can push to 8s.
+    public static let timeout: Double = 10.0
+    /// Maximum request timeout in seconds, used for the largest allowed files.
+    public static let maxTimeout: Double = 30.0
+    /// Data size (bytes) at or below which the base timeout applies.
+    /// ~480KB ≈ 15 seconds of 16kHz mono 16-bit PCM WAV.
+    public static let baseTimeoutDataSize: Int = 480_000
     /// Maximum retry attempts for failed requests
     public static let maxRetries: Int = 3
     /// Base delay for exponential backoff (seconds)
@@ -46,6 +53,13 @@ public enum Config {
     public static let autoEndSilenceDuration: Double = 5.0
     public static let autoEndMinSessionDuration: Double = 2.0
     
+    // MARK: - Chunk Safety Limits
+    /// Hard multiplier for force-sending chunks during continuous speech.
+    /// When buffer duration exceeds maxChunkDuration × this multiplier,
+    /// the chunk is sent regardless of speaking state. Prevents unbounded
+    /// buffer accumulation that leads to API timeouts and lost transcriptions.
+    public static let forceSendChunkMultiplier: Double = 2.0
+
     // minChunkDurationForPauseSend removed — chunks now respect user's
     // configured ChunkDuration, not a hardcoded 5s minimum. See shouldSendChunk().
 }

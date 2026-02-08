@@ -69,38 +69,31 @@ public final class Statistics {
 
     // MARK: - Formatting
 
-    /// Format duration as human-readable string (e.g., "2 days, 4 hours, 30 minutes, 2 seconds")
+    // Explicit @MainActor — DateComponentsFormatter is not Sendable; even though the
+    // enclosing @MainActor class isolates static members in Swift 6, being explicit
+    // makes the intent clear and prevents accidental nonisolated access.
+    @MainActor private static let durationFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.day, .hour, .minute, .second]
+        formatter.unitsStyle = .full
+        formatter.maximumUnitCount = 4
+        formatter.zeroFormattingBehavior = .dropAll
+        return formatter
+    }()
+
+    /// Format duration using locale-aware DateComponentsFormatter.
     var formattedDuration: String {
-        let totalSeconds = Int(totalSecondsTranscribed)
+        let totalSeconds = max(totalSecondsTranscribed, 0)
 
         if totalSeconds == 0 {
-            return "0 seconds"
+            return String(localized: "0 seconds")
         }
 
-        let days = totalSeconds / 86400
-        let hours = (totalSeconds % 86400) / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-
-        var parts: [String] = []
-
-        if days > 0 {
-            parts.append("\(days) \(days == 1 ? "day" : "days")")
-        }
-        if hours > 0 {
-            parts.append("\(hours) \(hours == 1 ? "hour" : "hours")")
-        }
-        if minutes > 0 {
-            parts.append("\(minutes) \(minutes == 1 ? "minute" : "minutes")")
-        }
-        if seconds > 0 || parts.isEmpty {
-            parts.append("\(seconds) \(seconds == 1 ? "second" : "seconds")")
-        }
-
-        return parts.joined(separator: ", ")
+        return Self.durationFormatter.string(from: totalSeconds)
+            ?? String(localized: "0 seconds")
     }
 
-    private static let decimalFormatter: NumberFormatter = {
+    @MainActor private static let decimalFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         return formatter
@@ -138,12 +131,12 @@ public final class Statistics {
     /// Full statistics summary for display
     public var summary: String {
         """
-        📊 Transcription Statistics
+        📊 \(String(localized: "Transcription Statistics"))
 
-        ⏱ Total Duration: \(formattedDuration)
-        📝 Characters: \(formattedCharacters)
-        💬 Words: \(formattedWords)
-        🌐 API Calls: \(formattedApiCalls)
+        ⏱ \(String(localized: "Total Duration")): \(formattedDuration)
+        📝 \(String(localized: "Characters")): \(formattedCharacters)
+        💬 \(String(localized: "Words")): \(formattedWords)
+        🌐 \(String(localized: "API Calls")): \(formattedApiCalls)
         """
     }
 

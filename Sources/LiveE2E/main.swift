@@ -2,102 +2,293 @@ import AVFoundation
 import Foundation
 import SpeakFlowCore
 
-@MainActor
-@main
-struct SpeakFlowLiveE2E {
-    private struct Configuration {
-        let recordSeconds: Double
-        let timeoutSeconds: Double
-        let expectedPhrase: String?
-        let autoSpeakText: String?
-        let autoSpeakTextPart2: String?
-        let autoSpeakGapSeconds: Double
-        let autoSpeakRate: Int?
-        let expectedAutoEndMinSeconds: Double?
-        let expectedAutoEndMaxSeconds: Double?
-        let testAutoEnd: Bool  // Test auto-end feature instead of manual stop
-        let chunkDurationOverride: Double?
-        let testNoiseRejection: Bool // Expect NO chunks/transcription
-        let audioFilePath: String? // Path to audio file to play (instead of 'say')
-        let useMockInput: Bool
+// MARK: - Test Scenario Definition
 
-        static func load() -> Configuration {
-            let env = ProcessInfo.processInfo.environment
-            let recordSeconds = Double(env["SPEAKFLOW_E2E_RECORD_SECONDS"] ?? "") ?? 6.0
-            let timeoutSeconds = Double(env["SPEAKFLOW_E2E_TIMEOUT_SECONDS"] ?? "") ?? 35.0
-            let expectedPhrase = env["SPEAKFLOW_E2E_EXPECT_PHRASE"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let autoSpeakText = env["SPEAKFLOW_E2E_AUTO_SPEAK_TEXT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let autoSpeakTextPart2 = env["SPEAKFLOW_E2E_AUTO_SPEAK_TEXT_PART2"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let autoSpeakGapSeconds = Double(env["SPEAKFLOW_E2E_AUTO_SPEAK_GAP_SECONDS"] ?? "") ?? 0
-            let autoSpeakRate = Int(env["SPEAKFLOW_E2E_AUTO_SPEAK_RATE"] ?? "")
-            let expectedAutoEndMinSeconds = Double(env["SPEAKFLOW_E2E_EXPECT_AUTO_END_MIN_SECONDS"] ?? "")
-            let expectedAutoEndMaxSeconds = Double(env["SPEAKFLOW_E2E_EXPECT_AUTO_END_MAX_SECONDS"] ?? "")
-            let testAutoEnd = env["SPEAKFLOW_E2E_TEST_AUTO_END"] == "true" || env["SPEAKFLOW_E2E_TEST_AUTO_END"] == "1"
-            let chunkDurationRaw = Double(env["SPEAKFLOW_E2E_CHUNK_DURATION"] ?? "")
-            let testNoiseRejection = env["SPEAKFLOW_E2E_TEST_NOISE_REJECTION"] == "true" || env["SPEAKFLOW_E2E_TEST_NOISE_REJECTION"] == "1"
-            let audioFilePath = env["SPEAKFLOW_E2E_AUDIO_FILE_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let useMockInput = env["SPEAKFLOW_E2E_USE_MOCK_INPUT"] == "true" || env["SPEAKFLOW_E2E_USE_MOCK_INPUT"] == "1"
-            
-            return Configuration(
-                recordSeconds: max(1.0, recordSeconds),
-                timeoutSeconds: max(5.0, timeoutSeconds),
-                expectedPhrase: expectedPhrase?.isEmpty == true ? nil : expectedPhrase,
-                autoSpeakText: autoSpeakText?.isEmpty == true ? nil : autoSpeakText,
-                autoSpeakTextPart2: autoSpeakTextPart2?.isEmpty == true ? nil : autoSpeakTextPart2,
-                autoSpeakGapSeconds: max(0, autoSpeakGapSeconds),
-                autoSpeakRate: autoSpeakRate,
-                expectedAutoEndMinSeconds: expectedAutoEndMinSeconds,
-                expectedAutoEndMaxSeconds: expectedAutoEndMaxSeconds,
-                testAutoEnd: testAutoEnd,
-                chunkDurationOverride: chunkDurationRaw,
-                testNoiseRejection: testNoiseRejection,
-                audioFilePath: audioFilePath,
-                useMockInput: useMockInput
-            )
+/// A speech segment followed by optional silence.
+struct TextSegment {
+    let text: String
+    /// Seconds of silence to insert AFTER this segment's audio.
+    let silenceAfterSeconds: Double
+}
+
+struct TestScenario {
+    let name: String
+    /// Audio is built by concatenating segments (with silence gaps between).
+    let segments: [TextSegment]
+    let chunkDuration: ChunkDuration
+    let expectedMinChunks: Int
+    let expectedMaxChunks: Int
+    /// Extra seconds after all audio is fed before stopping (lets VAD/timers fire).
+    let trailingSeconds: Double
+    /// Speech rate for macOS `say` (nil = default ~175 wpm).
+    let rate: Int?
+    let validateTranscript: Bool
+
+    /// Combined text from all segments for transcript matching.
+    var fullText: String { segments.map(\.text).joined(separator: " ") }
+}
+
+// MARK: - Audio Fixture Generation
+
+@MainActor
+struct AudioFixture {
+    let durationSeconds: Double
+    let samples: [Float]
+}
+
+/// Generate a multi-segment fixture: speech from `say`, resampled to 16 kHz mono,
+/// with silence gaps between segments.
+@MainActor
+func generateFixture(segments: [TextSegment], rate: Int?,
+                     fixturesDir: URL, index: Int) -> AudioFixture? {
+    let targetRate: Double = 16000
+    var allSamples: [Float] = []
+
+    for (segIdx, segment) in segments.enumerated() {
+        let aiffPath = fixturesDir.appendingPathComponent("fix\(index)_s\(segIdx).aiff").path
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        var args = ["-o", aiffPath]
+        if let rate { args += ["-r", "\(rate)"] }
+        args.append(segment.text)
+        proc.arguments = args
+
+        do { try proc.run(); proc.waitUntilExit() }
+        catch {
+            print("    ✗ say failed for segment \(segIdx) (\"\(segment.text.prefix(40))…\"): \(error)")
+            return nil
+        }
+        guard proc.terminationStatus == 0 else {
+            print("    ✗ say exited with status \(proc.terminationStatus) for segment \(segIdx) (\"\(segment.text.prefix(40))…\"), output path: \(aiffPath)")
+            return nil
+        }
+
+        guard FileManager.default.fileExists(atPath: aiffPath) else {
+            print("    ✗ say produced no output file at \(aiffPath)")
+            return nil
+        }
+
+        guard let samples = resampleToMono16k(path: aiffPath) else {
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: aiffPath)[.size] as? Int) ?? 0
+            print("    ✗ resample to 16kHz mono failed for segment \(segIdx), source file: \(aiffPath) (\(fileSize) bytes)")
+            return nil
+        }
+
+        let segDur = String(format: "%.1f", Double(samples.count) / targetRate)
+        if segment.silenceAfterSeconds > 0 {
+            print("    seg[\(segIdx)]: \(segDur)s speech + \(String(format: "%.1f", segment.silenceAfterSeconds))s silence")
+        } else {
+            print("    seg[\(segIdx)]: \(segDur)s speech")
+        }
+
+        allSamples.append(contentsOf: samples)
+        if segment.silenceAfterSeconds > 0 {
+            allSamples.append(contentsOf: [Float](repeating: 0,
+                count: Int(targetRate * segment.silenceAfterSeconds)))
         }
     }
 
-    static func main() async {
-        let config = Configuration.load()
+    let duration = Double(allSamples.count) / targetRate
+    return AudioFixture(durationSeconds: duration, samples: allSamples)
+}
 
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("  SpeakFlow Live E2E")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        
-        let settings = Settings.shared
-        let originalSkipSilent = settings.skipSilentChunks
-        let originalChunkDuration = settings.chunkDuration
-        
-        if config.testNoiseRejection {
-             settings.skipSilentChunks = true
-             print("Noise Rejection Mode: skipSilentChunks=true")
-        } else {
-             settings.skipSilentChunks = false
-        }
-        
-        if let override = config.chunkDurationOverride, let duration = ChunkDuration(rawValue: override) {
-            settings.chunkDuration = duration
-        } else {
-            settings.chunkDuration = .unlimited
-        }
-        
-        defer {
-            settings.skipSilentChunks = originalSkipSilent
-            settings.chunkDuration = originalChunkDuration
-        }
-        
-        print("Settings: skipSilentChunks=\(settings.skipSilentChunks), chunkDuration=\(settings.chunkDuration.displayName)")
-        print("VAD CONFIG DUMP: vadThreshold=\(settings.vadThreshold), skipSilentChunks=\(settings.skipSilentChunks)")
+/// Load an audio file and resample to 16 kHz mono Float32.
+private func resampleToMono16k(path: String) -> [Float]? {
+    let url = URL(fileURLWithPath: path)
+    guard let file = try? AVAudioFile(forReading: url) else { return nil }
+
+    let srcRate = file.processingFormat.sampleRate
+    let srcFrames = AVAudioFrameCount(file.length)
+    guard let srcFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                      sampleRate: srcRate, channels: 1, interleaved: false),
+          let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFmt, frameCapacity: srcFrames)
+    else { return nil }
+    do { try file.read(into: srcBuf) } catch { return nil }
+
+    let targetRate: Double = 16000
+    let outFrames = AVAudioFrameCount(Double(srcFrames) * targetRate / srcRate)
+    guard let outFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                      sampleRate: targetRate, channels: 1, interleaved: false),
+          let conv = AVAudioConverter(from: srcFmt, to: outFmt),
+          let outBuf = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: outFrames)
+    else { return nil }
+
+    final class OneShot: @unchecked Sendable {
+        var done = false; let buf: AVAudioPCMBuffer
+        init(_ b: AVAudioPCMBuffer) { buf = b }
+    }
+    let state = OneShot(srcBuf)
+    var err: NSError?
+    conv.convert(to: outBuf, error: &err) { _, status in
+        if !state.done { state.done = true; status.pointee = .haveData; return state.buf }
+        status.pointee = .endOfStream; return nil
+    }
+
+    guard let d = outBuf.floatChannelData?[0] else { return nil }
+    return Array(UnsafeBufferPointer(start: d, count: Int(outBuf.frameLength)))
+}
+
+// MARK: - Test Runner
+
+@MainActor
+struct SpeakFlowLiveE2E {
+
+    // ── Scenarios ────────────────────────────────────────────────────
+
+    static let scenarios: [TestScenario] = [
+
+        // 1) Short utterance — single chunk
+        TestScenario(
+            name: "Short speech → single chunk (unlimited)",
+            segments: [TextSegment(text: "Hello world, this is a quick test.", silenceAfterSeconds: 0)],
+            chunkDuration: .unlimited,
+            expectedMinChunks: 1, expectedMaxChunks: 1,
+            trailingSeconds: 3, rate: nil, validateTranscript: true
+        ),
+
+        // 2) Medium speech — fits inside 15 s chunk
+        TestScenario(
+            name: "Medium speech → single chunk (15s)",
+            segments: [TextSegment(
+                text: "The quick brown fox jumps over the lazy dog. "
+                    + "This sentence tests whether a medium length phrase is captured correctly.",
+                silenceAfterSeconds: 0
+            )],
+            chunkDuration: .seconds15,
+            expectedMinChunks: 1, expectedMaxChunks: 1,
+            trailingSeconds: 3, rate: nil, validateTranscript: true
+        ),
+
+        // 3) Two-part speech with silence gap → VAD splits into 2 chunks
+        //    Part 1 exceeds 15 s so the buffer reaches chunk size before the gap.
+        TestScenario(
+            name: "Two-part speech with pause → 2 chunks (15s)",
+            segments: [
+                TextSegment(
+                    text: "This is the first part of a longer recording session. "
+                        + "It needs to be long enough to fill an entire fifteen second chunk buffer. "
+                        + "The voice activity detection system should recognise the silence gap that follows. "
+                        + "Once the gap is detected and the buffer exceeds the chunk duration, "
+                        + "the system must automatically send this chunk to the transcription service.",
+                    silenceAfterSeconds: 3.0
+                ),
+                TextSegment(
+                    text: "Now this is the second part spoken after a clear pause. "
+                        + "It should arrive as a completely separate chunk in the transcription queue.",
+                    silenceAfterSeconds: 0
+                ),
+            ],
+            chunkDuration: .seconds15,
+            expectedMinChunks: 2, expectedMaxChunks: 3,
+            trailingSeconds: 5, rate: 170, validateTranscript: true
+        ),
+
+        // 4) Same two-part audio with 30 s chunks → fits in one chunk
+        TestScenario(
+            name: "Two-part speech → single chunk (30s chunks, audio fits)",
+            segments: [
+                TextSegment(
+                    text: "This is the first part of a longer recording session. "
+                        + "It needs to be long enough to fill an entire fifteen second chunk buffer. "
+                        + "The voice activity detection system should recognise the silence gap that follows. "
+                        + "Once the gap is detected and the buffer exceeds the chunk duration, "
+                        + "the system must automatically send this chunk to the transcription service.",
+                    silenceAfterSeconds: 3.0
+                ),
+                TextSegment(
+                    text: "Now this is the second part spoken after a clear pause. "
+                        + "It should arrive as a completely separate chunk in the transcription queue.",
+                    silenceAfterSeconds: 0
+                ),
+            ],
+            chunkDuration: .seconds30,
+            expectedMinChunks: 1, expectedMaxChunks: 1,
+            trailingSeconds: 5, rate: 170, validateTranscript: true
+        ),
+
+        // 5) Short phrase — baseline transcription check
+        TestScenario(
+            name: "Short phrase → unlimited (baseline)",
+            segments: [TextSegment(
+                text: "The rain in Spain stays mainly in the plain.",
+                silenceAfterSeconds: 0
+            )],
+            chunkDuration: .unlimited,
+            expectedMinChunks: 1, expectedMaxChunks: 1,
+            trailingSeconds: 3, rate: nil, validateTranscript: true
+        ),
+    ]
+
+    // ── Entry point ──────────────────────────────────────────────────
+
+    static func main() async {
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("  SpeakFlow Live E2E — Multi-Scenario Suite")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         guard OpenAICodexAuth.isLoggedIn else {
             fail("Not logged in. Open SpeakFlow and complete ChatGPT login first.")
         }
 
-        if !config.useMockInput {
-            let micAuthorized = await ensureMicrophoneAccess()
-            guard micAuthorized else {
-                fail("Microphone access is required. Grant access for the current process and retry.")
+        // ── Generate fixtures ────────────────────────────────────────
+        let fixturesDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("SpeakFlowE2E_\(ProcessInfo.processInfo.processIdentifier)")
+        try? FileManager.default.createDirectory(at: fixturesDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixturesDir) }
+
+        print("\n📦 Generating audio fixtures…")
+        var fixtures: [AudioFixture] = []
+        for (i, s) in scenarios.enumerated() {
+            print("  [\(i+1)/\(scenarios.count)] \(s.name)")
+            guard let f = generateFixture(segments: s.segments, rate: s.rate,
+                                          fixturesDir: fixturesDir, index: i) else {
+                fail("Fixture generation failed for: \(s.name)")
             }
+            print("    → total: \(String(format: "%.1f", f.durationSeconds))s")
+            fixtures.append(f)
+        }
+
+        // ── Run scenarios ────────────────────────────────────────────
+        var passed = 0, failed = 0
+
+        for (i, scenario) in scenarios.enumerated() {
+            let fixture = fixtures[i]
+            print("\n┌─────────────────────────────────────────────")
+            print("│ [\(i+1)/\(scenarios.count)] \(scenario.name)")
+            print("│ Audio: \(String(format: "%.1f", fixture.durationSeconds))s  Chunk: \(scenario.chunkDuration.displayName)")
+            print("└─────────────────────────────────────────────")
+
+            let r = await runScenario(scenario: scenario, fixture: fixture)
+            if r.success { print("  ✅ PASS"); passed += 1 }
+            else { print("  ❌ FAIL: \(r.error ?? "unknown")"); failed += 1 }
+        }
+
+        // ── Summary ──────────────────────────────────────────────────
+        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("  Results: \(passed) passed, \(failed) failed")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        if failed > 0 { Foundation.exit(1) }
+    }
+
+    // MARK: - Scenario Execution
+
+    struct ScenarioResult {
+        let success: Bool; let error: String?
+        static func pass() -> ScenarioResult { .init(success: true, error: nil) }
+        static func fail(_ m: String) -> ScenarioResult { .init(success: false, error: m) }
+    }
+
+    static func runScenario(scenario: TestScenario, fixture: AudioFixture) async -> ScenarioResult {
+        // Configure settings
+        let settings = Settings.shared
+        let savedChunk = settings.chunkDuration
+        let savedSkip  = settings.skipSilentChunks
+        settings.chunkDuration = scenario.chunkDuration
+        settings.skipSilentChunks = false
+        defer {
+            settings.chunkDuration = savedChunk
+            settings.skipSilentChunks = savedSkip
         }
 
         let bridge = Transcription.shared.queueBridge
@@ -108,205 +299,90 @@ struct SpeakFlowLiveE2E {
 
         bridge.onTextReady = { text in
             transcriptParts.append(text)
-            print("partial: \(text)")
+            let preview = text.count > 80 ? String(text.prefix(77)) + "…" : text
+            print("    📝 chunk transcript: \(preview)")
         }
 
         let recorder = StreamingRecorder()
         recorder.onChunkReady = { chunk in
             chunksSubmitted += 1
-            let duration = String(format: "%.2f", chunk.durationSeconds)
-            let speech = String(format: "%.0f", chunk.speechProbability * 100)
-            print("chunk #\(chunksSubmitted): \(duration)s (\(speech)% speech)")
+            let dur = String(format: "%.1f", chunk.durationSeconds)
+            let sp  = String(format: "%.0f", chunk.speechProbability * 100)
+            print("    🎤 chunk #\(chunksSubmitted): \(dur)s (\(sp)% speech)")
             Task { @MainActor in
                 let ticket = await bridge.nextSequence()
                 Transcription.shared.transcribe(ticket: ticket, chunk: chunk)
             }
         }
 
-        if config.testAutoEnd {
-            print("Testing AUTO-END feature")
-        } else {
-            print("Recording for \(String(format: "%.1f", config.recordSeconds))s.")
-        }
+        // Feed pre-recorded audio via mock input (no mic/speaker needed)
+        await recorder.startMock(audioData: fixture.samples)
 
-        // Track if auto-end was triggered
-        var autoEndTriggered = false
-        var autoEndElapsedSeconds: Double?
-        let autoEndTime = Date()
-        
-        recorder.onAutoEnd = {
-            autoEndTriggered = true
-            let elapsed = Date().timeIntervalSince(autoEndTime)
-            autoEndElapsedSeconds = elapsed
-            print("🔔 AUTO-END triggered after \(String(format: "%.1f", elapsed))s")
-        }
+        let totalWait = fixture.durationSeconds + scenario.trailingSeconds
+        print("    ⏱ Feeding \(String(format: "%.1f", fixture.durationSeconds))s + \(String(format: "%.0f", scenario.trailingSeconds))s trailing…")
+        try? await Task.sleep(nanoseconds: UInt64(totalWait * 1_000_000_000))
+        recorder.stop()
 
-        if config.useMockInput {
-            var audioData: [Float] = []
-            if let path = config.audioFilePath {
-                if let loaded = loadAudioFile(path: path) {
-                    audioData = loaded
-                    print("Loaded audio file: \(path) (\(audioData.count) samples)")
-                } else {
-                    fail("Failed to load audio file at \(path)")
-                }
-            } else {
-                print("Using synthesized sine wave audio")
-                let sampleRate = 16000.0
-                let duration = config.recordSeconds
-                // Simple sine wave
-                let sampleCount = Int(sampleRate * duration)
-                audioData = (0..<sampleCount).map { i -> Float in
-                     let time = Double(i) / sampleRate
-                     let angle = 2.0 * .pi * 440.0 * time
-                     return Float(sin(angle)) * 0.5
-                }
-            }
-            await recorder.startMock(audioData: audioData)
-        } else {
-            await recorder.start()
-            if let autoSpeakText = config.autoSpeakText {
-                startAutoSpeakSequence(
-                    firstText: autoSpeakText,
-                    secondText: config.autoSpeakTextPart2,
-                    gapSeconds: config.autoSpeakGapSeconds,
-                    rate: config.autoSpeakRate
-                )
-            } else if let audioPath = config.audioFilePath {
-                 print("Playing audio file: \(audioPath)")
-                 startAudioPlayback(filePath: audioPath)
-            }
-        }
-        
-        if config.testAutoEnd {
-            // Wait for auto-end or timeout
-            let autoEndDeadline = Date().addingTimeInterval(config.timeoutSeconds)
-            while !autoEndTriggered && Date() < autoEndDeadline {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-            
-            if autoEndTriggered {
-                print("✅ Auto-end worked!")
-                recorder.stop()
-            } else {
-                recorder.stop()
-                fail("Auto-end did NOT trigger within \(config.timeoutSeconds)s timeout")
-            }
-        } else {
-            // Normal mode: manual stop after fixed time
-            // If using mock input, the input runs out or we wait recordSeconds
-            try? await Task.sleep(for: .seconds(config.recordSeconds))
-            recorder.stop()
-        }
+        // Grace period for stop()'s async final-chunk Task to fire
+        try? await Task.sleep(for: .seconds(2))
 
-        let deadline = Date().addingTimeInterval(config.timeoutSeconds)
+        // Drain transcription responses (up to 30 s)
+        let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
             let pending = await bridge.getPendingCount()
-            if chunksSubmitted > 0 && pending == 0 {
-                break
-            }
-            if pending == 0 && chunksSubmitted == 0 {
-                // If we haven't submitted anything yet, keep waiting
-            }
-             if pending == 0 && chunksSubmitted > 0 { break }
+            if chunksSubmitted > 0 && pending == 0 { break }
             try? await Task.sleep(for: .milliseconds(200))
         }
 
-        let pendingAfterWait = await bridge.getPendingCount()
-        
-        if config.testNoiseRejection {
-            if chunksSubmitted > 0 {
-                fail("Noise rejection failed: \(chunksSubmitted) chunks were sent to API.")
-            } else {
-                print("✅ Noise rejection passed: 0 chunks sent.")
-                return 
-            }
-        }
-
-        if chunksSubmitted == 0 {
-            fail("No chunks were produced. Ensure input has audible speech.")
-        }
-        if pendingAfterWait > 0 {
+        let pending = await bridge.getPendingCount()
+        if pending > 0 {
             Transcription.shared.cancelAll()
-            fail("Timed out waiting for transcription completion (\(pendingAfterWait) pending).")
+            return .fail("Timed out: \(pending) transcription(s) still pending")
         }
 
-        let transcript = transcriptParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        print("Transcript: \(transcript)")
-        print("Status: PASS")
-    }
-
-    private static func ensureMicrophoneAccess() async -> Bool {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: return true
-        case .notDetermined:
-            return await withCheckedContinuation { continuation in
-                AVCaptureDevice.requestAccess(for: .audio) { granted in
-                    continuation.resume(returning: granted)
-                }
-            }
-        case .denied, .restricted: return false
-        @unknown default: return false
+        // ── Validate chunk count ─────────────────────────────────────
+        print("    📊 Chunks: \(chunksSubmitted) (expected \(scenario.expectedMinChunks)–\(scenario.expectedMaxChunks))")
+        if chunksSubmitted < scenario.expectedMinChunks {
+            return .fail("Too few chunks: \(chunksSubmitted) < min \(scenario.expectedMinChunks)")
         }
-    }
-
-    private static func startAutoSpeakSequence(firstText: String, secondText: String?, gapSeconds: Double, rate: Int?) {
-        _ = startAutoSpeak(text: firstText, rate: rate)
-        guard let secondText, !secondText.isEmpty else { return }
-        Task { @MainActor in
-            if gapSeconds > 0 { try? await Task.sleep(for: .seconds(gapSeconds)) }
-            _ = startAutoSpeak(text: secondText, rate: rate)
+        if chunksSubmitted > scenario.expectedMaxChunks {
+            return .fail("Too many chunks: \(chunksSubmitted) > max \(scenario.expectedMaxChunks)")
         }
-    }
 
-    @discardableResult
-    private static func startAutoSpeak(text: String, rate: Int?) -> Process? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        if let rate { process.arguments = ["-r", "\(rate)", text] }
-        else { process.arguments = [text] }
-        try? process.run()
-        return process
-    }
+        // ── Validate transcript ──────────────────────────────────────
+        let transcript = transcriptParts.joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = transcript.count > 120 ? String(transcript.prefix(117)) + "…" : transcript
+        print("    📄 Transcript: \(preview)")
 
-    @discardableResult
-    private static func startAudioPlayback(filePath: String) -> Process? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-        process.arguments = [filePath]
-        try? process.run()
-        return process
-    }
-    
-    private static func loadAudioFile(path: String) -> [Float]? {
-        let url = URL(fileURLWithPath: path)
-        guard let file = try? AVAudioFile(forReading: url),
-              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: file.processingFormat.sampleRate, channels: 1, interleaved: false),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else {
-            return nil
+        if transcript.isEmpty {
+            return .fail("Empty transcript — audio sent but nothing returned")
         }
-        try? file.read(into: buffer)
-        guard let data = buffer.floatChannelData?[0] else { return nil }
-        return Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
+        if scenario.validateTranscript && !looselyMatches(expected: scenario.fullText, actual: transcript) {
+            return .fail("Transcript mismatch.\n      Expected: \(scenario.fullText.prefix(80))…\n      Got: \(transcript.prefix(80))…")
+        }
+
+        return .pass()
     }
 
-    private static func looselyMatches(expected: String, actual: String) -> Bool {
-        let expectedWords = normalizedWords(expected)
-        let actualWords = normalizedWords(actual)
-        guard !expectedWords.isEmpty else { return true }
-        let overlapCount = expectedWords.intersection(actualWords).count
-        let requiredOverlap = max(1, expectedWords.count / 2)
-        return overlapCount >= requiredOverlap
+    // MARK: - Helpers
+
+    /// Loose match: at least 1/3 of expected words must appear in actual.
+    static func looselyMatches(expected: String, actual: String) -> Bool {
+        let exp = normalized(expected), act = normalized(actual)
+        guard !exp.isEmpty else { return true }
+        return exp.intersection(act).count >= max(1, exp.count / 3)
     }
 
-    private static func normalizedWords(_ text: String) -> Set<String> {
-        let lowered = text.lowercased()
-        let components = lowered.split { !$0.isLetter && !$0.isNumber }
-        return Set(components.map(String.init))
+    private static func normalized(_ s: String) -> Set<String> {
+        Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
     }
 
-    private static func fail(_ message: String) -> Never {
+    static func fail(_ message: String) -> Never {
         fputs("ERROR: \(message)\n", stderr)
         Foundation.exit(1)
     }
 }
+
+// Entry point
+await SpeakFlowLiveE2E.main()

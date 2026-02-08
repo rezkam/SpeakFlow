@@ -4,6 +4,7 @@ import ApplicationServices
 import Carbon.HIToolbox
 import ServiceManagement
 import OSLog
+import os
 import SpeakFlowCore
 
 /// Main application delegate handling UI and lifecycle
@@ -22,6 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     private var queuedInsertionCount = 0  // P3 Security: Track queue depth to enforce limit
     private var keyMonitor: Any?  // Monitor for Escape/Enter keys during recording
     private var shouldPressEnterOnComplete = false  // Press Enter after transcription completes
+    /// Thread-safe flag checked by the nonisolated CGEvent tap callback.
+    /// Set to true when key listener starts, false when it stops.
+    /// Prevents consuming Enter/Escape when no recording phase is active
+    /// (e.g. after recorder start failure where the tap hasn't been removed yet).
+    private let keyListenerActive = OSAllocatedUnfairLock(initialState: false)
     private var uiTestHarness: UITestHarnessController?
     private var uiTestToggleCount = 0
     private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
@@ -32,8 +38,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     // Menu bar icon
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
 
-    // Microphone permission polling timer
-    private var micPermissionTimer: Timer?
+    // Microphone permission polling task
+    private var micPermissionTask: Task<Void, Never>?
+
+    // OAuth callback server — retained so it can be stopped on app termination
+    private var oauthCallbackServer: OAuthCallbackServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Set up permission manager
@@ -72,6 +81,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         if !isUITestMode {
             // Check and request microphone permission on startup
             checkMicrophonePermission()
+
+            // Pre-load the Silero VAD model in the background so the first
+            // recording session starts instantly instead of waiting ~1-2s for
+            // CoreML model compilation / HuggingFace download.
+            if VADProcessor.isAvailable && Settings.shared.vadEnabled {
+                Task {
+                    await VADModelCache.shared.warmUp(threshold: Settings.shared.vadThreshold)
+                }
+            }
         }
 
         NSApp.setActivationPolicy(isUITestMode ? .regular : .accessory)
@@ -207,32 +225,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         let menu = NSMenu()
 
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
-        menu.addItem(NSMenuItem(title: "Start Dictation (\(hotkeyName))", action: #selector(toggle), keyEquivalent: ""))
+        let dictationLabel: String
+        if isRecording || isProcessingFinal {
+            dictationLabel = String(localized: "Stop Dictation")
+        } else {
+            dictationLabel = String(localized: "Start Dictation")
+        }
+        let startTitle = "\(dictationLabel) (\(hotkeyName))"
+        let startItem = NSMenuItem(title: startTitle, action: #selector(toggle), keyEquivalent: "")
+        startItem.setAccessibilityLabel(String(localized: "Start or stop dictation"))
+        menu.addItem(startItem)
         menu.addItem(.separator())
 
         // Add accessibility status menu item
-        let accessibilityTitle = trusted ? "✅ Accessibility Enabled" : "⚠️ Enable Accessibility..."
+        let accessibilityTitle = trusted
+            ? String(localized: "✅ Accessibility Enabled")
+            : String(localized: "⚠️ Enable Accessibility...")
         let accessibilityItem = NSMenuItem(
             title: accessibilityTitle,
             action: #selector(checkAccessibility),
             keyEquivalent: ""
         )
+        accessibilityItem.setAccessibilityLabel(String(localized: "Accessibility permission status and action"))
         menu.addItem(accessibilityItem)
 
         // Add microphone status menu item
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        let micTitle = micStatus == .authorized ? "✅ Microphone Enabled" : "⚠️ Enable Microphone..."
+        let micTitle = micStatus == .authorized
+            ? String(localized: "✅ Microphone Enabled")
+            : String(localized: "⚠️ Enable Microphone...")
         let micItem = NSMenuItem(title: micTitle, action: #selector(checkMicrophoneAction), keyEquivalent: "")
+        micItem.setAccessibilityLabel(String(localized: "Microphone permission status and action"))
         menu.addItem(micItem)
-        
+
         // Add login status menu item
         let isLoggedIn = OpenAICodexAuth.isLoggedIn
-        let loginTitle = isLoggedIn ? "✅ Logged in to ChatGPT" : "⚠️ Login to ChatGPT..."
+        let loginTitle = isLoggedIn
+            ? String(localized: "✅ Logged in to ChatGPT")
+            : String(localized: "⚠️ Login to ChatGPT...")
         let loginItem = NSMenuItem(title: loginTitle, action: #selector(handleLoginAction), keyEquivalent: "")
+        loginItem.setAccessibilityLabel(String(localized: "ChatGPT login status and action"))
         menu.addItem(loginItem)
-        
+
         if isLoggedIn {
-            let logoutItem = NSMenuItem(title: "Logout", action: #selector(handleLogout), keyEquivalent: "")
+            let logoutItem = NSMenuItem(title: String(localized: "Logout"), action: #selector(handleLogout), keyEquivalent: "")
+            logoutItem.setAccessibilityLabel(String(localized: "Log out of ChatGPT"))
             menu.addItem(logoutItem)
         }
         menu.addItem(.separator())
@@ -243,10 +280,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             let item = NSMenuItem(title: type.displayName, action: #selector(changeHotkey(_:)), keyEquivalent: "")
             item.representedObject = type
             item.state = (type == HotkeySettings.shared.currentHotkey) ? .on : .off
+            let hotkeyOptionLabel = String(localized: "Activation hotkey option")
+            item.setAccessibilityLabel("\(hotkeyOptionLabel): \(type.displayName)")
             hotkeySubmenu.addItem(item)
         }
 
-        let hotkeyMenuItem = NSMenuItem(title: "Activation Hotkey", action: nil, keyEquivalent: "")
+        let hotkeyMenuItem = NSMenuItem(title: String(localized: "Activation Hotkey"), action: nil, keyEquivalent: "")
+        hotkeyMenuItem.setAccessibilityLabel(String(localized: "Choose the activation hotkey"))
         hotkeyMenuItem.submenu = hotkeySubmenu
         menu.addItem(hotkeyMenuItem)
 
@@ -256,37 +296,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             let item = NSMenuItem(title: duration.displayName, action: #selector(changeChunkDuration(_:)), keyEquivalent: "")
             item.representedObject = duration
             item.state = (duration == Settings.shared.chunkDuration) ? .on : .off
+            let chunkOptionLabel = String(localized: "Chunk duration option")
+            item.setAccessibilityLabel("\(chunkOptionLabel): \(duration.displayName)")
             chunkSubmenu.addItem(item)
         }
-        let chunkMenuItem = NSMenuItem(title: "Chunk Duration", action: nil, keyEquivalent: "")
+        let chunkMenuItem = NSMenuItem(title: String(localized: "Chunk Duration"), action: nil, keyEquivalent: "")
+        chunkMenuItem.setAccessibilityLabel(String(localized: "Choose dictation chunk duration"))
         chunkMenuItem.submenu = chunkSubmenu
         menu.addItem(chunkMenuItem)
 
         // Skip silent chunks toggle
         let skipSilentItem = NSMenuItem(
-            title: "Skip Silent Chunks",
+            title: String(localized: "Skip Silent Chunks"),
             action: #selector(toggleSkipSilentChunks(_:)),
             keyEquivalent: ""
         )
         skipSilentItem.state = Settings.shared.skipSilentChunks ? .on : .off
+        skipSilentItem.setAccessibilityLabel(String(localized: "Toggle skipping low-speech chunks"))
         menu.addItem(skipSilentItem)
         menu.addItem(.separator())
 
         // Statistics
-        menu.addItem(NSMenuItem(title: "View Statistics...", action: #selector(showStatistics), keyEquivalent: ""))
+        let statsItem = NSMenuItem(title: String(localized: "View Statistics..."), action: #selector(showStatistics), keyEquivalent: "")
+        statsItem.setAccessibilityLabel(String(localized: "View transcription statistics"))
+        menu.addItem(statsItem)
         menu.addItem(.separator())
 
         // Launch at Login toggle
         let launchAtLoginItem = NSMenuItem(
-            title: "Launch at Login",
+            title: String(localized: "Launch at Login"),
             action: #selector(toggleLaunchAtLogin(_:)),
             keyEquivalent: ""
         )
         launchAtLoginItem.state = isLaunchAtLoginEnabled() ? .on : .off
+        launchAtLoginItem.setAccessibilityLabel(String(localized: "Toggle launch at login"))
         menu.addItem(launchAtLoginItem)
         menu.addItem(.separator())
 
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+        let quitItem = NSMenuItem(title: String(localized: "Quit"), action: #selector(quit), keyEquivalent: "q")
+        quitItem.setAccessibilityLabel(String(localized: "Quit SpeakFlow"))
+        menu.addItem(quitItem)
         statusItem.menu = menu
     }
 
@@ -341,20 +390,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     @objc private func showStatistics() {
         let alert = NSAlert()
-        alert.messageText = "Transcription Statistics"
+        alert.messageText = String(localized: "Transcription Statistics")
         alert.informativeText = Statistics.shared.summary
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Reset...")
+        alert.addButton(withTitle: String(localized: "OK"))
+        alert.addButton(withTitle: String(localized: "Reset..."))
 
         if alert.runModal() == .alertSecondButtonReturn {
             // User clicked Reset - confirm
             let confirmAlert = NSAlert()
-            confirmAlert.messageText = "Reset Statistics?"
-            confirmAlert.informativeText = "This will permanently reset all transcription statistics to zero."
+            confirmAlert.messageText = String(localized: "Reset Statistics?")
+            confirmAlert.informativeText = String(localized: "This will permanently reset all transcription statistics to zero.")
             confirmAlert.alertStyle = .warning
-            confirmAlert.addButton(withTitle: "Reset")
-            confirmAlert.addButton(withTitle: "Cancel")
+            confirmAlert.addButton(withTitle: String(localized: "Reset"))
+            confirmAlert.addButton(withTitle: String(localized: "Cancel"))
 
             if confirmAlert.runModal() == .alertFirstButtonReturn {
                 Statistics.shared.reset()
@@ -366,10 +415,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         if OpenAICodexAuth.isLoggedIn {
             // Already logged in - show status
             let alert = NSAlert()
-            alert.messageText = "Already Logged In"
-            alert.informativeText = "You are already logged in to ChatGPT."
+            alert.messageText = String(localized: "Already Logged In")
+            alert.informativeText = String(localized: "You are already logged in to ChatGPT.")
             alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: String(localized: "OK"))
             alert.runModal()
         } else {
             // Start login flow
@@ -379,24 +428,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     @objc private func handleLogout() {
         let alert = NSAlert()
-        alert.messageText = "Logout from ChatGPT?"
-        alert.informativeText = "This will remove your saved login credentials."
+        alert.messageText = String(localized: "Logout from ChatGPT?")
+        alert.informativeText = String(localized: "This will remove your saved login credentials.")
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Logout")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: String(localized: "Logout"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
 
         if alert.runModal() == .alertFirstButtonReturn {
             OpenAICodexAuth.deleteCredentials()
-            
+
             // Rebuild menu to update login status
             let trusted = AXIsProcessTrusted()
             buildMenu(trusted: trusted)
-            
+
             let confirmAlert = NSAlert()
-            confirmAlert.messageText = "Logged Out"
-            confirmAlert.informativeText = "You have been logged out from ChatGPT."
+            confirmAlert.messageText = String(localized: "Logged Out")
+            confirmAlert.informativeText = String(localized: "You have been logged out from ChatGPT.")
             confirmAlert.alertStyle = .informational
-            confirmAlert.addButton(withTitle: "OK")
+            confirmAlert.addButton(withTitle: String(localized: "OK"))
             confirmAlert.runModal()
         }
     }
@@ -404,26 +453,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     private func startLoginFlow() {
         // Create authorization flow
         let flow = OpenAICodexAuth.createAuthorizationFlow()
-        
-        // Start the callback server
+
+        // Start the callback server (retained for cleanup on app termination)
         let server = OAuthCallbackServer(expectedState: flow.state)
-        
+        oauthCallbackServer = server
+
         // Show instructions
         let alert = NSAlert()
-        alert.messageText = "Login to ChatGPT"
-        alert.informativeText = """
+        alert.messageText = String(localized: "Login to ChatGPT")
+        alert.informativeText = String(localized: """
         A browser window will open for you to log in to ChatGPT.
-        
+
         After logging in, you'll be redirected back automatically.
-        
+
         If the redirect doesn't work, copy the URL from your browser and paste it when prompted.
-        """
+        """)
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Open Browser")
-        alert.addButton(withTitle: "Cancel")
-        
+        alert.addButton(withTitle: String(localized: "Open Browser"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        
+
         // Open browser
         NSWorkspace.shared.open(flow.url)
         
@@ -432,6 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             let code = await server.waitForCallback(timeout: 120)
             
             await MainActor.run {
+                self.oauthCallbackServer = nil  // Server done, release
                 if let code = code {
                     // Got code from callback server
                     self.exchangeCodeForTokens(code: code, flow: flow)
@@ -445,14 +496,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     private func promptForManualCode(flow: OpenAICodexAuth.AuthorizationFlow) {
         let alert = NSAlert()
-        alert.messageText = "Paste Authorization Code"
-        alert.informativeText = "If the browser didn't redirect automatically, paste the URL or authorization code here:"
+        alert.messageText = String(localized: "Paste Authorization Code")
+        alert.informativeText = String(localized: "If the browser didn't redirect automatically, paste the URL or authorization code here:")
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Submit")
-        alert.addButton(withTitle: "Cancel")
-        
+        alert.addButton(withTitle: String(localized: "Submit"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        input.placeholderString = "Paste URL or code here"
+        input.placeholderString = String(localized: "Paste URL or code here")
         alert.accessoryView = input
         
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -494,10 +545,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                     self.buildMenu(trusted: trusted)
                     
                     let alert = NSAlert()
-                    alert.messageText = "Login Successful"
-                    alert.informativeText = "You are now logged in to ChatGPT. You can start using voice dictation."
+                    alert.messageText = String(localized: "Login Successful")
+                    alert.informativeText = String(localized: "You are now logged in to ChatGPT. You can start using voice dictation.")
                     alert.alertStyle = .informational
-                    alert.addButton(withTitle: "OK")
+                    alert.addButton(withTitle: String(localized: "OK"))
                     alert.runModal()
                 }
             } catch {
@@ -510,10 +561,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     private func showError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Error"
+        alert.messageText = String(localized: "Error")
         alert.informativeText = message
         alert.alertStyle = .critical
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: String(localized: "OK"))
         alert.runModal()
     }
 
@@ -541,6 +592,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     func updateStatusIcon() {
         statusItem.button?.title = ""
         statusItem.button?.image = defaultIcon
+        // Rebuild menu so the Start/Stop Dictation label stays in sync
+        buildMenu(trusted: AXIsProcessTrusted())
     }
 
     private func loadMenuBarIcon() -> NSImage? {
@@ -577,10 +630,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         let trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
         if trusted {
             let alert = NSAlert()
-            alert.messageText = "Accessibility Permission Active"
-            alert.informativeText = "The app has the necessary permissions to insert dictated text."
+            alert.messageText = String(localized: "Accessibility Permission Active")
+            alert.informativeText = String(localized: "The app has the necessary permissions to insert dictated text.")
             alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: String(localized: "OK"))
             alert.runModal()
         }
     }
@@ -589,43 +642,135 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         if status == .authorized {
             let alert = NSAlert()
-            alert.messageText = "Microphone Permission Active"
-            alert.informativeText = "The app has access to your microphone for voice recording."
+            alert.messageText = String(localized: "Microphone Permission Active")
+            alert.informativeText = String(localized: "The app has access to your microphone for voice recording.")
             alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: String(localized: "OK"))
             alert.runModal()
         } else {
             checkMicrophonePermission()
         }
     }
 
-    // MARK: - Escape Key Listener (only active during recording)
+    // MARK: - Escape/Enter Key Interceptor (only active during recording)
+    //
+    // Uses a CGEvent tap (not NSEvent.addGlobalMonitorForEvents) so that
+    // Enter and Escape are CONSUMED during recording — they never reach the
+    // target app. Enter triggers stop-and-submit; Escape cancels. All other
+    // keys pass through unmodified.
+
+    private var recordingEventTap: CFMachPort?
+    private var recordingRunLoopSource: CFRunLoopSource?
 
     private func startKeyListener() {
-        guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            switch event.keyCode {
-            case 53:  // Escape key
-                Task { @MainActor [weak self] in
-                    self?.cancelRecording()
+        guard recordingEventTap == nil else { return }
+
+        let eventMask = (1 << CGEventType.keyDown.rawValue)
+
+        recordingEventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,          // .defaultTap can suppress events
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
+                return delegate.handleRecordingKeyEvent(event: event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+
+        guard let tap = recordingEventTap else {
+            Logger.audio.error("Could not create recording key event tap (need Accessibility permission). Falling back to passive monitor.")
+            // Fallback: passive monitor (Enter won't be consumed but at least the feature works)
+            keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                switch event.keyCode {
+                case 53: Task { @MainActor [weak self] in self?.cancelRecording() }
+                case 36: Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if self.isRecording {
+                        self.stopRecordingAndSubmit()
+                    } else if self.isProcessingFinal {
+                        self.shouldPressEnterOnComplete = true
+                        Logger.audio.info("Enter pressed during processing — will submit after completion")
+                    }
                 }
-            case 36:  // Enter key
-                Task { @MainActor [weak self] in
-                    self?.stopRecordingAndSubmit()
+                default: break
                 }
-            default:
-                break
             }
+            Logger.audio.debug("Key listener started (PASSIVE fallback — Enter will pass through)")
+            return
         }
-        Logger.audio.debug("Key listener started (Escape=cancel, Enter=submit)")
+
+        recordingRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        guard let source = recordingRunLoopSource else {
+            recordingEventTap = nil
+            return
+        }
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        keyListenerActive.withLock { $0 = true }
+        Logger.audio.debug("Key listener started (CGEvent tap — Enter/Escape will be intercepted)")
+    }
+
+    /// Handle key events during recording / processing-final phase.
+    /// Returns nil to consume, or the event to pass through.
+    private nonisolated func handleRecordingKeyEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Thread-safe check: only consume keys when a recording phase is actually active.
+        // Without this guard, a stale tap (e.g. from a failed recorder start that didn't
+        // clean up) would swallow Enter/Escape system-wide.
+        guard keyListenerActive.withLock({ $0 }) else {
+            return Unmanaged.passRetained(event)
+        }
+
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+        switch keyCode {
+        case 53:  // Escape — cancel recording (or processing), consume the event
+            Task { @MainActor [weak self] in
+                self?.cancelRecording()
+            }
+            return nil  // Consumed: Escape does not reach the target app
+
+        case 36:  // Enter/Return — stop and submit, consume the event
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.isRecording {
+                    // Still recording — stop and queue Enter for after completion
+                    self.stopRecordingAndSubmit()
+                } else if self.isProcessingFinal {
+                    // Already stopped, waiting for final chunks — just flag Enter
+                    self.shouldPressEnterOnComplete = true
+                    Logger.audio.info("Enter pressed during processing — will submit after completion")
+                }
+            }
+            return nil  // Consumed: Enter does not reach the target app
+
+        default:
+            return Unmanaged.passRetained(event)  // All other keys pass through
+        }
     }
 
     private func stopKeyListener() {
+        keyListenerActive.withLock { $0 = false }
+
+        // Stop CGEvent tap
+        if let tap = recordingEventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = recordingRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        }
+        recordingEventTap = nil
+        recordingRunLoopSource = nil
+
+        // Stop fallback NSEvent monitor (if CGEvent tap failed)
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
-            Logger.audio.debug("Key listener stopped")
         }
+        Logger.audio.debug("Key listener stopped")
     }
     
     /// Stop recording and press Enter after transcription completes (for chat submit)
@@ -758,16 +903,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         Task { @MainActor in
             await Transcription.shared.queueBridge.reset()
             let started = await recorder?.start() ?? false
-            if !started {
+            if started {
+                // Only start key listener after confirmed successful start.
+                // This prevents Enter/Escape interception when the recorder
+                // failed to start (e.g. no mic permission, engine error).
+                self.startKeyListener()
+            } else {
                 Logger.audio.error("Recorder failed to start — rolling back app state")
                 isRecording = false
                 isProcessingFinal = false
                 recorder = nil
+                // stopKeyListener() for safety in case anything was partially set up
+                self.stopKeyListener()
                 updateStatusIcon()
                 NSSound(named: "Basso")?.play()
             }
         }
-        startKeyListener()  // Listen for Escape (cancel) or Enter (submit)
         refreshUITestHarness()
     }
 
@@ -782,7 +933,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     func stopRecording(reason: StopReason = .unknown) {
-        stopKeyListener()
+        // NOTE: Key listener stays active through the processing-final phase
+        // so Enter/Escape are still intercepted while waiting for final chunks.
+        // It is stopped in finishIfDone() or cancelRecording().
         guard isRecording else { return }
 
         Logger.audio.error("🔴 STOP RECORDING reason=\(reason.rawValue) sessionDur=\(String(format: "%.1f", Date().timeIntervalSince(self.recorder?.sessionStartDate ?? Date())))s transcript=\"\(self.fullTranscript.prefix(80))\"")
@@ -846,6 +999,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             Task {
                 await Transcription.shared.queueBridge.checkCompletion()
             }
+            stopKeyListener()
             isProcessingFinal = false
             targetElement = nil
             textInsertionTask = nil
@@ -867,7 +1021,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             await self.waitForTextInsertion()
 
             await MainActor.run {
-                // All transcriptions complete, stop processing mode
+                // All transcriptions complete — release key interceptor and stop processing mode
+                self.stopKeyListener()
                 self.isProcessingFinal = false
                 self.targetElement = nil  // Clear stored element
                 self.textInsertionTask = nil  // Clear completed task
@@ -1086,8 +1241,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             Logger.permissions.info("Microphone permission granted")
-            micPermissionTimer?.invalidate()
-            micPermissionTimer = nil
+            micPermissionTask?.cancel()
+            micPermissionTask = nil
             updateStatusIcon()
             updateMenu(trusted: AXIsProcessTrusted())
         case .notDetermined:
@@ -1120,16 +1275,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     private func startMicrophonePermissionPolling() {
-        micPermissionTimer?.invalidate()
-        micPermissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
-            let status = AVCaptureDevice.authorizationStatus(for: .audio)
-            if status == .authorized {
-                Logger.permissions.info("Microphone permission granted (detected via polling)")
-                timer.invalidate()
-                Task { @MainActor in
-                    self?.micPermissionTimer = nil
-                    self?.updateStatusIcon()
-                    self?.updateMenu(trusted: AXIsProcessTrusted())
+        micPermissionTask?.cancel()
+        // Use a MainActor Task loop instead of Timer to avoid @Sendable closure
+        // accessing @MainActor state, which violates Swift 6 strict concurrency.
+        micPermissionTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self = self else { return }
+
+                let status = AVCaptureDevice.authorizationStatus(for: .audio)
+                if status == .authorized {
+                    Logger.permissions.info("Microphone permission granted (detected via polling)")
+                    self.micPermissionTask = nil
+                    self.updateStatusIcon()
+                    self.updateMenu(trusted: AXIsProcessTrusted())
+                    return
                 }
             }
         }
@@ -1137,8 +1297,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     private func showMicrophonePermissionAlert() {
         let alert = NSAlert()
-        alert.messageText = "Microphone Access Required"
-        alert.informativeText = """
+        alert.messageText = String(localized: "Microphone Access Required")
+        alert.informativeText = String(localized: """
         This app needs microphone permission to record your voice for transcription.
 
         To enable it:
@@ -1147,12 +1307,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         3. Try recording again
 
         💡 You may need to restart the app after changing permissions.
-        """
+        """)
         alert.alertStyle = .warning
         alert.icon = NSImage(systemSymbolName: "mic.slash.fill", accessibilityDescription: "Microphone Denied")
 
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: String(localized: "Open System Settings"))
+        alert.addButton(withTitle: String(localized: "OK"))
 
         let response = alert.runModal()
 
@@ -1186,16 +1346,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             isProcessingFinal = false
         }
 
-        // Cancel all in-flight transcription tasks
+        // Cancel all in-flight transcription tasks and stop the queue stream
         Transcription.shared.cancelAll()
+        Transcription.shared.queueBridge.stopListening()
 
         // Cancel ongoing text insertion
         textInsertionTask?.cancel()
         textInsertionTask = nil
 
-        // Stop microphone permission polling
-        micPermissionTimer?.invalidate()
-        micPermissionTimer = nil
+        // Stop OAuth callback server if a login flow is in progress
+        oauthCallbackServer?.stop()
+        oauthCallbackServer = nil
+
+        // Stop microphone/accessibility permission polling
+        micPermissionTask?.cancel()
+        micPermissionTask = nil
+        permissionManager?.stopPolling()
 
         // Remove workspace notification observer
         NSWorkspace.shared.notificationCenter.removeObserver(self)

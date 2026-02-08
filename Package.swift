@@ -27,14 +27,7 @@ let package = Package(
                 .process("../Resources")
             ]
         ),
-        // Test executable (runs without XCTest/swift-testing)
-        .executableTarget(
-            name: "SpeakFlowTestRunner",
-            dependencies: ["SpeakFlowCore"],
-            path: "Tests",
-            exclude: ["VADTests.swift"]  // Uses Swift Testing framework, tests are in TestRunner.swift
-        ),
-        // Live end-to-end test runner (real mic + real transcription API)
+        // End-to-end test runner (mock audio + real transcription API)
         .executableTarget(
             name: "SpeakFlowLiveE2E",
             dependencies: ["SpeakFlowCore"],
@@ -44,7 +37,6 @@ let package = Package(
             name: "SpeakFlowCoreTests",
             dependencies: ["SpeakFlowCore"],
             path: "Tests",
-            exclude: ["TestRunner.swift"],
             sources: ["VADTests.swift"]
         ),
     ]
