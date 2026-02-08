@@ -110,14 +110,18 @@ struct VADProcessorTests {
     }
 }
 
+// MARK: - Shared Test Helpers
+
+/// Controllable clock for deterministic time-based tests.
+/// Used by SessionController tests to advance time without real waits.
+private final class MockDateProvider: @unchecked Sendable {
+    var now = Date()
+    func date() -> Date { now }
+}
+
 // MARK: - Session Controller Tests
 
 struct SessionControllerTests {
-    // MARK: - Helper Mock Clock
-    final class MockDateProvider: @unchecked Sendable {
-        var now = Date()
-        func date() -> Date { now }
-    }
 
     @Test func testStartSession() async {
         let c = SessionController()
@@ -375,6 +379,199 @@ struct SessionControllerTests {
 
         // Should chunk now via max-duration + silence branch.
         #expect(await c.shouldSendChunk() == true)
+    }
+}
+
+// MARK: - Silence Duration Boundary Tests
+//
+// These tests verify the core invariant: auto-end ONLY fires after the configured
+// silence duration (default 5.0s) has elapsed since the last speech-end event.
+//
+// BUG CONTEXT: Users report that thinking pauses of ~2 seconds sometimes end the
+// entire recording turn. These parameterized tests systematically cover every
+// duration around the threshold to catch any regression.
+
+@Suite("Silence Duration Boundary — Auto-End Must Not Fire Below Threshold")
+struct SilenceBelowThresholdTests {
+    /// Silence durations that must NOT trigger auto-end (below 5.0s threshold).
+    /// Covers the common "thinking pause" range (0.5s–4.9s).
+    @Test(arguments: [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 4.9])
+    func silenceBelowThresholdDoesNotAutoEnd(silenceDuration: Double) async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(
+            enabled: true, silenceDuration: 5.0,
+            minSessionDuration: 0.1, requireSpeechFirst: true,
+            noSpeechTimeout: 100.0  // Disable idle timeout for this test
+        )
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+
+        // Simulate: speech for 2s → speech ends → silence for N seconds
+        await c.onSpeechEvent(.started(at: 0))
+        clock.now += 2.0
+        await c.onSpeechEvent(.ended(at: 2.0))
+
+        clock.now += silenceDuration
+        let result = await c.shouldAutoEndSession()
+        #expect(result == false,
+                "Auto-end must NOT fire after \(silenceDuration)s silence (threshold is 5.0s)")
+    }
+}
+
+@Suite("Silence Duration Boundary — Auto-End Must Fire At/Above Threshold")
+struct SilenceAboveThresholdTests {
+    /// Silence durations that MUST trigger auto-end (at or above 5.0s threshold).
+    @Test(arguments: [5.0, 5.1, 5.5, 6.0, 7.0, 10.0, 30.0])
+    func silenceAtOrAboveThresholdDoesAutoEnd(silenceDuration: Double) async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(
+            enabled: true, silenceDuration: 5.0,
+            minSessionDuration: 0.1, requireSpeechFirst: true,
+            noSpeechTimeout: 100.0
+        )
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+
+        await c.onSpeechEvent(.started(at: 0))
+        clock.now += 2.0
+        await c.onSpeechEvent(.ended(at: 2.0))
+
+        clock.now += silenceDuration
+        let result = await c.shouldAutoEndSession()
+        #expect(result == true,
+                "Auto-end MUST fire after \(silenceDuration)s silence (threshold is 5.0s)")
+    }
+}
+
+@Suite("Silence Duration Boundary — Speech After Pause Resets Timer")
+struct SpeechAfterPauseResetsTimerTests {
+    /// When the user pauses (thinking) and then resumes speaking, the auto-end
+    /// timer must reset. Only continuous silence after the LAST speech-end counts.
+    @Test(arguments: [1.0, 2.0, 3.0, 4.0])
+    func speechAfterPauseResetsAutoEndTimer(pauseDuration: Double) async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(
+            enabled: true, silenceDuration: 5.0,
+            minSessionDuration: 0.1, requireSpeechFirst: true,
+            noSpeechTimeout: 100.0
+        )
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+
+        // ── First speech segment ──
+        await c.onSpeechEvent(.started(at: 0))
+        clock.now += 2.0
+        await c.onSpeechEvent(.ended(at: 2.0))
+
+        // ── Thinking pause (< 5s) ──
+        clock.now += pauseDuration
+        #expect(await c.shouldAutoEndSession() == false,
+                "Should NOT auto-end during \(pauseDuration)s thinking pause")
+
+        // ── Resume speaking ──
+        let resumeTime = 2.0 + pauseDuration
+        await c.onSpeechEvent(.started(at: resumeTime))
+        clock.now += 2.0
+        await c.onSpeechEvent(.ended(at: resumeTime + 2.0))
+
+        // ── Only 1s after second speech end — must NOT auto-end ──
+        clock.now += 1.0
+        #expect(await c.shouldAutoEndSession() == false,
+                "Must NOT auto-end 1s after resumed speech (timer should have reset)")
+
+        // ── 3s after second speech end — still under 5s, must NOT auto-end ──
+        clock.now += 2.0  // total 3s since second speech-end
+        #expect(await c.shouldAutoEndSession() == false,
+                "Must NOT auto-end 3s after resumed speech")
+
+        // ── 5.5s after second speech end — now it SHOULD auto-end ──
+        clock.now += 2.5  // total 5.5s since second speech-end
+        #expect(await c.shouldAutoEndSession() == true,
+                "SHOULD auto-end 5.5s after second speech-end (fresh 5.0s threshold)")
+    }
+}
+
+@Suite("Silence Duration Boundary — Multiple Pauses Accumulation Guard")
+struct MultiplePausesAccumulationTests {
+    /// Verify that multiple short pauses do NOT accumulate toward the auto-end
+    /// threshold. Each pause is individually short; only continuous silence counts.
+    @Test func multipleShortPausesDoNotAccumulate() async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(
+            enabled: true, silenceDuration: 5.0,
+            minSessionDuration: 0.1, requireSpeechFirst: true,
+            noSpeechTimeout: 100.0
+        )
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+
+        var time: Double = 0
+
+        // Simulate 5 speech segments, each followed by a 2s pause.
+        // Total silence = 10s, but no single gap exceeds 5s.
+        for i in 0..<5 {
+            // Speech for 1s
+            await c.onSpeechEvent(.started(at: time))
+            clock.now += 1.0
+            time += 1.0
+            await c.onSpeechEvent(.ended(at: time))
+
+            // Pause for 2s
+            clock.now += 2.0
+            time += 2.0
+
+            // Should NEVER auto-end during any of these pauses
+            let result = await c.shouldAutoEndSession()
+            #expect(result == false,
+                    "Auto-end must NOT fire during pause #\(i+1) (2s gap, 5s threshold)")
+        }
+
+        // After the last speech segment, wait the full 5s → NOW should auto-end
+        clock.now += 5.0
+        #expect(await c.shouldAutoEndSession() == true,
+                "Auto-end should fire after 5s continuous silence following last speech")
+    }
+
+    /// Edge case: pause exactly at the boundary (4.9s) repeated multiple times.
+    /// None should trigger auto-end, but 5.0s continuous silence after should.
+    @Test func repeatedNearThresholdPausesDoNotTrigger() async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(
+            enabled: true, silenceDuration: 5.0,
+            minSessionDuration: 0.1, requireSpeechFirst: true,
+            noSpeechTimeout: 100.0
+        )
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+
+        var time: Double = 0
+
+        // 3 segments with 4.9s pauses between them
+        for i in 0..<3 {
+            await c.onSpeechEvent(.started(at: time))
+            clock.now += 1.0
+            time += 1.0
+            await c.onSpeechEvent(.ended(at: time))
+
+            clock.now += 4.9
+            time += 4.9
+
+            #expect(await c.shouldAutoEndSession() == false,
+                    "4.9s pause #\(i+1) must NOT trigger auto-end")
+
+            if i < 2 {
+                // Resume speech (except after the last segment)
+                await c.onSpeechEvent(.started(at: time))
+                clock.now += 1.0
+                time += 1.0
+                await c.onSpeechEvent(.ended(at: time))
+            }
+        }
+
+        // Now wait 0.2s more → total 5.1s since last speech-end
+        clock.now += 0.2
+        #expect(await c.shouldAutoEndSession() == true,
+                "5.1s continuous silence after last speech should trigger auto-end")
     }
 }
 
