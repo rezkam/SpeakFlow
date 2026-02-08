@@ -27,17 +27,6 @@ A macOS menu bar app that turns your voice into text — anywhere. Press a hotke
 5. **Auto-end** — after confirmed silence of 5+ seconds following speech, the session ends automatically
 6. **Transcription** — speech chunks are sent to the Whisper API; results arrive in order and are typed into the active app
 
-## Audio Format
-
-| Parameter | Value |
-|-----------|-------|
-| Sample rate | 16,000 Hz |
-| Channels | 1 (mono) |
-| Bit depth | 16-bit signed integer |
-| Byte rate | 32 KB/s |
-| 1 minute | ~1.9 MB |
-| 10 minutes (max chunk) | ~19.2 MB |
-
 ## License
 
 Apache License, Version 2.0
