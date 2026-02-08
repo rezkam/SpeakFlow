@@ -5529,7 +5529,7 @@ struct StreamingRecorderStopCancelTests {
             Settings.shared.chunkDuration = origChunk
         }
         Settings.shared.skipSilentChunks = false
-        Settings.shared.chunkDuration = .unlimited
+        Settings.shared.chunkDuration = .minute10
 
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
@@ -5554,7 +5554,7 @@ struct StreamingRecorderStopCancelTests {
     @Test @MainActor func testStopSkipsFinalChunkWhenTooShort() async {
         let origChunk = Settings.shared.chunkDuration
         defer { Settings.shared.chunkDuration = origChunk }
-        Settings.shared.chunkDuration = .unlimited
+        Settings.shared.chunkDuration = .minute10
 
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)

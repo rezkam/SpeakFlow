@@ -78,7 +78,7 @@ public enum Config {
 // MARK: - Chunk Duration Options
 
 public enum ChunkDuration: Double, CaseIterable, Sendable {
-    public static let allCases: [ChunkDuration] = [.seconds15, .seconds30, .seconds45, .minute1, .minute2, .minute5, .minute10, .minute15, .unlimited]
+    public static let allCases: [ChunkDuration] = [.seconds15, .seconds30, .seconds45, .minute1, .minute2, .minute5, .minute10]
     case seconds15 = 15.0
     case seconds30 = 30.0
     case seconds45 = 45.0
@@ -86,8 +86,6 @@ public enum ChunkDuration: Double, CaseIterable, Sendable {
     case minute2 = 120.0
     case minute5 = 300.0
     case minute10 = 600.0
-    case minute15 = 900.0
-    case unlimited = 3600.0  // 1 hour max (matches Codex behavior)
 
     public var displayName: String {
         switch self {
@@ -98,27 +96,17 @@ public enum ChunkDuration: Double, CaseIterable, Sendable {
         case .minute2: return "2 minutes"
         case .minute5: return "5 minutes"
         case .minute10: return "10 minutes"
-        case .minute15: return "15 minutes"
-        case .unlimited: return "Unlimited (no chunking)"
         }
     }
 
-    /// Whether this mode effectively disables chunking
+    /// Whether this mode effectively disables chunking (no longer possible — max is 10 min)
     public var isFullRecording: Bool {
-        self == .unlimited
+        false
     }
 
     /// Minimum chunk duration (shorter chunks get buffered)
     public var minDuration: Double {
-        switch self {
-        case .unlimited:
-            // For unlimited mode, use a very short minimum (250ms like Codex)
-            return 0.25
-        default:
-            // Min equals max - chunks are sent at the selected duration
-            // (silence detection only skips silent chunks, doesn't trigger early sends)
-            return rawValue
-        }
+        rawValue
     }
 }
 

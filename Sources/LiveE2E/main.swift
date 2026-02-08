@@ -247,7 +247,7 @@ struct SpeakFlowLiveE2E {
         TestScenario(
             name: "Short speech → single chunk (unlimited)",
             segments: [TextSegment(text: "Hello world, this is a quick test.", silenceAfterSeconds: 0)],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: true
         ),
@@ -319,7 +319,7 @@ struct SpeakFlowLiveE2E {
                 text: "The rain in Spain stays mainly in the plain.",
                 silenceAfterSeconds: 0
             )],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: true
         ),
@@ -342,7 +342,7 @@ struct SpeakFlowLiveE2E {
                     silenceAfterSeconds: 0
                 ),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: true,
             expectAutoEnd: false
@@ -361,7 +361,7 @@ struct SpeakFlowLiveE2E {
                     silenceAfterSeconds: 0
                 ),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: true,
             expectAutoEnd: false
@@ -380,7 +380,7 @@ struct SpeakFlowLiveE2E {
                     silenceAfterSeconds: 0
                 ),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: true,
             expectAutoEnd: false
@@ -401,7 +401,7 @@ struct SpeakFlowLiveE2E {
                     silenceAfterSeconds: 0
                 ),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: true,
             expectAutoEnd: false
@@ -418,7 +418,7 @@ struct SpeakFlowLiveE2E {
                     silenceAfterSeconds: 8.0
                 ),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 5, rate: nil, validateTranscript: false,
             expectAutoEnd: true
@@ -433,7 +433,7 @@ struct SpeakFlowLiveE2E {
                     silenceAfterSeconds: 12.0
                 ),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 5, rate: nil, validateTranscript: false,
             expectAutoEnd: true
@@ -457,7 +457,7 @@ struct SpeakFlowLiveE2E {
                     silenceAfterSeconds: 0
                 ),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: true,
             expectAutoEnd: false
@@ -478,7 +478,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "And now I continue speaking after the noisy pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -492,7 +492,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Back to speaking after the room tone pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -506,7 +506,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Resuming speech after the low frequency noise pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -520,7 +520,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Continuing to speak after the office noise pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -534,7 +534,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Now speaking again after the breathing pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -549,7 +549,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Immediately continuing after the brief pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -563,7 +563,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Right back to talking after the breath.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -577,7 +577,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Okay I have my answer now.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -592,7 +592,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Alright I have figured out what I want to say.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -606,7 +606,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Back with my complete thought after the pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -620,7 +620,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Continuing my thought after the noisy pause.",
                             silenceAfterSeconds: 0),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 3, rate: nil, validateTranscript: false,
             expectAutoEnd: false
@@ -633,7 +633,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Done speaking now with room tone in background.",
                             silenceAfterSeconds: 8.0, noiseType: .pinkNoise),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 5, rate: nil, validateTranscript: false,
             expectAutoEnd: true
@@ -645,7 +645,7 @@ struct SpeakFlowLiveE2E {
                 TextSegment(text: "Finished talking in a noisy office.",
                             silenceAfterSeconds: 8.0, noiseType: .officeAmbient),
             ],
-            chunkDuration: .unlimited,
+            chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,
             trailingSeconds: 5, rate: nil, validateTranscript: false,
             expectAutoEnd: true
