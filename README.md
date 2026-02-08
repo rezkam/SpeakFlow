@@ -1,5 +1,7 @@
 # SpeakFlow
 
+> **You speak 3× faster than you type. SpeakFlow is a keyboard you talk to.**
+
 A macOS menu bar app that turns your voice into text — anywhere. Press a hotkey, speak naturally, and your words are transcribed and typed into whatever app you're using.
 
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
