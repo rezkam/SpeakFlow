@@ -579,8 +579,8 @@ struct MultiplePausesAccumulationTests {
 
 struct ConfigVADTests {
     @Test func testConstants() {
-        #expect(Config.vadThreshold == 0.3)
-        #expect(Config.vadMinSilenceAfterSpeech == 1.0)
+        #expect(Config.vadThreshold == 0.15)
+        #expect(Config.vadMinSilenceAfterSpeech == 3.0)
         #expect(Config.vadMinSpeechDuration == 0.25)
         #expect(Config.autoEndSilenceDuration == 5.0)
         #expect(Config.autoEndMinSessionDuration == 2.0)
@@ -1695,8 +1695,8 @@ struct ChunkSkipBehavioralRegressionTests {
         #expect(result.remainingDuration > 4.9, "Short buffer must not be drained")
     }
 
-    /// Energy-based skip (VAD not active) also must not drain buffer on skip.
-    @Test func testEnergyBasedSkipPreservesBuffer() async {
+    /// When VAD is inactive, chunks are always sent (no energy-based skip fallback).
+    @Test func testNoVADAlwaysSendsChunk() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         // 15s of pure silence → speechRatio = 0.0
         await buffer.append(
@@ -1708,13 +1708,13 @@ struct ChunkSkipBehavioralRegressionTests {
         let noVAD: VADProcessor? = nil
         let result = await runSendChunkTest(
             buffer: buffer, session: noSession, vad: noVAD, vadActive: false,
-            reason: "test: energy skip"
+            reason: "test: no VAD always sends"
         )
 
-        #expect(result.chunks.isEmpty,
-                "Silent chunk should be skipped with energy-based detection")
-        #expect(result.remainingDuration > 14.0,
-                "Buffer must be preserved when energy-based skip fires")
+        #expect(result.chunks.count == 1,
+                "Without VAD, chunks must always be sent (no energy-based skip)")
+        #expect(result.remainingDuration == 0,
+                "Buffer must be drained when chunk is sent")
     }
 
     /// When VAD probability is ABOVE threshold, chunk is sent normally (no bypass needed).
@@ -5951,11 +5951,13 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
                 "resetChunk() must be called after draining buffer")
     }
 
-    @Test func testSendChunkIfReadyCalculatesSpeechProbabilityFromVADWhenActive() throws {
+    @Test func testSendChunkIfReadyUsesVADProbabilityOnly() throws {
         let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
         let body = extractFunctionBody(named: "sendChunkIfReady", from: source)
-        #expect(body?.contains("speechProbability = vadProb > 0 ? vadProb : energySpeechRatio") == true,
-                "Must prefer VAD probability over energy ratio when VAD active and has data")
+        #expect(body?.contains("speechProbability = await vad.averageSpeechProbability") == true,
+                "Must use VAD probability directly (no energy-based fallback)")
+        #expect(body?.contains("energySpeechRatio") != true,
+                "sendChunkIfReady must not reference energy-based speech ratio")
     }
 
     @Test func testPeriodicCheckDoesNothingWhenNotRecording() throws {
