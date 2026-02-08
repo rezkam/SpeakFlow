@@ -1547,7 +1547,7 @@ struct ChunkSkipBehavioralRegressionTests {
         #expect(await session.hasSpoken, "Session should have recorded speech")
 
         let vad = VADProcessor(config: .default)
-        await vad._testSeedAverageSpeechProbability(0.20, chunks: 10) // Below 0.30!
+        await vad._testSeedAverageSpeechProbability(0.20, chunks: 10) // Below threshold
 
         let result = await runSendChunkTest(
             buffer: buffer, session: session, vad: vad,
@@ -1564,29 +1564,24 @@ struct ChunkSkipBehavioralRegressionTests {
     }
 
     /// When skipSilentChunks=true, VAD active, low probability, and NO speech detected →
-    /// the chunk should be skipped AND the buffer should NOT be drained (audio preserved).
-    /// When skipSilentChunks is enabled, no speech detected in session, and low probability,
-    /// the chunk must be skipped and the buffer must NOT be drained.
-    /// Source-level: verifies the skip branch returns false without calling takeAll.
-    @Test func testSkippedChunkPreservesBufferWhenNoSpeechDetected() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "sendChunkIfReady", from: source)
+    /// the chunk should be skipped AND the buffer should NOT be drained.
+    @Test func testSkippedChunkPreservesBufferWhenNoSpeechDetected() async {
+        let buffer = await makeBufferWith15sAudio(speechRatio: 0.0)
 
-        // Verify skip condition checks all three factors
-        #expect(body?.contains("skipSilentChunks") == true &&
-                body?.contains("speechProbability < skipThreshold") == true &&
-                body?.contains("!speechDetectedInSession") == true,
-                "Skip logic must check skipSilentChunks, speech probability, and session speech state")
+        let session = SessionController(vadConfig: .default, autoEndConfig: .default, maxChunkDuration: 15.0)
+        await session.startSession()
+        #expect(await session.hasSpoken == false, "Sanity: no speech should be recorded for this session")
 
-        // Verify the skip branch returns false (buffer preserved) before the takeAll call
-        // The skip branch must appear BEFORE the "Drain buffer and send" comment
-        if let skipRange = body?.range(of: "Skipping silent chunk"),
-           let drainRange = body?.range(of: "Drain buffer and send") {
-            #expect(skipRange.lowerBound < drainRange.lowerBound,
-                    "Skip branch must execute before buffer drain")
-        } else {
-            Issue.record("Expected both 'Skipping silent chunk' and 'Drain buffer and send' in sendChunkIfReady")
-        }
+        let vad = VADProcessor(config: .default)
+        await vad._testSeedAverageSpeechProbability(0.12, chunks: 10) // Below threshold
+
+        let result = await runSendChunkTest(
+            buffer: buffer, session: session, vad: vad,
+            reason: "test: no speech detected skip"
+        )
+
+        #expect(result.chunks.isEmpty, "Chunk should be skipped when no speech has been detected in the session")
+        #expect(result.remainingDuration > 14.0, "Skipped chunk must preserve buffered audio")
     }
 
     /// When skipSilentChunks=false, chunks are always sent regardless of probability.
@@ -1625,7 +1620,7 @@ struct ChunkSkipBehavioralRegressionTests {
         await buffer1.append(frames: [Float](repeating: 0.001, count: Int(7.0 * sampleRate)), hasSpeech: false)
 
         let vad1 = VADProcessor(config: .default)
-        await vad1._testSeedAverageSpeechProbability(0.27, chunks: 10) // Below 0.30!
+        await vad1._testSeedAverageSpeechProbability(0.27, chunks: 10) // Below threshold
 
         let result1 = await runSendChunkTest(
             buffer: buffer1, session: session, vad: vad1,
@@ -1732,7 +1727,7 @@ struct ChunkSkipBehavioralRegressionTests {
         await session.onSpeechEvent(.ended(at: 1.0))
 
         let vad = VADProcessor(config: .default)
-        await vad._testSeedAverageSpeechProbability(0.55, chunks: 10) // Above 0.30
+        await vad._testSeedAverageSpeechProbability(0.55, chunks: 10) // Above threshold
 
         let result = await runSendChunkTest(
             buffer: buffer, session: session, vad: vad,
@@ -1753,7 +1748,7 @@ struct ChunkSkipBehavioralRegressionTests {
         // No speech events — but probability is at threshold
 
         let vad = VADProcessor(config: .default)
-        await vad._testSeedAverageSpeechProbability(Config.minVADSpeechProbability, chunks: 10) // Exactly 0.30
+        await vad._testSeedAverageSpeechProbability(Config.minVADSpeechProbability, chunks: 10) // Exactly at threshold
 
         let result = await runSendChunkTest(
             buffer: buffer, session: session, vad: vad,
@@ -2149,18 +2144,19 @@ struct Issue4FocusVerificationRegressionTests {
 @Suite("Issue #7 — Recorder start failure cleans up state")
 struct Issue7RecorderStartFailureRegressionTests {
 
-    /// REGRESSION: start() must return Bool so callers can detect failure.
-    @Test func testStartReturnsBool() async {
-        let result: Bool = await withCheckedContinuation { cont in
+    /// REGRESSION: start() result must match recorder state.
+    @Test func testStartResultMatchesRecorderState() async {
+        let outcome: (started: Bool, isRecordingAfterStart: Bool) = await withCheckedContinuation { cont in
             Task { @MainActor in
                 let recorder = StreamingRecorder()
                 let started = await recorder.start()
+                let isRecordingAfterStart = recorder._testIsRecording
                 recorder.stop()
-                cont.resume(returning: started)
+                cont.resume(returning: (started: started, isRecordingAfterStart: isRecordingAfterStart))
             }
         }
-        // Just verify it compiles and returns Bool — the value depends on mic permission
-        #expect(result == true || result == false, "start() must return Bool")
+        #expect(outcome.started == outcome.isRecordingAfterStart,
+                "start() must only report success when recorder is actually in recording state")
     }
 
     /// REGRESSION: After a failed start (simulated), all state must be rolled back —
@@ -5994,6 +5990,9 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
 
 @Suite("TranscriptionService — Timeout, Error Truncation & Request Building")
 struct TranscriptionServiceTimeoutErrorRequestTests {
+    private func makeAuthCredentials() -> AuthCredentials {
+        AuthCredentials(accessToken: "test-access-token", accountId: "test-account-id")
+    }
 
     /// Small data (≤ baseTimeoutDataSize) should use base timeout.
     @Test func testTimeoutSmallDataUsesBaseTimeout() {
@@ -6068,40 +6067,70 @@ struct TranscriptionServiceTimeoutErrorRequestTests {
         #expect(withoutEllipsis.count == 200)
     }
 
-    /// TranscriptionService must be declared as an actor.
-    @Test func testTranscriptionServiceIsActor() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        #expect(source.contains("public actor TranscriptionService"))
-    }
-
-    /// TranscriptionService must have a shared singleton.
-    @Test func testTranscriptionServiceHasSharedSingleton() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        #expect(source.contains("public static let shared = TranscriptionService()"))
+    /// shared should return the same singleton instance.
+    @Test func testTranscriptionServiceHasStableSharedSingleton() {
+        #expect(TranscriptionService.shared === TranscriptionService.shared)
     }
 
     /// buildRequest must validate audio size.
-    @Test func testBuildRequestValidatesAudioSize() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "buildRequest", from: source)
-        #expect(body?.contains("audio.count <= Config.maxAudioSizeBytes") == true,
-                "buildRequest must validate audio size")
-        #expect(body?.contains("TranscriptionError.audioTooLarge") == true)
+    @Test func testBuildRequestValidatesAudioSize() async {
+        let service = TranscriptionService()
+        let oversizedAudio = Data(count: Config.maxAudioSizeBytes + 1)
+
+        do {
+            _ = try await service._testBuildRequest(audio: oversizedAudio, credentials: makeAuthCredentials())
+            Issue.record("Expected TranscriptionError.audioTooLarge for oversized audio input")
+        } catch let error as TranscriptionError {
+            switch error {
+            case .audioTooLarge(let size, let maxSize):
+                #expect(size == Config.maxAudioSizeBytes + 1)
+                #expect(maxSize == Config.maxAudioSizeBytes)
+            default:
+                Issue.record("Expected audioTooLarge, got \(error)")
+            }
+        } catch {
+            Issue.record("Expected TranscriptionError.audioTooLarge, got \(type(of: error))")
+        }
     }
 
     /// buildRequest must use the correct ChatGPT endpoint.
-    @Test func testBuildRequestUsesCorrectEndpoint() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        #expect(source.contains("https://chatgpt.com/backend-api/transcribe"),
+    @Test func testBuildRequestUsesCorrectEndpoint() async throws {
+        let service = TranscriptionService()
+        let request = try await service._testBuildRequest(
+            audio: Data("abc".utf8),
+            credentials: makeAuthCredentials(),
+            timeout: 12.5
+        )
+
+        #expect(request.url?.absoluteString == "https://chatgpt.com/backend-api/transcribe",
                 "Must use the ChatGPT transcription endpoint")
+        #expect(request.httpMethod == "POST")
+        #expect(abs(request.timeoutInterval - 12.5) < 0.001)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-access-token")
+        #expect(request.value(forHTTPHeaderField: "ChatGPT-Account-Id") == "test-account-id")
+        #expect(request.value(forHTTPHeaderField: "originator") == "Codex Desktop")
     }
 
     /// buildRequest must use multipart/form-data.
-    @Test func testBuildRequestUsesMultipartFormData() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "buildRequest", from: source)
-        #expect(body?.contains("multipart/form-data; boundary=") == true)
-        #expect(body?.contains(#"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\""#) == true)
+    @Test func testBuildRequestUsesMultipartFormData() async throws {
+        let service = TranscriptionService()
+        let request = try await service._testBuildRequest(
+            audio: Data("ABC".utf8),
+            credentials: makeAuthCredentials()
+        )
+
+        let contentType = try #require(request.value(forHTTPHeaderField: "Content-Type"))
+        #expect(contentType.hasPrefix("multipart/form-data; boundary="))
+
+        let boundary = String(contentType.dropFirst("multipart/form-data; boundary=".count))
+        let bodyData = try #require(request.httpBody)
+        let body = String(decoding: bodyData, as: UTF8.self)
+
+        #expect(body.contains("--\(boundary)\r\n"))
+        #expect(body.contains(#"Content-Disposition: form-data; name="file"; filename="audio.wav""#))
+        #expect(body.contains("Content-Type: audio/wav"))
+        #expect(body.contains("ABC"))
+        #expect(body.contains("\r\n--\(boundary)--\r\n"))
     }
 }
 
