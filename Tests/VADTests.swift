@@ -6299,3 +6299,653 @@ struct TranscriptionServiceRetryErrorTests {
         #expect(body?.contains("json[\"text\"] as? String") == true)
     }
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - LiveStreamingController: Smart Diff Tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Helper to collect onTextUpdate calls from LiveStreamingController.
+@MainActor
+private final class TextUpdateCollector {
+    struct Entry {
+        let textToType: String
+        let replacingChars: Int
+        let isFinal: Bool
+        let fullText: String
+    }
+    var entries: [Entry] = []
+    var autoEndCount = 0
+    var utteranceEndCount = 0
+    var speechStartCount = 0
+
+    /// Wire all callbacks. If `simulateActive` is true, sets `isActive = true`
+    /// so the silence timer can fire (normally set by `start()`).
+    func wire(_ c: LiveStreamingController, simulateActive: Bool = false) {
+        if simulateActive { c.isActive = true }
+        c.onTextUpdate = { [weak self] textToType, replacingChars, isFinal, fullText in
+            self?.entries.append(Entry(textToType: textToType, replacingChars: replacingChars, isFinal: isFinal, fullText: fullText))
+        }
+        c.onAutoEnd = { [weak self] in self?.autoEndCount += 1 }
+        c.onUtteranceEnd = { [weak self] in self?.utteranceEndCount += 1 }
+        c.onSpeechStarted = { [weak self] in self?.speechStartCount += 1 }
+    }
+
+    /// Simulate what the screen would show: apply all entries' keystrokes.
+    var screenText: String {
+        var text = ""
+        for e in entries {
+            if e.replacingChars > 0 {
+                let removeCount = min(e.replacingChars, text.count)
+                text = String(text.dropLast(removeCount))
+            }
+            text += e.textToType
+            if e.isFinal && !e.fullText.isEmpty {
+                text += " "
+            }
+        }
+        return text
+    }
+
+    var finals: [Entry] { entries.filter(\.isFinal) }
+    var interims: [Entry] { entries.filter { !$0.isFinal } }
+}
+
+@Suite("LiveStreamingController — Smart Diff")
+struct SmartDiffTests {
+
+    // MARK: - diffFromEnd unit tests
+
+    @MainActor @Test func testDiffIdenticalStrings() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "Hello world", new: "Hello world")
+        #expect(del == 0)
+        #expect(suffix == "")
+    }
+
+    @MainActor @Test func testDiffAppendOnly() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "Hello", new: "Hello world")
+        #expect(del == 0)
+        #expect(suffix == " world")
+    }
+
+    @MainActor @Test func testDiffLastWordChanges() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "Hello worl", new: "Hello world!")
+        #expect(del == 0)
+        #expect(suffix == "d!")
+    }
+
+    @MainActor @Test func testDiffMiddleCorrection() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "Helo world", new: "Hello world")
+        #expect(del == 7, "Must delete from divergence point: 'o world' = 7 chars")
+        #expect(suffix == "lo world")
+    }
+
+    @MainActor @Test func testDiffCompleteReplacement() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "abc", new: "xyz")
+        #expect(del == 3)
+        #expect(suffix == "xyz")
+    }
+
+    @MainActor @Test func testDiffEmptyOld() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "", new: "Hello")
+        #expect(del == 0)
+        #expect(suffix == "Hello")
+    }
+
+    @MainActor @Test func testDiffEmptyNew() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "Hello", new: "")
+        #expect(del == 5)
+        #expect(suffix == "")
+    }
+
+    @MainActor @Test func testDiffBothEmpty() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "", new: "")
+        #expect(del == 0)
+        #expect(suffix == "")
+    }
+
+    @MainActor @Test func testDiffShorterNewText() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "Hello world", new: "Hello")
+        #expect(del == 6, "Must delete ' world' = 6 chars")
+        #expect(suffix == "")
+    }
+
+    @MainActor @Test func testDiffUnicodeCharacters() {
+        let c = LiveStreamingController()
+        let (del, suffix) = c.diffFromEnd(old: "Héllo wörld", new: "Héllo wörld!")
+        #expect(del == 0)
+        #expect(suffix == "!")
+    }
+
+    // MARK: - handleEvent smart diff integration
+
+    @MainActor @Test func testInterimToInterimAppendOnly() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+        c.hasSpeechOccurred = false // simulate fresh start
+
+        // First interim: "Hello"
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+        #expect(col.entries.count == 1)
+        #expect(col.entries[0].textToType == "Hello")
+        #expect(col.entries[0].replacingChars == 0)
+
+        // Second interim: "Hello world" — should only type " world"
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello world", confidence: 0.9, words: [])))
+        #expect(col.entries.count == 2)
+        #expect(col.entries[1].textToType == " world")
+        #expect(col.entries[1].replacingChars == 0, "Common prefix preserved — no deletions needed")
+    }
+
+    @MainActor @Test func testInterimToInterimCorrection() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "I like cots", confidence: 0.9, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "I like cats", confidence: 0.95, words: [])))
+
+        #expect(col.entries.count == 2)
+        #expect(col.entries[1].replacingChars == 3, "Delete 'ots' from 'cots'")
+        #expect(col.entries[1].textToType == "ats", "Type 'ats' to form 'cats'")
+    }
+
+    @MainActor @Test func testInterimToIdenticalFinalNoKeystrokes() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        // Interim shows the text
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello world", confidence: 0.9, words: [])))
+        // Final is identical — should NOT delete and retype
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello world", confidence: 0.99, words: [])))
+
+        #expect(col.entries.count == 2)
+        let final = col.entries[1]
+        #expect(final.isFinal == true)
+        #expect(final.replacingChars == 0, "No chars deleted — text was identical")
+        #expect(final.textToType == "", "No text typed — text was identical")
+        #expect(final.fullText == "Hello world", "Full text still tracked for transcript")
+    }
+
+    @MainActor @Test func testInterimToSlightlyDifferentFinal() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "hello world", confidence: 0.9, words: [])))
+        // Final adds punctuation
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello world.", confidence: 0.99, words: [])))
+
+        let final = col.entries[1]
+        #expect(final.isFinal == true)
+        // "hello world" vs "Hello world." diverge at index 0
+        #expect(final.replacingChars == 11, "Delete all of 'hello world'")
+        #expect(final.textToType == "Hello world.", "Retype with correction")
+    }
+
+    @MainActor @Test func testInterimToFinalAppendOnly() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello world", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello world.", confidence: 0.99, words: [])))
+
+        let final = col.entries[1]
+        #expect(final.replacingChars == 0, "No deletions — final just appends period")
+        #expect(final.textToType == ".", "Only type the period")
+    }
+
+    @MainActor @Test func testFinalWithNoInterimTypesFullText() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        // Final arrives without any preceding interim
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello world.", confidence: 0.99, words: [])))
+
+        #expect(col.entries.count == 1)
+        #expect(col.entries[0].textToType == "Hello world.")
+        #expect(col.entries[0].replacingChars == 0)
+        #expect(col.entries[0].isFinal == true)
+    }
+
+    @MainActor @Test func testEmptyFinalRemovesInterim() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "um", confidence: 0.5, words: [])))
+        // Empty final — server decided interim was noise
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "", confidence: 0.0, words: [])))
+
+        #expect(col.entries.count == 2)
+        let final = col.entries[1]
+        #expect(final.replacingChars == 2, "Delete 'um'")
+        #expect(final.textToType == "")
+        #expect(final.fullText == "")
+    }
+
+    @MainActor @Test func testMultipleSegmentsScreenText() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        // Segment 1: "Hello" interim → "Hello." final
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [])))
+
+        // Segment 2: "World" interim → "World!" final
+        c.handleEvent(.interim(TranscriptionResult(transcript: "World", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "World!", confidence: 0.99, words: [])))
+
+        // Verify screen text is correct
+        #expect(col.screenText == "Hello. World! ", "Segments separated by spaces from finals")
+    }
+
+    @MainActor @Test func testProgressiveInterimGrowthMinimalKeystrokes() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        // Simulate natural interim progression
+        let interims = ["H", "He", "Hel", "Hell", "Hello", "Hello ", "Hello w", "Hello wo", "Hello wor", "Hello worl", "Hello world"]
+        for text in interims {
+            c.handleEvent(.interim(TranscriptionResult(transcript: text, confidence: 0.9, words: [])))
+        }
+
+        // Every update after the first should be append-only (0 deletions)
+        for i in 1..<col.entries.count {
+            #expect(col.entries[i].replacingChars == 0,
+                    "Entry \(i): progressive growth should never need deletions, got \(col.entries[i].replacingChars)")
+            #expect(col.entries[i].textToType.count <= 2,
+                    "Entry \(i): should type at most 1-2 chars, typed '\(col.entries[i].textToType)'")
+        }
+    }
+
+    @MainActor @Test func testIdenticalConsecutiveInterimsNoOp() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+
+        #expect(col.entries.count == 1, "Identical interims produce no additional callbacks")
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - LiveStreamingController: Silence Auto-End Tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@Suite("LiveStreamingController — Silence Auto-End")
+struct SilenceAutoEndTests {
+
+    @MainActor @Test func testAutoEndDisabledByDefault() {
+        let c = LiveStreamingController()
+        #expect(c.autoEndSilenceDuration == 0, "Auto-end disabled by default")
+    }
+
+    @MainActor @Test func testNoAutoEndWhenDisabled() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+        c.autoEndSilenceDuration = 0
+
+        // Simulate speech then utterance end
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
+
+        // Wait well past any potential timer
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(col.autoEndCount == 0, "Should never auto-end when duration is 0")
+    }
+
+    @MainActor @Test func testNoAutoEndBeforeSpeech() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+        c.autoEndSilenceDuration = 0.1
+
+        // utteranceEnd without any prior speech — should NOT trigger timer
+        c.handleEvent(.utteranceEnd(lastWordEnd: 0))
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(col.autoEndCount == 0, "Should not auto-end if no speech has occurred")
+    }
+
+    @MainActor @Test func testAutoEndFiresAfterSilence() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+        c.autoEndSilenceDuration = 0.15  // 150ms for fast test
+
+        // Simulate: speech → utterance end → silence
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
+
+        // Wait for auto-end to fire
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(col.autoEndCount == 1, "Auto-end should fire after silence duration")
+    }
+
+    @MainActor @Test func testAutoEndCancelledBySpeechResuming() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+        c.autoEndSilenceDuration = 0.2  // 200ms
+
+        // Speech → utterance end
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
+
+        // Wait 100ms, then speech starts again
+        try await Task.sleep(for: .milliseconds(100))
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "World", confidence: 0.9, words: [])))
+
+        // Wait past the original 200ms deadline
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(col.autoEndCount == 0, "Auto-end cancelled because speech resumed")
+    }
+
+    @MainActor @Test func testAutoEndCancelledByInterim() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+        c.autoEndSilenceDuration = 0.2
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Test", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Test.", confidence: 0.99, words: [], speechFinal: true)))
+
+        // Timer started. New interim cancels it.
+        try await Task.sleep(for: .milliseconds(100))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "More", confidence: 0.9, words: [])))
+
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(col.autoEndCount == 0, "Interim text cancels silence timer")
+    }
+
+    @MainActor @Test func testAutoEndFiresOnUtteranceEnd() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+        c.autoEndSilenceDuration = 0.1
+
+        // Speech occurred, then utteranceEnd (not speechFinal)
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hi", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hi.", confidence: 0.99, words: [])))
+        c.handleEvent(.utteranceEnd(lastWordEnd: 0))
+
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(col.autoEndCount == 1, "utteranceEnd should also start the silence timer")
+    }
+
+    @MainActor @Test func testAutoEndFiresExactlyOnce() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+        c.autoEndSilenceDuration = 0.1
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Test.", confidence: 0.99, words: [], speechFinal: true)))
+
+        // Wait much longer than the timer
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(col.autoEndCount == 1, "Should fire exactly once, not repeatedly")
+    }
+
+    @MainActor @Test func testSilenceTimerResetOnMultipleUtteranceEnds() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+        c.autoEndSilenceDuration = 0.2
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "A.", confidence: 0.99, words: [], speechFinal: true)))
+        // Timer starts: T=0
+
+        try await Task.sleep(for: .milliseconds(100))
+        // Another utteranceEnd at T=100ms — timer should RESET
+        c.handleEvent(.utteranceEnd(lastWordEnd: 0))
+
+        // At T=200ms: only 100ms since last reset — should NOT have fired
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(col.autoEndCount == 0, "Timer was reset by second utteranceEnd")
+
+        // At T=350ms: 250ms since last reset — should have fired (200ms timer)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(col.autoEndCount == 1, "Timer fires after reset duration")
+    }
+
+    @MainActor @Test func testHasSpeechOccurredTracking() {
+        let c = LiveStreamingController()
+        #expect(c.hasSpeechOccurred == false)
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        #expect(c.hasSpeechOccurred == true)
+    }
+
+    @MainActor @Test func testHasSpeechOccurredSetByInterim() {
+        let c = LiveStreamingController()
+        #expect(c.hasSpeechOccurred == false)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "Hi", confidence: 0.9, words: [])))
+        #expect(c.hasSpeechOccurred == true)
+    }
+
+    @MainActor @Test func testSilenceTimerNilAfterCancel() {
+        let c = LiveStreamingController()
+        c.autoEndSilenceDuration = 1.0
+        c.hasSpeechOccurred = true
+
+        c.handleEvent(.utteranceEnd(lastWordEnd: 0))
+        #expect(c.silenceTimer != nil, "Timer should be active")
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        #expect(c.silenceTimer == nil, "Timer should be nil after cancel")
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - LiveStreamingController: Event Handling Integration Tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@Suite("LiveStreamingController — Event Handling")
+struct EventHandlingTests {
+
+    @MainActor @Test func testSpeechStartedCallback() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        #expect(col.speechStartCount == 1)
+    }
+
+    @MainActor @Test func testUtteranceEndCallback() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.utteranceEnd(lastWordEnd: 0))
+        #expect(col.utteranceEndCount == 1)
+    }
+
+    @MainActor @Test func testSpeechFinalTriggersUtteranceEnd() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Done.", confidence: 0.99, words: [], speechFinal: true)))
+        #expect(col.utteranceEndCount == 1, "speechFinal should trigger onUtteranceEnd")
+    }
+
+    @MainActor @Test func testNonSpeechFinalDoesNotTriggerUtteranceEnd() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [])))
+        #expect(col.utteranceEndCount == 0, "Non-speechFinal should not trigger onUtteranceEnd")
+    }
+
+    @MainActor @Test func testEmptyInterimIgnored() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "", confidence: 0.0, words: [])))
+        #expect(col.entries.isEmpty, "Empty interim should be ignored")
+    }
+
+    @MainActor @Test func testMetadataEventIgnored() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.handleEvent(.metadata(requestId: "test"))
+        #expect(col.entries.isEmpty)
+        #expect(col.speechStartCount == 0)
+        #expect(col.utteranceEndCount == 0)
+    }
+
+    @MainActor @Test func testErrorCallback() {
+        let c = LiveStreamingController()
+        var errorReceived: Error?
+        c.onError = { errorReceived = $0 }
+
+        let testError = NSError(domain: "test", code: 42)
+        c.handleEvent(.error(testError))
+        #expect(errorReceived != nil)
+        #expect((errorReceived as? NSError)?.code == 42)
+    }
+
+    @MainActor @Test func testFullConversationFlow() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        // Sentence 1: progressive interims → final
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "I", confidence: 0.8, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "I like", confidence: 0.85, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "I like cats", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "I like cats.", confidence: 0.99, words: [], speechFinal: true)))
+        c.handleEvent(.utteranceEnd(lastWordEnd: 0))
+
+        // Sentence 2
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "They", confidence: 0.8, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "They are", confidence: 0.85, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "They are cute", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "They are cute.", confidence: 0.99, words: [], speechFinal: true)))
+
+        // Verify callbacks
+        #expect(col.speechStartCount == 2)
+        #expect(col.utteranceEndCount >= 2, "speechFinal + utteranceEnd")
+        #expect(col.finals.count == 2)
+
+        // Verify screen text is correct
+        #expect(col.screenText == "I like cats. They are cute. ")
+
+        // Verify minimal keystrokes (progressive interims = append-only)
+        let interimsForSentence1 = col.entries.prefix(while: { !$0.isFinal })
+        for (i, entry) in interimsForSentence1.enumerated() where i > 0 {
+            #expect(entry.replacingChars == 0,
+                    "Progressive interim \(i) should be append-only")
+        }
+    }
+
+    @MainActor @Test func testInterimCorrectionMidWord() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        // Deepgram corrects mid-word
+        c.handleEvent(.interim(TranscriptionResult(transcript: "recognise", confidence: 0.7, words: [])))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "recognize", confidence: 0.85, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "recognize", confidence: 0.99, words: [])))
+
+        // First interim → second should correct 'se' → 'ze'
+        #expect(col.entries[1].replacingChars == 2, "Delete 'se' from 'recognise'")
+        #expect(col.entries[1].textToType == "ze", "Type 'ze' to form 'recognize'")
+
+        // Final identical to last interim — no keystrokes
+        #expect(col.entries[2].replacingChars == 0)
+        #expect(col.entries[2].textToType == "")
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - LiveStreamingController: Source-Level Tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@Suite("LiveStreamingController — Source-Level Invariants")
+struct LiveStreamingSourceTests {
+
+    @Test func testNoLocalVADInController() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
+        #expect(!source.contains("VADProcessor"), "Must not use local VADProcessor")
+        #expect(!source.contains("VADConfiguration"), "Must not use VADConfiguration")
+        #expect(!source.contains("SessionController"), "Must not use SessionController (local auto-end)")
+        #expect(!source.contains("speechProbability"), "Must not compute local speech probability")
+    }
+
+    @Test func testSmartDiffUsed() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
+        #expect(source.contains("diffFromEnd"), "Must use smart diff for text replacement")
+        #expect(source.contains("commonLen"), "Diff must find common prefix length")
+    }
+
+    @Test func testSilenceTimerImplementation() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
+        #expect(source.contains("silenceTimer"), "Must have silence timer")
+        #expect(source.contains("autoEndSilenceDuration"), "Must reference silence duration config")
+        #expect(source.contains("hasSpeechOccurred"), "Must track whether speech has occurred")
+        #expect(source.contains("cancelSilenceTimer"), "Must cancel timer on speech events")
+        #expect(source.contains("startSilenceTimer"), "Must start timer on silence events")
+    }
+
+    @Test func testAutoEndNotFiringWithoutSpeech() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
+        // The startSilenceTimer must guard on hasSpeechOccurred
+        #expect(source.contains("hasSpeechOccurred") && source.contains("guard"),
+                "startSilenceTimer must check hasSpeechOccurred before starting")
+    }
+
+    @Test func testTimerCancelledOnCleanup() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
+        let stopBody = extractFunctionBody(named: "stop", from: source)
+        let cancelBody = extractFunctionBody(named: "cancel", from: source)
+        #expect(stopBody?.contains("cancelSilenceTimer") == true, "stop() must cancel silence timer")
+        #expect(cancelBody?.contains("cancelSilenceTimer") == true, "cancel() must cancel silence timer")
+    }
+
+    @Test func testAppDelegateWiresAutoEnd() throws {
+        let source = try readProjectSource("Sources/App/AppDelegate.swift")
+        #expect(source.contains("autoEndSilenceDuration"), "AppDelegate must set autoEndSilenceDuration")
+        #expect(source.contains("onAutoEnd"), "AppDelegate must handle onAutoEnd callback")
+    }
+
+    @Test func testCallbackSignatureIncludesFullText() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
+        #expect(source.contains("fullText: String"), "onTextUpdate must include fullText parameter")
+    }
+}

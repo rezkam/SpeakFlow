@@ -17,7 +17,7 @@ public final class LiveStreamingController {
     private var audioEngine: AVAudioEngine?
     private var session: StreamingSession?
     private var eventTask: Task<Void, Never>?
-    private var isActive = false
+    internal var isActive = false
 
     // Thread-safe reference for audio callback (runs off MainActor)
     private let audioSessionRef = AudioSessionRef()
@@ -26,10 +26,20 @@ public final class LiveStreamingController {
     private var lastInterimText = ""
     private var lastInterimCharCount = 0
 
+    // Silence-based auto-end (server-side detection only, no local VAD)
+    internal var silenceTimer: Task<Void, Never>?
+    internal var hasSpeechOccurred = false
+
+    /// Seconds of server-detected silence before auto-ending. 0 = disabled.
+    public var autoEndSilenceDuration: Double = 0
+
     // Callbacks
-    /// Called when new text should be inserted. `replacingChars` is how many chars
-    /// of previous interim text to delete before inserting.
-    public var onTextUpdate: ((_ text: String, _ replacingChars: Int, _ isFinal: Bool) -> Void)?
+    /// Called when new text should be inserted.
+    /// - `textToType`: the characters to type (may be just a suffix if smart-diff applies)
+    /// - `replacingChars`: how many chars to backspace before typing
+    /// - `isFinal`: whether this completes a transcription segment
+    /// - `fullText`: the complete text of this segment (for transcript tracking)
+    public var onTextUpdate: ((_ textToType: String, _ replacingChars: Int, _ isFinal: Bool, _ fullText: String) -> Void)?
 
     /// Called when the provider detects the user stopped speaking (utterance boundary).
     public var onUtteranceEnd: (() -> Void)?
@@ -42,6 +52,9 @@ public final class LiveStreamingController {
 
     /// Called when the session is fully closed.
     public var onSessionClosed: (() -> Void)?
+
+    /// Called when silence auto-end timer fires (user silent for `autoEndSilenceDuration`).
+    public var onAutoEnd: (() -> Void)?
 
     public init() {}
 
@@ -190,6 +203,7 @@ public final class LiveStreamingController {
         guard isActive else { return }
         isActive = false
         audioSessionRef.clear()
+        cancelSilenceTimer()
 
         logger.info("Stopping live streaming...")
 
@@ -214,6 +228,7 @@ public final class LiveStreamingController {
         // Clear interim state
         lastInterimText = ""
         lastInterimCharCount = 0
+        hasSpeechOccurred = false
 
         logger.info("Live streaming stopped")
     }
@@ -223,6 +238,7 @@ public final class LiveStreamingController {
         guard isActive else { return }
         isActive = false
         audioSessionRef.clear()
+        cancelSilenceTimer()
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
@@ -236,52 +252,87 @@ public final class LiveStreamingController {
 
         // If there's interim text showing, tell the caller to remove it
         if lastInterimCharCount > 0 {
-            onTextUpdate?("", lastInterimCharCount, true)
+            onTextUpdate?("", lastInterimCharCount, true, "")
         }
         lastInterimText = ""
         lastInterimCharCount = 0
+        hasSpeechOccurred = false
 
         logger.info("Live streaming cancelled")
     }
 
     // MARK: - Event Handling
 
-    private func handleEvent(_ event: TranscriptionEvent) {
+    /// Process a transcription event. Internal for testing.
+    internal func handleEvent(_ event: TranscriptionEvent) {
         switch event {
         case .interim(let result):
             guard !result.transcript.isEmpty else { return }
             let newText = result.transcript
-            let charsToReplace = lastInterimCharCount
+
+            // Speech activity — cancel any silence timer
+            hasSpeechOccurred = true
+            cancelSilenceTimer()
+
+            // Smart diff: only delete/retype the suffix that changed
+            let (charsToDelete, suffixToType) = diffFromEnd(
+                old: lastInterimText, new: newText
+            )
             lastInterimText = newText
             lastInterimCharCount = newText.count
-            onTextUpdate?(newText, charsToReplace, false)
+
+            if charsToDelete > 0 || !suffixToType.isEmpty {
+                onTextUpdate?(suffixToType, charsToDelete, false, newText)
+            }
 
         case .finalResult(let result):
             let newText = result.transcript
-            let charsToReplace = lastInterimCharCount
+            let previousInterimCount = lastInterimCharCount
+
+            // Speech activity — cancel silence timer (will restart on utteranceEnd)
+            if !newText.isEmpty {
+                hasSpeechOccurred = true
+                cancelSilenceTimer()
+            }
+
+            // Smart diff: only fix what changed from the last interim
+            let (charsToDelete, suffixToType) = diffFromEnd(
+                old: lastInterimText, new: newText
+            )
 
             // Final commits the segment — clear interim tracking
             lastInterimText = ""
             lastInterimCharCount = 0
 
             if !newText.isEmpty {
-                onTextUpdate?(newText, charsToReplace, true)
-            } else if charsToReplace > 0 {
-                // Empty final but we had interim text — remove it
-                onTextUpdate?("", charsToReplace, true)
+                if charsToDelete > 0 || !suffixToType.isEmpty {
+                    // Text differs from interim — fix the tail
+                    onTextUpdate?(suffixToType, charsToDelete, true, newText)
+                } else {
+                    // Identical to interim — just commit (no keystrokes needed)
+                    onTextUpdate?("", 0, true, newText)
+                }
+            } else if previousInterimCount > 0 {
+                // Empty final but we had interim text — remove it all
+                onTextUpdate?("", previousInterimCount, true, "")
             }
 
-            // If speech_final, the user stopped speaking
+            // If speech_final, the user stopped speaking — start silence timer
             if result.speechFinal {
                 logger.info("speech_final detected — user stopped speaking")
                 onUtteranceEnd?()
+                startSilenceTimer()
             }
 
         case .utteranceEnd:
             logger.info("UtteranceEnd — user stopped speaking")
             onUtteranceEnd?()
+            startSilenceTimer()
 
         case .speechStarted:
+            // Speech resumed — cancel silence timer
+            hasSpeechOccurred = true
+            cancelSilenceTimer()
             onSpeechStarted?()
 
         case .error(let error):
@@ -290,6 +341,7 @@ public final class LiveStreamingController {
 
         case .closed:
             logger.info("Provider session closed")
+            cancelSilenceTimer()
             if isActive {
                 // Unexpected close
                 isActive = false
@@ -302,6 +354,54 @@ public final class LiveStreamingController {
         case .metadata:
             break
         }
+    }
+
+    // MARK: - Silence Auto-End Timer
+
+    /// Start (or restart) the silence timer. If no speech event arrives within
+    /// `autoEndSilenceDuration` seconds, fires `onAutoEnd`.
+    /// Only fires if the user has spoken at least once (don't auto-end pure silence).
+    private func startSilenceTimer() {
+        guard autoEndSilenceDuration > 0, hasSpeechOccurred else { return }
+        cancelSilenceTimer()
+        let duration = autoEndSilenceDuration
+        silenceTimer = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(duration))
+                guard let self, self.isActive, !Task.isCancelled else { return }
+                self.logger.info("Silence auto-end: \(duration)s of silence after speech")
+                self.onAutoEnd?()
+            } catch {
+                // Task cancelled — speech resumed before timer fired
+            }
+        }
+    }
+
+    private func cancelSilenceTimer() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
+    }
+
+    // MARK: - Smart Diff
+
+    /// Compare old and new text, find the common prefix, and return:
+    /// - `charsToDelete`: how many chars to backspace from the end of old text
+    /// - `suffixToType`: the new text to type after deleting
+    ///
+    /// Example: old="Hello worl", new="Hello world!" → delete 0, type "d!"
+    /// Example: old="Hello world", new="Hello world" → delete 0, type "" (no-op)
+    /// Example: old="Helo world", new="Hello world" → delete 6, type "lo world"
+    /// Visible for testing.
+    internal func diffFromEnd(old: String, new: String) -> (charsToDelete: Int, suffixToType: String) {
+        // Find length of common prefix
+        let oldChars = Array(old)
+        let newChars = Array(new)
+        let commonLen = zip(oldChars, newChars).prefix(while: { $0 == $1 }).count
+
+        let charsToDelete = oldChars.count - commonLen
+        let suffixToType = String(newChars[commonLen...])
+
+        return (charsToDelete, suffixToType)
     }
 
     private func cleanup() async {

@@ -1023,20 +1023,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         let controller = LiveStreamingController()
         self.liveStreamingController = controller
 
-        controller.onTextUpdate = { [weak self] text, replacingChars, isFinal in
+        controller.onTextUpdate = { [weak self] textToType, replacingChars, isFinal, fullText in
             guard let self, self.isRecording else { return }
             if replacingChars > 0 {
                 self.deleteChars(replacingChars)
             }
-            if !text.isEmpty {
-                if isFinal {
-                    let finalText = text + " "
-                    if !self.fullTranscript.isEmpty { self.fullTranscript += " " }
-                    self.fullTranscript += text
-                    self.insertText(finalText)
-                } else {
-                    self.insertText(text)
-                }
+            if !textToType.isEmpty {
+                self.insertText(isFinal ? textToType + " " : textToType)
+            } else if isFinal && !fullText.isEmpty {
+                // Text was identical to interim — just add trailing space
+                self.insertText(" ")
+            }
+            if isFinal && !fullText.isEmpty {
+                if !self.fullTranscript.isEmpty { self.fullTranscript += " " }
+                self.fullTranscript += fullText
+            }
+        }
+
+        // Auto-end after silence (server-side detection, no local VAD)
+        controller.autoEndSilenceDuration = Settings.shared.autoEndSilenceDuration
+
+        controller.onAutoEnd = { [weak self] in
+            Logger.audio.warning("Deepgram: auto-end after \(Settings.shared.autoEndSilenceDuration)s silence")
+            Task { @MainActor in
+                self?.stopRecording(reason: .autoEnd)
             }
         }
 
