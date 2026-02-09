@@ -18,13 +18,15 @@ import SpeakFlowCore
 ///   - OAuth login flow
 ///   - Permission management
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissionDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AccessibilityPermissionDelegate {
     /// Singleton so views/helpers can call recording/login actions.
     static var shared: AppDelegate!
 
     // MARK: - Menu Bar
     var statusItem: NSStatusItem!
     private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
+    private static let accessibilityItemTag = 1001
+    private static let microphoneItemTag = 1002
 
     var hotkeyListener: HotkeyListener?
     var recorder: StreamingRecorder?
@@ -67,17 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         if isUITestMode {
             Logger.permissions.info("UI test mode enabled; skipping startup permission prompts")
         } else {
+            // Always check both permissions on launch
             let trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true, isAppStart: true)
             Logger.permissions.debug("AXIsProcessTrusted: \(trusted)")
-        }
-
-        let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
-        Logger.app.info("SpeakFlow ready - \(hotkeyName)")
-
-        setupHotkey()
-        setupTranscriptionCallbacks()
-
-        if !isUITestMode {
             checkMicrophonePermission()
 
             if VADProcessor.isAvailable && Settings.shared.vadEnabled {
@@ -90,6 +84,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 Logger.audio.info("Audio subsystem pre-warmed")
             }
         }
+
+        let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
+        Logger.app.info("SpeakFlow ready - \(hotkeyName)")
+
+        setupHotkey()
+        setupTranscriptionCallbacks()
 
         if isUITestMode { setupUITestHarness() }
 
@@ -175,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     @objc func applicationDidBecomeActive(_ notification: Notification) {
         guard let app = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               app.bundleIdentifier == Bundle.main.bundleIdentifier else { return }
-        AppState.shared.refresh()
+        buildMenu()
     }
 
     func checkAccessibility() {
@@ -213,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     func updateStatusIcon() {
         statusItem.button?.title = ""
         statusItem.button?.image = defaultIcon
-        AppState.shared.refresh()
+        buildMenu()
     }
 
     private func loadMenuBarIcon() -> NSImage? {
@@ -236,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     func buildMenu(trusted: Bool? = nil) {
         let isTrusted = trusted ?? AXIsProcessTrusted()
+        let isMicGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         let state = AppState.shared
         state.refresh()
 
@@ -255,22 +256,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         // Permissions
         let accessibilityItem = NSMenuItem(title: "Accessibility", action: #selector(checkAccessibilityAction), keyEquivalent: "")
         accessibilityItem.target = self
+        accessibilityItem.tag = Self.accessibilityItemTag
         accessibilityItem.setAccessibilityLabel("accessibility_permission")
-        if isTrusted {
-            accessibilityItem.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
-        } else {
-            accessibilityItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
-        }
+        accessibilityItem.image = isTrusted
+            ? NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+            : NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
         menu.addItem(accessibilityItem)
 
         let micItem = NSMenuItem(title: "Microphone", action: #selector(checkMicrophoneMenuAction), keyEquivalent: "")
         micItem.target = self
+        micItem.tag = Self.microphoneItemTag
         micItem.setAccessibilityLabel("microphone_permission")
-        if state.microphoneGranted {
-            micItem.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
-        } else {
-            micItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
-        }
+        micItem.image = isMicGranted
+            ? NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+            : NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
         menu.addItem(micItem)
 
         menu.addItem(.separator())
@@ -397,7 +396,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         quitItem.setAccessibilityLabel("quit")
         menu.addItem(quitItem)
 
+        menu.delegate = self
         statusItem.menu = menu
+    }
+
+    // Refresh permission icons in-place every time the menu opens
+    func menuWillOpen(_ menu: NSMenu) {
+        let checkmark = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+        let warning = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+
+        if let item = menu.item(withTag: Self.accessibilityItemTag) {
+            item.image = AXIsProcessTrusted() ? checkmark : warning
+        }
+        if let item = menu.item(withTag: Self.microphoneItemTag) {
+            item.image = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? checkmark : warning
+        }
     }
 
     // MARK: - Menu Actions
@@ -934,30 +947,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             micPermissionTask?.cancel(); micPermissionTask = nil
-            AppState.shared.refresh()
+            buildMenu()
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { _ in
-                Task { @MainActor in AppState.shared.refresh() }
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                Task { @MainActor in self?.buildMenu() }
             }
-            startMicrophonePermissionPolling()
         case .denied, .restricted:
-            startMicrophonePermissionPolling()
+            Logger.permissions.warning("Microphone permission denied/restricted")
+            showAlert(
+                title: "Microphone Access Required",
+                message: "SpeakFlow needs microphone access to record your voice.\n\nGo to System Settings → Privacy & Security → Microphone and enable SpeakFlow.",
+                style: .error
+            )
         @unknown default: break
-        }
-    }
-
-    private func startMicrophonePermissionPolling() {
-        micPermissionTask?.cancel()
-        micPermissionTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled else { return }
-                if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
-                    self?.micPermissionTask = nil
-                    AppState.shared.refresh()
-                    return
-                }
-            }
         }
     }
 
