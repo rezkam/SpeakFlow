@@ -7,7 +7,6 @@ import SpeakFlowCore
 /// Pure SwiftUI menu bar dropdown — replaces the entire NSMenu.
 struct MenuView: View {
     @Environment(AppState.self) private var state
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // Start / Stop Dictation
@@ -46,7 +45,7 @@ struct MenuView: View {
 
             // Deepgram
             Button(state.hasDeepgramKey ? "Deepgram — API Key Set ✓" : "Deepgram — Set API Key...") {
-                openWindow(id: "deepgram-key")
+                WindowHelper.open(id: "deepgram-key")
             }
             if state.hasDeepgramKey {
                 Button("Remove API Key") {
@@ -124,7 +123,7 @@ struct MenuView: View {
 
         // Statistics
         Button("View Statistics...") {
-            openWindow(id: "statistics")
+            WindowHelper.open(id: "statistics")
         }
 
         Divider()
@@ -177,7 +176,7 @@ struct MenuView: View {
 
     private func setProvider(_ id: String) {
         if id == "deepgram" && !state.hasDeepgramKey {
-            openWindow(id: "deepgram-key")
+            WindowHelper.open(id: "deepgram-key")
             return
         }
         ProviderSettings.shared.activeProviderId = id

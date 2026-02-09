@@ -4,9 +4,12 @@ import SpeakFlowCore
 // MARK: - Statistics Window
 
 struct StatisticsWindowView: View {
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismiss) private var envDismiss
+    var onDismiss: (() -> Void)?
     @State private var showResetConfirm = false
     @State private var summary = Statistics.shared.summary
+
+    private func close() { if let onDismiss { onDismiss() } else { envDismiss() } }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -32,12 +35,13 @@ struct StatisticsWindowView: View {
 
                 Spacer()
 
-                Button("OK") { dismiss() }
+                Button("OK") { close() }
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
         .frame(width: 380)
+        .onAppear { summary = Statistics.shared.summary }
         .alert("Reset Statistics?", isPresented: $showResetConfirm) {
             Button("Reset", role: .destructive) {
                 Statistics.shared.reset()
@@ -53,10 +57,13 @@ struct StatisticsWindowView: View {
 // MARK: - Deepgram API Key Window
 
 struct DeepgramApiKeyWindowView: View {
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismiss) private var envDismiss
+    var onDismiss: (() -> Void)?
     @State private var apiKey = ""
     @State private var isValidating = false
     @State private var errorMessage: String?
+
+    private func close() { if let onDismiss { onDismiss() } else { envDismiss() } }
 
     private var isUpdate: Bool {
         ProviderSettings.shared.hasApiKey(for: "deepgram")
@@ -85,7 +92,7 @@ struct DeepgramApiKeyWindowView: View {
             }
 
             HStack(spacing: 12) {
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { close() }
                     .keyboardShortcut(.cancelAction)
 
                 Button(isValidating ? "Validating..." : "Save") {
@@ -112,7 +119,7 @@ struct DeepgramApiKeyWindowView: View {
             } else {
                 ProviderSettings.shared.setApiKey(key, for: "deepgram")
                 AppState.shared.refresh()
-                dismiss()
+                close()
             }
         }
     }
@@ -121,9 +128,12 @@ struct DeepgramApiKeyWindowView: View {
 // MARK: - Login Window
 
 struct LoginWindowView: View {
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismiss) private var envDismiss
+    var onDismiss: (() -> Void)?
     @State private var manualCode = ""
     @State private var phase: Phase = .confirm
+
+    private func close() { if let onDismiss { onDismiss() } else { envDismiss() } }
 
     enum Phase { case confirm, waitingForCallback, manualEntry }
 
@@ -143,11 +153,11 @@ struct LoginWindowView: View {
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 12) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") { close() }
                         .keyboardShortcut(.cancelAction)
                     Button("Open Browser") {
                         AppDelegate.shared.startLoginFlow()
-                        dismiss()
+                        close()
                     }
                     .keyboardShortcut(.defaultAction)
                 }
@@ -166,11 +176,10 @@ struct LoginWindowView: View {
                     .textFieldStyle(.roundedBorder)
 
                 HStack(spacing: 12) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") { close() }
                         .keyboardShortcut(.cancelAction)
                     Button("Submit") {
-                        // handled by AppDelegate
-                        dismiss()
+                        close()
                     }
                     .keyboardShortcut(.defaultAction)
                     .disabled(manualCode.isEmpty)
@@ -185,8 +194,10 @@ struct LoginWindowView: View {
 // MARK: - Alert Window
 
 struct AlertWindowView: View {
-    @Environment(AppState.self) private var state
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismiss) private var envDismiss
+    var onDismiss: (() -> Void)?
+
+    private func close() { if let onDismiss { onDismiss() } else { envDismiss() } }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -194,14 +205,14 @@ struct AlertWindowView: View {
                 .font(.system(size: 32))
                 .foregroundStyle(iconColor)
 
-            Text(state.alertTitle)
+            Text(AppState.shared.alertTitle)
                 .font(.headline)
 
-            Text(state.alertMessage)
+            Text(AppState.shared.alertMessage)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Button("OK") { dismiss() }
+            Button("OK") { close() }
                 .keyboardShortcut(.defaultAction)
         }
         .padding(24)
@@ -209,7 +220,7 @@ struct AlertWindowView: View {
     }
 
     private var iconName: String {
-        switch state.alertStyle {
+        switch AppState.shared.alertStyle {
         case .info: "info.circle.fill"
         case .success: "checkmark.circle.fill"
         case .error: "xmark.circle.fill"
@@ -217,7 +228,7 @@ struct AlertWindowView: View {
     }
 
     private var iconColor: Color {
-        switch state.alertStyle {
+        switch AppState.shared.alertStyle {
         case .info: .blue
         case .success: .green
         case .error: .red
