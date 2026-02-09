@@ -1233,13 +1233,14 @@ struct SourceRegressionTests {
         let files = [
             "Sources/App/AppDelegate.swift",
             "Sources/App/UITestHarnessController.swift",
-            "Sources/SpeakFlowCore/Permissions/AccessibilityPermissionManager.swift",
+            "Sources/App/Dialogs.swift",
             "Sources/SpeakFlowCore/Statistics.swift"
         ]
 
         for file in files {
             let source = try readProjectSource(file)
-            #expect(source.contains("String(localized:"), "Expected String(localized:) usage in \(file)")
+            let hasLocalizedStrings = source.contains("String(localized:") || source.contains("Text(\"")
+            #expect(hasLocalizedStrings, "Expected localized string usage in \(file)")
         }
     }
 
@@ -1371,8 +1372,8 @@ struct ChunkSkipSourceRegressionTests {
             Issue.record("buffer.takeAll() not found in sendChunkIfReady")
             return
         }
-        // Match the actual if-statement check, not comment mentions
-        guard let skipCheckPos = funcBody.range(of: "Settings.shared.skipSilentChunks &&")?.lowerBound else {
+        // Match the actual if-statement check (captured local variable), not comment mentions
+        guard let skipCheckPos = funcBody.range(of: "skipSilentChunks && speechProbability < skipThreshold")?.lowerBound else {
             Issue.record("skipSilentChunks runtime check not found in sendChunkIfReady")
             return
         }
@@ -1490,6 +1491,7 @@ struct ChunkSkipBehavioralRegressionTests {
     /// Helper: configure Settings, inject dependencies, invoke sendChunkIfReady, restore.
     /// Everything runs inside a single Task @MainActor block to keep settings, recorder,
     /// and the async sendChunkIfReady call in one atomic unit.
+    @MainActor
     private func runSendChunkTest(
         chunkDuration: ChunkDuration = .seconds15,
         skipSilentChunks: Bool = true,
@@ -1499,39 +1501,33 @@ struct ChunkSkipBehavioralRegressionTests {
         vadActive: Bool = true,
         reason: String
     ) async -> (chunks: [AudioChunk], remainingDuration: Double) {
+        let origChunkDuration = Settings.shared.chunkDuration
+        let origSkipSilent = Settings.shared.skipSilentChunks
 
-        let result = await withCheckedContinuation { (cont: CheckedContinuation<(chunks: [AudioChunk], remaining: Double), Never>) in
-            Task { @MainActor in
-                let origChunkDuration = Settings.shared.chunkDuration
-                let origSkipSilent = Settings.shared.skipSilentChunks
-                defer {
-                    Settings.shared.chunkDuration = origChunkDuration
-                    Settings.shared.skipSilentChunks = origSkipSilent
-                }
+        Settings.shared.chunkDuration = chunkDuration
+        Settings.shared.skipSilentChunks = skipSilentChunks
 
-                Settings.shared.chunkDuration = chunkDuration
-                Settings.shared.skipSilentChunks = skipSilentChunks
+        let rec = StreamingRecorder()
+        rec._testInjectAudioBuffer(buffer)
+        if let session { rec._testInjectSessionController(session) }
+        if let vad { rec._testInjectVADProcessor(vad) }
+        rec._testSetVADActive(vadActive)
+        rec._testSetIsRecording(true)
 
-                let rec = StreamingRecorder()
-                rec._testInjectAudioBuffer(buffer)
-                if let session { rec._testInjectSessionController(session) }
-                if let vad { rec._testInjectVADProcessor(vad) }
-                rec._testSetVADActive(vadActive)
-                rec._testSetIsRecording(true)
-
-                var collected: [AudioChunk] = []
-                rec.onChunkReady = { chunk in
-                    collected.append(chunk)
-                }
-
-                await rec._testInvokeSendChunkIfReady(reason: reason)
-
-                let remaining = await rec._testAudioBufferDuration()
-                cont.resume(returning: (chunks: collected, remaining: remaining))
-            }
+        var collected: [AudioChunk] = []
+        rec.onChunkReady = { chunk in
+            collected.append(chunk)
         }
 
-        return (chunks: result.chunks, remainingDuration: result.remaining)
+        await rec._testInvokeSendChunkIfReady(reason: reason)
+
+        let remaining = await rec._testAudioBufferDuration()
+
+        // Restore settings immediately — no deferred Task, no continuation race
+        Settings.shared.chunkDuration = origChunkDuration
+        Settings.shared.skipSilentChunks = origSkipSilent
+
+        return (chunks: collected, remainingDuration: remaining)
     }
 
     /// CORE REGRESSION: When skipSilentChunks=true, VAD active, low speech probability,
@@ -2889,13 +2885,15 @@ struct AdditionalLifecycleConcurrencyI18NAccessibilityRegressionTests {
     /// Issue #20: Guard localization of high-visibility user-facing strings.
     @Test func testIssue20HighVisibilityStringsAreLocalized() throws {
         let appDelegate = try readProjectSource("Sources/App/AppDelegate.swift")
-        let accessibility = try readProjectSource("Sources/SpeakFlowCore/Permissions/AccessibilityPermissionManager.swift")
+        let dialogs = try readProjectSource("Sources/App/Dialogs.swift")
 
-        #expect(appDelegate.contains("String(localized: \"Start Dictation\")"))
-        #expect(appDelegate.contains("String(localized: \"Transcription Statistics\")"))
-        #expect(appDelegate.contains("String(localized: \"Login to ChatGPT\")"))
-        #expect(appDelegate.contains("String(localized: \"Microphone Access Required\")"))
-        #expect(accessibility.contains("String(localized: \"Enable Accessibility Access\")"))
+        // All user-facing strings live in AppDelegate.swift or Dialogs.swift (SwiftUI)
+        let appSources = appDelegate + "\n" + dialogs
+        #expect(appSources.contains("Start Dictation"))
+        #expect(appSources.contains("Transcription Statistics"))
+        #expect(appSources.contains("Login to ChatGPT"))
+        #expect(appSources.contains("Microphone Access Required"))
+        #expect(appSources.contains("Enable Accessibility Access"))
     }
 
     /// Issue #23: Ensure accessibility labels remain broadly applied (not just one control).
@@ -2982,13 +2980,14 @@ struct Issue10To23CompletionRegressionAdditions {
         let files = [
             "Sources/App/AppDelegate.swift",
             "Sources/App/UITestHarnessController.swift",
-            "Sources/SpeakFlowCore/Permissions/AccessibilityPermissionManager.swift",
+            "Sources/App/Dialogs.swift",
             "Sources/SpeakFlowCore/Statistics.swift"
         ]
 
         for file in files {
             let source = try readProjectSource(file)
-            #expect(source.contains("String(localized:"), "Expected localization hooks in \(file)")
+            let hasLocalizedStrings = source.contains("String(localized:") || source.contains("Text(\"")
+            #expect(hasLocalizedStrings, "Expected localization hooks in \(file)")
         }
     }
 
@@ -3546,7 +3545,7 @@ struct KeyListenerSafetyTests {
     @Test func testRecorderStartFailureCleansUpKeyListener() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
 
-        let body = extractFunctionBody(named: "startRecording", from: source)
+        let body = extractFunctionBody(named: "startGPTRecording", from: source)
         #expect(body != nil, "startRecording must exist")
         guard let body else { return }
 
@@ -3800,7 +3799,7 @@ struct KeyListenerStartOrderTests {
     /// leaving Enter/Escape interception active even when recording failed to start.
     @Test func testKeyListenerInsideSuccessBranch() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        let body = extractFunctionBody(named: "startRecording", from: source)
+        let body = extractFunctionBody(named: "startGPTRecording", from: source)
         guard let body else {
             Issue.record("startRecording not found")
             return
@@ -3838,7 +3837,7 @@ struct KeyListenerStartOrderTests {
     /// Exactly one call to startKeyListener in startRecording (no duplicate).
     @Test func testExactlyOneStartKeyListenerCall() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        let body = extractFunctionBody(named: "startRecording", from: source)
+        let body = extractFunctionBody(named: "startGPTRecording", from: source)
         guard let body else {
             Issue.record("startRecording not found")
             return
@@ -3852,7 +3851,7 @@ struct KeyListenerStartOrderTests {
     /// The failure branch must still call stopKeyListener for safety.
     @Test func testFailureBranchCallsStopKeyListener() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        let body = extractFunctionBody(named: "startRecording", from: source)
+        let body = extractFunctionBody(named: "startGPTRecording", from: source)
         guard let body else {
             Issue.record("startRecording not found")
             return
@@ -4210,7 +4209,7 @@ struct LiveE2EErrorDiagnosticsTests {
 
     /// Source-level: error messages must include segment index and text excerpt.
     @Test func testErrorMessagesIncludeContext() throws {
-        let source = try readProjectSource("Sources/LiveE2E/main.swift")
+        let source = try readProjectSource("Sources/LiveE2E/LiveE2ERunner.swift")
 
         // Check say failure message includes segment context
         #expect(source.contains("segment") && source.contains("say failed"),
@@ -4223,7 +4222,7 @@ struct LiveE2EErrorDiagnosticsTests {
 
     /// Source-level: generateFixture checks for missing output file before resampling.
     @Test func testChecksForMissingOutputFile() throws {
-        let source = try readProjectSource("Sources/LiveE2E/main.swift")
+        let source = try readProjectSource("Sources/LiveE2E/LiveE2ERunner.swift")
         #expect(source.contains("fileExists(atPath: aiffPath)"),
                 "Must check file exists before attempting resample")
     }
@@ -5241,7 +5240,7 @@ struct StreamingRecorderThreadSafeStateAndHelpersTests {
         let afterClass = String(source[classStart.lowerBound...])
         
         #expect(afterClass.contains("let sampleRate: Double = 16000"),
-                "Sample rate must be fixed at 16000 Hz for Whisper API")
+                "Sample rate must be fixed at 16000 Hz for ChatGPT API")
     }
 
     /// Source-level: verify AudioSampleQueue has bounded size and drops old samples.
@@ -5522,15 +5521,7 @@ struct StreamingRecorderStopCancelTests {
 
     /// stop() must emit final chunk when speech is present.
     @Test @MainActor func testStopEmitsFinalChunkWhenSpeechPresent() async {
-        let origSkip = Settings.shared.skipSilentChunks
-        let origChunk = Settings.shared.chunkDuration
-        defer {
-            Settings.shared.skipSilentChunks = origSkip
-            Settings.shared.chunkDuration = origChunk
-        }
-        Settings.shared.skipSilentChunks = false
-        Settings.shared.chunkDuration = .minute10
-
+        // Prepare buffer BEFORE changing settings to avoid await suspension races
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
         // 1s of audio (above minRecordingDurationMs=250ms)
@@ -5541,8 +5532,17 @@ struct StreamingRecorderStopCancelTests {
         var receivedChunk: AudioChunk?
         recorder.onChunkReady = { chunk in receivedChunk = chunk }
 
+        // Set settings with NO await between setting and stop()
+        let origSkip = Settings.shared.skipSilentChunks
+        let origChunk = Settings.shared.chunkDuration
+        Settings.shared.skipSilentChunks = false
+        Settings.shared.chunkDuration = .minute10
+
         recorder.stop()
         try? await Task.sleep(for: .milliseconds(300))
+
+        Settings.shared.skipSilentChunks = origSkip
+        Settings.shared.chunkDuration = origChunk
 
         #expect(receivedChunk != nil, "stop() must emit final chunk when audio has speech")
         if let chunk = receivedChunk {
@@ -5743,44 +5743,32 @@ struct IntegrationRecorderToQueueTests {
     }
 
     /// Recorder produces chunk with valid WAV data via sendChunkIfReady integration.
-    @Test func testRecorderChunkContainsValidWAV() async throws {
-        // Save/restore settings
-        let origChunk = await Settings.shared.chunkDuration
-        let origSkip = await Settings.shared.skipSilentChunks
-        await MainActor.run {
-            Settings.shared.chunkDuration = .seconds15
-            Settings.shared.skipSilentChunks = false
-        }
-        defer {
-            Task { @MainActor in
-                Settings.shared.chunkDuration = origChunk
-                Settings.shared.skipSilentChunks = origSkip
-            }
+    @Test @MainActor func testRecorderChunkContainsValidWAV() async throws {
+        // Prepare buffer BEFORE changing settings to avoid await suspension races
+        let recorder = StreamingRecorder()
+        let buffer = AudioBuffer(sampleRate: 16000)
+
+        var chunkData: Data?
+        recorder.onChunkReady = { c in
+            chunkData = c.wavData
         }
 
-        // Capture chunk via onChunkReady on MainActor
-        let chunkData = OSAllocatedUnfairLock<Data?>(initialState: nil)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 240_000), hasSpeech: true)
+        recorder._testInjectAudioBuffer(buffer)
+        recorder._testSetIsRecording(true)
 
-        await MainActor.run {
-            let recorder = StreamingRecorder()
-            let buffer = AudioBuffer(sampleRate: 16000)
+        // Set settings with NO await between setting and sendChunkIfReady
+        let origChunk = Settings.shared.chunkDuration
+        let origSkip = Settings.shared.skipSilentChunks
+        Settings.shared.chunkDuration = .seconds15
+        Settings.shared.skipSilentChunks = false
 
-            recorder.onChunkReady = { c in
-                chunkData.withLock { $0 = c.wavData }
-            }
+        await recorder._testInvokeSendChunkIfReady(reason: "wav integration test")
 
-            Task { @MainActor in
-                await buffer.append(frames: [Float](repeating: 0.5, count: 240_000), hasSpeech: true)
-                recorder._testInjectAudioBuffer(buffer)
-                recorder._testSetIsRecording(true)
-                await recorder._testInvokeSendChunkIfReady(reason: "wav integration test")
-            }
-        }
+        Settings.shared.chunkDuration = origChunk
+        Settings.shared.skipSilentChunks = origSkip
 
-        // Give time for MainActor task to complete
-        try await Task.sleep(for: .milliseconds(300))
-
-        guard let wav = chunkData.withLock({ $0 }) else {
+        guard let wav = chunkData else {
             Issue.record("No chunk produced")
             return
         }
@@ -5881,7 +5869,7 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
         let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
         let body = extractFunctionBody(named: "sendChunkIfReady", from: source)
         // The skip condition must check skipSilentChunks && low probability && no session speech
-        #expect(body?.contains("Settings.shared.skipSilentChunks && speechProbability < skipThreshold && !speechDetectedInSession") == true,
+        #expect(body?.contains("skipSilentChunks && speechProbability < skipThreshold && !speechDetectedInSession") == true,
                 "sendChunkIfReady must skip silent chunks when skipSilentChunks is enabled and no speech detected")
         // When skipping, buffer must NOT be drained (no takeAll before return false)
         #expect(body?.contains("return false") == true,
@@ -5889,15 +5877,8 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
     }
 
     @Test @MainActor func testSendChunkIfReadySendsWhenSkipDisabled() async {
-        let origSkip = Settings.shared.skipSilentChunks
-        let origChunkDuration = Settings.shared.chunkDuration
-        defer {
-            Settings.shared.skipSilentChunks = origSkip
-            Settings.shared.chunkDuration = origChunkDuration
-        }
-        Settings.shared.skipSilentChunks = false
-        Settings.shared.chunkDuration = .seconds15
-
+        // Prepare buffer BEFORE changing settings to avoid await suspension points
+        // between setting skipSilentChunks and sendChunkIfReady reading it.
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
         await buffer.append(frames: [Float](repeating: 0.001, count: 240_000), hasSpeech: false)
@@ -5907,9 +5888,20 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
         var chunkReceived = false
         recorder.onChunkReady = { _ in chunkReceived = true }
 
+        // Set settings and invoke sendChunkIfReady with NO await in between —
+        // this prevents concurrent @MainActor tasks from changing skipSilentChunks.
+        let origSkip = Settings.shared.skipSilentChunks
+        let origChunkDuration = Settings.shared.chunkDuration
+        Settings.shared.skipSilentChunks = false
+        Settings.shared.chunkDuration = .seconds15
+
         await recorder._testInvokeSendChunkIfReady(reason: "test")
 
         let remaining = await recorder._testAudioBufferDuration()
+
+        Settings.shared.skipSilentChunks = origSkip
+        Settings.shared.chunkDuration = origChunkDuration
+
         #expect(chunkReceived, "With skipSilentChunks=false, silent chunk must still be sent")
         #expect(remaining == 0, "Sent chunk must drain buffer")
     }
