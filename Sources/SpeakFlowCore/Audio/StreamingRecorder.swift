@@ -471,11 +471,10 @@ public final class StreamingRecorder {
     @discardableResult
     private func sendChunkIfReady(reason: String) async -> Bool {
         guard let buffer = audioBuffer else { return false }
-        // Use the user's configured chunk duration as the minimum.
-        // This prevents sending short chunks on every speech pause,
-        // which wastes API calls. VAD extends past the chunk duration
-        // until a natural pause, but never sends BEFORE it.
+        // Capture all Settings values BEFORE any await suspension points
+        // to prevent concurrent @MainActor tasks from changing them mid-execution.
         let minDuration = Settings.shared.minChunkDuration
+        let skipSilentChunks = Settings.shared.skipSilentChunks
         let currentDuration = await buffer.duration
 
         guard currentDuration >= minDuration else {
@@ -513,7 +512,7 @@ public final class StreamingRecorder {
             speechDetectedInSession = false
         }
 
-        if Settings.shared.skipSilentChunks && speechProbability < skipThreshold && !speechDetectedInSession {
+        if skipSilentChunks && speechProbability < skipThreshold && !speechDetectedInSession {
             // No speech detected in session at all — safe to skip this truly silent chunk.
             // Buffer is NOT drained, so audio is preserved for the next check cycle.
             // Reset VAD chunk accumulator even on skip — prevents stale samples from
@@ -589,6 +588,7 @@ public final class StreamingRecorder {
 
             let minDurationMs = Double(Config.minRecordingDurationMs) / 1000.0
             let minDuration = Settings.shared.chunkDuration.isFullRecording ? minDurationMs : 1.0
+            let skipSilentChunks = Settings.shared.skipSilentChunks
 
             let speechProbability: Float
             if hadVADActive, let vad = self.vadProcessor {
@@ -614,7 +614,7 @@ public final class StreamingRecorder {
             let skipThreshold = Config.minVADSpeechProbability
             let hasEnoughSpeech = speechProbability >= skipThreshold
             let shouldSend = duration >= minDuration &&
-                (!Settings.shared.skipSilentChunks || hasEnoughSpeech || speechDetectedInSession)
+                (!skipSilentChunks || hasEnoughSpeech || speechDetectedInSession)
 
             if shouldSend {
                 Logger.audio.info("Final chunk: \(String(format: "%.1f", duration))s, speech=\(String(format: "%.0f", speechProbability * 100))%")
@@ -625,7 +625,7 @@ public final class StreamingRecorder {
                 }
             } else if duration < minDuration {
                 Logger.audio.debug("Recording too short (\(String(format: "%.2f", duration))s < \(String(format: "%.2f", minDuration))s)")
-            } else if !hasEnoughSpeech && Settings.shared.skipSilentChunks {
+            } else if !hasEnoughSpeech && skipSilentChunks {
                 // Log when chunk is skipped due to low speech - helps diagnose VAD issues
                 Logger.audio.warning("Final chunk SKIPPED: duration=\(String(format: "%.1f", duration))s, speech=\(String(format: "%.0f", speechProbability * 100))% < \(String(format: "%.0f", skipThreshold * 100))% threshold (vadActive=\(hadVADActive), skipSilentChunks=true)")
             }
