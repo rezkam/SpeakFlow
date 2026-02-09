@@ -7,24 +7,54 @@ A macOS menu bar app that turns your voice into text — anywhere. Press a hotke
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
 ![Swift 6](https://img.shields.io/badge/Swift-6-orange)
 
+## Two Transcription Modes
+
+| | **Deepgram Nova-3 — Real-time** | **ChatGPT (GPT-4o) — Batch** |
+|---|---|---|
+| **How it works** | Audio streams to Deepgram over WebSocket; text appears as you speak | Audio is recorded locally, then sent for transcription when you stop |
+| **Latency** | Words appear in ~300ms | Text appears after you finish speaking |
+| **Best for** | Live dictation, long-form writing, conversations | Short notes, high-accuracy single takes |
+| **Requires** | Deepgram API key | ChatGPT login |
+
+Switch between modes from the **Transcription Provider** submenu in the menu bar.
+
+### Deepgram API Key
+
+Deepgram offers a **free $200 credit** — no credit card required.
+
+1. Sign up at [deepgram.com/pricing](https://deepgram.com/pricing)
+2. Create an API key in the Deepgram console
+3. Paste it into SpeakFlow via the **Accounts → Deepgram API Key** menu
+
 ## Features
 
-- **Voice-to-text dictation** — press a hotkey, speak, text appears in any app
+- **Real-time streaming transcription** — words appear as you speak with Deepgram Nova-3; interim results refine in-place using smart diff (only changed characters are retyped, no flickering)
+- **Batch transcription** — record first, transcribe after with GPT-4o via ChatGPT
 - **On-device voice activity detection** — a neural network model runs locally on Apple Silicon to distinguish speech from silence in real-time; no audio leaves your machine until speech is confirmed
-- **Smart chunking** — audio is split at natural sentence boundaries detected by silence analysis, not arbitrary time cuts
-- **Automatic turn detection** — when you stop speaking, silence is detected and the session ends automatically
+- **Automatic turn detection** — when you stop speaking, silence is detected and the session ends automatically (works in both modes — local VAD for batch, server-side for streaming)
+- **Smart chunking** — in batch mode, audio is split at natural sentence boundaries detected by silence analysis
 - **Noise filtering** — silent and noise-only chunks are filtered before transcription, saving API calls and improving accuracy
 - **Universal text insertion** — transcribed text is typed into the focused app via macOS Accessibility
-- **Configurable chunk duration** — 15 seconds up to 10 minutes
 - **Launch at login** — runs quietly in the menu bar
 
 ## Audio Pipeline
 
+### Streaming (Deepgram)
+
 1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
-2. **Voice activity detection** — a lightweight (~2M parameter) neural model runs on Apple Neural Engine, classifying 32ms audio frames as speech or silence
-3. **Speech segmentation** — the model uses hysteresis thresholds with a 3-second silence debounce to avoid false speech-end events during natural pauses
-4. **Chunking** — audio is buffered and sent at the configured interval, always waiting for a natural pause so sentences aren't cut mid-word
-5. **Auto-end** — after confirmed silence of 5+ seconds following speech, the session ends automatically
+2. **Stream** — raw audio is sent over WebSocket to Deepgram Nova-3 (English, monolingual)
+3. **Interim results** — partial transcriptions appear immediately as you speak
+4. **Smart diff** — when text updates, only the changed suffix is retyped (common prefix is preserved)
+5. **Final results** — server finalizes each utterance with punctuation and formatting
+6. **Auto-end** — after 5+ seconds of server-detected silence following speech, the session ends
+
+### Batch (ChatGPT)
+
+1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+2. **Voice activity detection** — a lightweight neural model runs on Apple Neural Engine, classifying 32ms frames as speech or silence
+3. **Speech segmentation** — hysteresis thresholds with 3-second silence debounce avoid false ends during natural pauses
+4. **Chunking** — audio is buffered and sent at the configured interval, waiting for natural pauses
+5. **Auto-end** — after 5+ seconds of confirmed silence following speech, the session ends
 6. **Transcription** — speech chunks are sent to the Whisper API; results arrive in order and are typed into the active app
 
 ## License

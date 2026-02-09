@@ -445,9 +445,11 @@ enum DialogPresenter {
         installEditMenu()
 
         let hosting = NSHostingController(rootView: view)
+        // Let SwiftUI calculate the preferred size
+        let fittingSize = hosting.sizeThatFits(in: NSSize(width: 480, height: 600))
         let window = NSPanel(
-            contentRect: .zero,
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            contentRect: NSRect(origin: .zero, size: fittingSize),
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )

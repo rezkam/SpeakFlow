@@ -91,6 +91,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                     await VADModelCache.shared.warmUp(threshold: Settings.shared.vadThreshold)
                 }
             }
+
+            // Pre-warm the audio subsystem so the first recording starts instantly.
+            // The first AVAudioEngine.inputNode access triggers CoreAudio initialization
+            // which can take 1-2s on cold start. Doing it here in the background means
+            // the user won't notice the delay.
+            Task.detached(priority: .background) {
+                let engine = AVAudioEngine()
+                _ = engine.inputNode.outputFormat(forBus: 0)
+                Logger.audio.info("Audio subsystem pre-warmed")
+            }
         }
 
         NSApp.setActivationPolicy(isUITestMode ? .regular : .accessory)
@@ -319,13 +329,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         let providerSubmenu = NSMenu()
         let activeProvider = ProviderSettings.shared.activeProviderId
 
-        let gptItem = NSMenuItem(title: "ChatGPT (GPT-4o)", action: #selector(selectProvider(_:)), keyEquivalent: "")
+        let gptItem = NSMenuItem(title: "ChatGPT (GPT-4o) — Batch", action: #selector(selectProvider(_:)), keyEquivalent: "")
         gptItem.representedObject = "gpt" as NSString
         gptItem.state = activeProvider == "gpt" ? .on : .off
         gptItem.isEnabled = isLoggedIn
         providerSubmenu.addItem(gptItem)
 
-        let deepgramProviderItem = NSMenuItem(title: "Deepgram Nova-3", action: #selector(selectProvider(_:)), keyEquivalent: "")
+        let deepgramProviderItem = NSMenuItem(title: "Deepgram Nova-3 English — Real-time", action: #selector(selectProvider(_:)), keyEquivalent: "")
         deepgramProviderItem.representedObject = "deepgram" as NSString
         deepgramProviderItem.state = activeProvider == "deepgram" ? .on : .off
         deepgramProviderItem.isEnabled = hasDeepgramKey
@@ -988,12 +998,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 self?.stopRecording(reason: .autoEnd)
             }
         }
+        // Start key listener IMMEDIATELY so Escape works even during startup.
+        startKeyListener()
+
         Task { @MainActor in
             await Transcription.shared.queueBridge.reset()
             let started = await recorder?.start() ?? false
-            if started {
-                self.startKeyListener()
-            } else {
+            if !started {
                 Logger.audio.error("Recorder failed to start — rolling back app state")
                 isRecording = false
                 isProcessingFinal = false
@@ -1074,12 +1085,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             }
         }
 
+        // Start key listener IMMEDIATELY so Escape works even during connection.
+        // If start fails, we clean up the listener.
+        startKeyListener()
+
         Task { @MainActor in
             let started = await controller.start(provider: provider)
-            if started {
-                self.startKeyListener()
-                Logger.audio.info("🟢 Deepgram streaming started")
-            } else {
+            if !started {
                 Logger.audio.error("Deepgram streaming failed to start")
                 isRecording = false
                 isProcessingFinal = false
@@ -1087,6 +1099,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 self.stopKeyListener()
                 updateStatusIcon()
                 NSSound(named: "Basso")?.play()
+            } else {
+                Logger.audio.info("🟢 Deepgram streaming started")
             }
         }
     }
