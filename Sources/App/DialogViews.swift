@@ -23,6 +23,7 @@ struct StatisticsWindowView: View {
             Text(summary)
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
                 .background(.quaternary)

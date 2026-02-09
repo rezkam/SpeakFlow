@@ -1245,20 +1245,18 @@ struct SourceRegressionTests {
     }
 
     @Test func testAccessibilityLabelsPresentForMenuAndHarnessControls() throws {
-        // SwiftUI provides accessibility automatically via Text() content.
-        // MenuView uses Button("label") which sets accessibility labels implicitly.
-        let menuView = try readProjectSource("Sources/App/MenuView.swift")
+        let appDelegate = try readProjectSource("Sources/App/AppDelegate.swift")
         let harness = try readProjectSource("Sources/App/UITestHarnessController.swift")
 
-        // SwiftUI menu items have accessibility from their Text labels
-        #expect(menuView.contains("Start Dictation"))
-        #expect(menuView.contains("Stop Dictation"))
-        #expect(menuView.contains("Accessibility"))
-        #expect(menuView.contains("Microphone"))
-        #expect(menuView.contains("View Statistics"))
-        #expect(menuView.contains("Quit"))
+        // NSMenu items have explicit setAccessibilityLabel calls
+        #expect(appDelegate.contains("Start Dictation"))
+        #expect(appDelegate.contains("Stop Dictation"))
+        #expect(appDelegate.contains("Accessibility"))
+        #expect(appDelegate.contains("Microphone"))
+        #expect(appDelegate.contains("View Statistics"))
+        #expect(appDelegate.contains("Quit"))
 
-        // Harness still uses AppKit with explicit accessibility labels
+        #expect(appDelegate.contains("setAccessibilityLabel"))
         #expect(harness.contains("setAccessibilityLabel") || harness.contains("setAccessibilityIdentifier"))
     }
 }
@@ -2885,12 +2883,11 @@ struct AdditionalLifecycleConcurrencyI18NAccessibilityRegressionTests {
 
     /// Issue #20: Guard localization of high-visibility user-facing strings.
     @Test func testIssue20HighVisibilityStringsAreLocalized() throws {
-        let menuView = try readProjectSource("Sources/App/MenuView.swift")
-        let dialogs = try readProjectSource("Sources/App/DialogViews.swift")
         let appDelegate = try readProjectSource("Sources/App/AppDelegate.swift")
+        let dialogs = try readProjectSource("Sources/App/DialogViews.swift")
 
-        // All user-facing strings live across MenuView.swift, DialogViews.swift, AppDelegate.swift
-        let appSources = menuView + "\n" + dialogs + "\n" + appDelegate
+        // All user-facing strings live across AppDelegate.swift and DialogViews.swift
+        let appSources = appDelegate + "\n" + dialogs
         #expect(appSources.contains("Start Dictation"))
         #expect(appSources.contains("Transcription Statistics"))
         #expect(appSources.contains("Login to ChatGPT"))
@@ -2898,19 +2895,16 @@ struct AdditionalLifecycleConcurrencyI18NAccessibilityRegressionTests {
     }
 
     /// Issue #23: Ensure accessibility labels remain broadly applied (not just one control).
-    /// In SwiftUI, Button("label") provides accessibility automatically — count those instead.
     @Test func testIssue23AccessibilityLabelCoverageDensity() throws {
-        let menuView = try readProjectSource("Sources/App/MenuView.swift")
+        let appDelegate = try readProjectSource("Sources/App/AppDelegate.swift")
         let harness = try readProjectSource("Sources/App/UITestHarnessController.swift")
 
-        // SwiftUI: Button("...") / Text("...") / Toggle("...") all provide accessibility
-        let menuButtonCount = countOccurrences(of: "Button(", in: menuView)
-            + countOccurrences(of: "Toggle(", in: menuView)
-            + countOccurrences(of: "Menu(\"", in: menuView)
+        // NSMenu items use setAccessibilityLabel
+        let menuLabelCount = countOccurrences(of: "setAccessibilityLabel", in: appDelegate)
         let harnessLabelCount = countOccurrences(of: ".setAccessibilityLabel", in: harness)
             + countOccurrences(of: ".setAccessibilityIdentifier", in: harness)
 
-        #expect(menuButtonCount >= 10, "Expected rich menu accessibility via SwiftUI labels, got \(menuButtonCount)")
+        #expect(menuLabelCount >= 10, "Expected rich menu accessibility labeling, got \(menuLabelCount)")
         #expect(harnessLabelCount >= 10, "Expected rich harness accessibility labeling, got \(harnessLabelCount)")
     }
 }
@@ -3020,13 +3014,10 @@ struct Issue10To23CompletionRegressionAdditions {
     }
 
     @Test func testIssue23AccessibilityLabelsRemainPresentInMenuAndHarness() throws {
-        // SwiftUI provides accessibility from Button/Text/Toggle labels automatically.
-        let menuView = try readProjectSource("Sources/App/MenuView.swift")
+        let appDelegate = try readProjectSource("Sources/App/AppDelegate.swift")
         let harness = try readProjectSource("Sources/App/UITestHarnessController.swift")
 
-        let menuCount = countOccurrences(of: "Button(", in: menuView)
-            + countOccurrences(of: "Toggle(", in: menuView)
-            + countOccurrences(of: "Menu(\"", in: menuView)
+        let menuCount = countOccurrences(of: "setAccessibilityLabel", in: appDelegate)
         let harnessCount = countOccurrences(of: ".setAccessibilityLabel", in: harness)
             + countOccurrences(of: ".setAccessibilityIdentifier", in: harness)
 
@@ -3135,30 +3126,26 @@ struct VADModelCacheSourceRegressionTests {
 struct MenuDictationToggleSourceTests {
 
     @Test func testBuildMenuUsesRecordingStateForLabel() throws {
-        // In SwiftUI, the menu view reads state reactively via @Environment(AppState.self)
-        let source = try readProjectSource("Sources/App/MenuView.swift")
-        #expect(source.contains("isRecording") || source.contains("isProcessingFinal"))
+        let source = try readProjectSource("Sources/App/AppDelegate.swift")
+        #expect(source.contains("isRecording || isProcessingFinal"))
         #expect(source.contains("Stop Dictation"))
         #expect(source.contains("Start Dictation"))
     }
 
-    @Test func testUpdateStatusIconRefreshesState() throws {
+    @Test func testUpdateStatusIconRebuildsMenu() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        // updateStatusIcon must exist and refresh observable state (SwiftUI reacts automatically)
         #expect(source.contains("func updateStatusIcon()"))
         let updateIconBody = extractFunctionBody(named: "updateStatusIcon", from: source)
         #expect(updateIconBody != nil, "updateStatusIcon function must exist")
         if let body = updateIconBody {
-            #expect(body.contains("refresh"), "updateStatusIcon must refresh AppState for SwiftUI reactivity")
+            #expect(body.contains("buildMenu"), "updateStatusIcon must call buildMenu to refresh menu state")
         }
     }
 
     @Test func testMenuLabelIsDynamic() throws {
-        // In SwiftUI, the menu label is computed from state via ternary expression
-        let source = try readProjectSource("Sources/App/MenuView.swift")
-        // The label must conditionally show Start/Stop based on recording state
-        #expect(source.contains("isRecording") || source.contains("isProcessingFinal"),
-                "Menu label must be dynamic based on recording state")
+        let source = try readProjectSource("Sources/App/AppDelegate.swift")
+        #expect(source.contains("dictationLabel"),
+                "Menu must use a variable label based on recording state")
         #expect(source.contains("Stop Dictation") && source.contains("Start Dictation"),
                 "Menu must have both Start and Stop labels")
     }
@@ -3739,27 +3726,22 @@ struct PermissionPollingSwift6Tests {
                 "stopPolling must nil out the task reference")
     }
 
-    @Test func testMicPermissionPollingUsesTaskNotTimer() throws {
+    @Test func testMicPermissionNoPolling() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
         #expect(!source.contains("micPermissionTimer"),
                 "REGRESSION: Must not use micPermissionTimer (Swift 6 actor-isolation violation)")
-        #expect(source.contains("micPermissionTask"),
-                "Must use micPermissionTask for microphone polling")
+        #expect(!source.contains("startMicrophonePermissionPolling"),
+                "Mic permission must not poll — uses requestAccess callback + menuWillOpen instead")
     }
 
-    @Test func testMicPermissionPollingTaskLoop() throws {
+    @Test func testMicPermissionCheckedOnLaunch() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        guard let range = source.range(of: "func startMicrophonePermissionPolling()") else {
-            Issue.record("startMicrophonePermissionPolling not found")
-            return
-        }
-        let body = String(source[range.lowerBound...].prefix(800))
-        #expect(body.contains("micPermissionTask = Task"),
-                "Must use Task-based polling")
-        #expect(body.contains("Task.sleep"),
-                "Must use Task.sleep for polling interval")
-        #expect(!body.contains("Timer.scheduledTimer"),
-                "Must NOT use Timer.scheduledTimer")
+        #expect(source.contains("checkMicrophonePermission()"),
+                "Microphone permission must be checked on app launch")
+        // Must handle denied case with user-facing message
+        let body = extractFunctionBody(named: "checkMicrophonePermission", from: source)
+        #expect(body?.contains("denied") == true || body?.contains(".denied") == true,
+                "checkMicrophonePermission must handle denied state")
     }
 
     /// Verify the polling task delegates to updateStatusIcon/setupHotkey
@@ -6943,7 +6925,7 @@ struct LiveStreamingSourceTests {
     }
 
     @Test func testProviderMenuShowsMode() throws {
-        let source = try readProjectSource("Sources/App/MenuView.swift")
+        let source = try readProjectSource("Sources/App/AppDelegate.swift")
         #expect(source.contains("Batch"), "GPT provider menu must indicate 'Batch' mode")
         #expect(source.contains("Real-time"), "Deepgram provider menu must indicate 'Real-time' mode")
     }
