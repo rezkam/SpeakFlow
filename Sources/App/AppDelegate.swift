@@ -8,8 +8,9 @@ import os
 import SwiftUI
 import SpeakFlowCore
 
-/// Application delegate — handles system-level concerns only.
-/// All UI (menus, dialogs) is SwiftUI; this class handles:
+/// Application delegate — owns NSStatusItem + NSMenu (menu bar) and
+/// opens SwiftUI dialog content via NSWindow + NSHostingController.
+/// Also handles system-level concerns:
 ///   - Hotkey listener
 ///   - CGEvent tap (Escape/Enter interception)
 ///   - Recording pipeline (GPT batch + Deepgram streaming)
@@ -18,17 +19,21 @@ import SpeakFlowCore
 ///   - Permission management
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissionDelegate {
-    /// Singleton so SwiftUI views can call recording/login actions.
+    /// Singleton so views/helpers can call recording/login actions.
     static var shared: AppDelegate!
+
+    // MARK: - Menu Bar
+    var statusItem: NSStatusItem!
+    private lazy var defaultIcon: NSImage? = loadMenuBarIcon()
 
     var hotkeyListener: HotkeyListener?
     var recorder: StreamingRecorder?
     var liveStreamingController: LiveStreamingController?
     var isRecording = false {
-        didSet { AppState.shared.isRecording = isRecording }
+        didSet { AppState.shared.isRecording = isRecording; buildMenu() }
     }
     var isProcessingFinal = false {
-        didSet { AppState.shared.isProcessingFinal = isProcessingFinal }
+        didSet { AppState.shared.isProcessingFinal = isProcessingFinal; buildMenu() }
     }
     var hasPlayedCompletionSound = false
     var fullTranscript = ""
@@ -50,6 +55,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+
+        // Menu bar icon
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateStatusIcon()
+        buildMenu()
 
         permissionManager = AccessibilityPermissionManager()
         permissionManager.delegate = self
@@ -195,20 +205,255 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         state.alertTitle = title
         state.alertMessage = message
         state.alertStyle = style
-        // Open the alert window via NSApp window lookup
-        NSApp.activate(ignoringOtherApps: true)
-        for window in NSApp.windows where window.identifier?.rawValue.contains("alert") == true {
-            window.makeKeyAndOrderFront(nil)
-            return
-        }
+        WindowHelper.open(id: "alert")
     }
 
-    // MARK: - Status Update
+    // MARK: - Status Icon & Menu
 
     func updateStatusIcon() {
-        // In SwiftUI mode, just refresh the observable state.
-        // The MenuBarExtra reacts automatically.
+        statusItem.button?.title = ""
+        statusItem.button?.image = defaultIcon
         AppState.shared.refresh()
+    }
+
+    private func loadMenuBarIcon() -> NSImage? {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
+              let image = NSImage(contentsOf: url) else {
+            Logger.app.warning("Could not load AppIcon.png from bundle")
+            return nil
+        }
+        let menuBarSize = NSSize(width: 18, height: 18)
+        let resizedImage = NSImage(size: menuBarSize)
+        resizedImage.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(in: NSRect(origin: .zero, size: menuBarSize),
+                   from: NSRect(origin: .zero, size: image.size),
+                   operation: .copy, fraction: 1.0)
+        resizedImage.unlockFocus()
+        resizedImage.isTemplate = true
+        return resizedImage
+    }
+
+    func buildMenu(trusted: Bool? = nil) {
+        let isTrusted = trusted ?? AXIsProcessTrusted()
+        let state = AppState.shared
+        state.refresh()
+
+        let menu = NSMenu()
+
+        // Start / Stop Dictation
+        let dictationLabel = (isRecording || isProcessingFinal)
+            ? "Stop Dictation (\(state.currentHotkey.displayName))"
+            : "Start Dictation (\(state.currentHotkey.displayName))"
+        let startItem = NSMenuItem(title: dictationLabel, action: #selector(toggleAction), keyEquivalent: "")
+        startItem.target = self
+        startItem.setAccessibilityLabel("start_stop_dictation")
+        menu.addItem(startItem)
+
+        menu.addItem(.separator())
+
+        // Permissions
+        let accessibilityItem = NSMenuItem(title: "Accessibility", action: #selector(checkAccessibilityAction), keyEquivalent: "")
+        accessibilityItem.target = self
+        accessibilityItem.setAccessibilityLabel("accessibility_permission")
+        if isTrusted {
+            accessibilityItem.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+        } else {
+            accessibilityItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        }
+        menu.addItem(accessibilityItem)
+
+        let micItem = NSMenuItem(title: "Microphone", action: #selector(checkMicrophoneMenuAction), keyEquivalent: "")
+        micItem.target = self
+        micItem.setAccessibilityLabel("microphone_permission")
+        if state.microphoneGranted {
+            micItem.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+        } else {
+            micItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        }
+        menu.addItem(micItem)
+
+        menu.addItem(.separator())
+
+        // Accounts submenu
+        let accountsMenu = NSMenu()
+        let accountsItem = NSMenuItem(title: "Accounts", action: nil, keyEquivalent: "")
+        accountsItem.setAccessibilityLabel("accounts_menu")
+        accountsItem.submenu = accountsMenu
+
+        let loginItem = NSMenuItem(
+            title: state.isLoggedIn ? "ChatGPT — Logged In ✓" : "ChatGPT — Login...",
+            action: #selector(loginAction), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.setAccessibilityLabel("chatgpt_login")
+        accountsMenu.addItem(loginItem)
+
+        if state.isLoggedIn {
+            let logoutItem = NSMenuItem(title: "Log Out of ChatGPT", action: #selector(logoutAction), keyEquivalent: "")
+            logoutItem.target = self
+            logoutItem.setAccessibilityLabel("chatgpt_logout")
+            accountsMenu.addItem(logoutItem)
+        }
+
+        accountsMenu.addItem(.separator())
+
+        let dgKeyItem = NSMenuItem(
+            title: state.hasDeepgramKey ? "Deepgram — API Key Set ✓" : "Deepgram — Set API Key...",
+            action: #selector(deepgramKeyAction), keyEquivalent: "")
+        dgKeyItem.target = self
+        dgKeyItem.setAccessibilityLabel("deepgram_key")
+        accountsMenu.addItem(dgKeyItem)
+
+        if state.hasDeepgramKey {
+            let removeKeyItem = NSMenuItem(title: "Remove API Key", action: #selector(removeDeepgramKeyAction), keyEquivalent: "")
+            removeKeyItem.target = self
+            removeKeyItem.setAccessibilityLabel("deepgram_remove_key")
+            accountsMenu.addItem(removeKeyItem)
+        }
+
+        menu.addItem(accountsItem)
+
+        // Provider submenu
+        let providerMenu = NSMenu()
+        let providerItem = NSMenuItem(title: "Transcription Provider", action: nil, keyEquivalent: "")
+        providerItem.setAccessibilityLabel("provider_menu")
+        providerItem.submenu = providerMenu
+
+        let gptItem = NSMenuItem(title: "ChatGPT (GPT-4o) — Batch", action: #selector(selectGPTProvider), keyEquivalent: "")
+        gptItem.target = self
+        gptItem.setAccessibilityLabel("provider_gpt")
+        gptItem.state = state.activeProviderId == "gpt" ? .on : .off
+        if !state.isLoggedIn { gptItem.action = nil }
+        providerMenu.addItem(gptItem)
+
+        let dgItem = NSMenuItem(title: "Deepgram Nova-3 English — Real-time", action: #selector(selectDeepgramProvider), keyEquivalent: "")
+        dgItem.target = self
+        dgItem.setAccessibilityLabel("provider_deepgram")
+        dgItem.state = state.activeProviderId == "deepgram" ? .on : .off
+        if !state.hasDeepgramKey { dgItem.action = nil }
+        providerMenu.addItem(dgItem)
+
+        menu.addItem(providerItem)
+
+        menu.addItem(.separator())
+
+        // Hotkey submenu
+        let hotkeyMenu = NSMenu()
+        let hotkeyItem = NSMenuItem(title: "Activation Hotkey", action: nil, keyEquivalent: "")
+        hotkeyItem.setAccessibilityLabel("hotkey_menu")
+        hotkeyItem.submenu = hotkeyMenu
+        for type in HotkeyType.allCases {
+            let item = NSMenuItem(title: type.displayName, action: #selector(selectHotkey(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = type
+            item.state = state.currentHotkey == type ? .on : .off
+            hotkeyMenu.addItem(item)
+        }
+        menu.addItem(hotkeyItem)
+
+        // Chunk Duration submenu
+        let chunkMenu = NSMenu()
+        let chunkItem = NSMenuItem(title: "Chunk Duration", action: nil, keyEquivalent: "")
+        chunkItem.setAccessibilityLabel("chunk_duration_menu")
+        chunkItem.submenu = chunkMenu
+        for duration in ChunkDuration.allCases {
+            let item = NSMenuItem(title: duration.displayName, action: #selector(selectChunkDuration(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = duration
+            item.state = state.chunkDuration == duration ? .on : .off
+            chunkMenu.addItem(item)
+        }
+        menu.addItem(chunkItem)
+
+        // Skip Silent Chunks
+        let skipItem = NSMenuItem(title: "Skip Silent Chunks", action: #selector(toggleSkipSilent), keyEquivalent: "")
+        skipItem.target = self
+        skipItem.setAccessibilityLabel("skip_silent_chunks")
+        skipItem.state = state.skipSilentChunks ? .on : .off
+        menu.addItem(skipItem)
+
+        menu.addItem(.separator())
+
+        // Statistics
+        let statsItem = NSMenuItem(title: "View Statistics...", action: #selector(showStatistics), keyEquivalent: "")
+        statsItem.target = self
+        statsItem.setAccessibilityLabel("view_statistics")
+        menu.addItem(statsItem)
+
+        menu.addItem(.separator())
+
+        // Launch at Login
+        let launchItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchItem.target = self
+        launchItem.setAccessibilityLabel("launch_at_login")
+        launchItem.state = state.launchAtLogin ? .on : .off
+        menu.addItem(launchItem)
+
+        menu.addItem(.separator())
+
+        // Quit
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q")
+        quitItem.target = self
+        quitItem.setAccessibilityLabel("quit")
+        menu.addItem(quitItem)
+
+        statusItem.menu = menu
+    }
+
+    // MARK: - Menu Actions
+
+    @objc private func toggleAction() { toggle() }
+    @objc private func checkAccessibilityAction() { checkAccessibility() }
+    @objc private func checkMicrophoneMenuAction() { checkMicrophoneAction() }
+    @objc private func loginAction() { handleLoginAction() }
+    @objc private func logoutAction() { handleLogout() }
+    @objc private func deepgramKeyAction() { WindowHelper.open(id: "deepgram-key") }
+    @objc private func removeDeepgramKeyAction() { handleRemoveDeepgramKey() }
+    @objc private func selectGPTProvider() { setProvider("gpt") }
+    @objc private func selectDeepgramProvider() { setProvider("deepgram") }
+    @objc private func showStatistics() { WindowHelper.open(id: "statistics") }
+    @objc private func quitAction() { NSApplication.shared.terminate(nil) }
+
+    @objc private func selectHotkey(_ sender: NSMenuItem) {
+        guard let type = sender.representedObject as? HotkeyType else { return }
+        HotkeySettings.shared.currentHotkey = type
+        setupHotkey()
+        buildMenu()
+    }
+
+    @objc private func selectChunkDuration(_ sender: NSMenuItem) {
+        guard let duration = sender.representedObject as? ChunkDuration else { return }
+        Settings.shared.chunkDuration = duration
+        buildMenu()
+    }
+
+    @objc private func toggleSkipSilent() {
+        Settings.shared.skipSilentChunks.toggle()
+        buildMenu()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        do {
+            let current = (try? SMAppService.mainApp.status == .enabled) ?? false
+            if current {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            Logger(subsystem: "SpeakFlow", category: "App")
+                .error("Failed to toggle launch at login: \(error.localizedDescription)")
+        }
+        buildMenu()
+    }
+
+    private func setProvider(_ id: String) {
+        if id == "deepgram" && !AppState.shared.hasDeepgramKey {
+            WindowHelper.open(id: "deepgram-key")
+            return
+        }
+        ProviderSettings.shared.activeProviderId = id
+        buildMenu()
     }
 
     // MARK: - Hotkey

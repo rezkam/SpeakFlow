@@ -1,52 +1,21 @@
+import AppKit
 import SwiftUI
 import SpeakFlowCore
 
+/// App entry point. Uses @main but delegates all work to AppDelegate.
+///
+/// We do NOT use SwiftUI `MenuBarExtra` — it cannot reliably open windows
+/// from accessory (LSUIElement) apps. Instead, AppDelegate owns an
+/// `NSStatusItem` with an `NSMenu` built from SwiftUI-powered helpers,
+/// and opens SwiftUI dialog content via `NSWindow` + `NSHostingController`
+/// (the same proven pattern used by SwiftBar and other menu-bar-only apps).
 @main
 struct SpeakFlowApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var appState = AppState.shared
 
     var body: some Scene {
-        // Menu bar icon + dropdown menu (replaces NSStatusItem + NSMenu)
-        MenuBarExtra {
-            MenuView()
-                .environment(appState)
-        } label: {
-            Image(systemName: "waveform")
-                .symbolRenderingMode(.hierarchical)
-        }
-
-        // Dialog windows (replaces DialogPresenter / NSPanel)
-        Window("Statistics", id: "statistics") {
-            StatisticsWindowView()
-                .environment(appState)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
-
-        Window("Deepgram API Key", id: "deepgram-key") {
-            DeepgramApiKeyWindowView()
-                .environment(appState)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
-
-        Window("Login", id: "login") {
-            LoginWindowView()
-                .environment(appState)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
-
-        Window("Alert", id: "alert") {
-            AlertWindowView()
-                .environment(appState)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
+        // We need at least one scene for @main, but all UI is managed
+        // by AppDelegate via NSStatusItem + NSMenu + NSWindow.
+        Settings { EmptyView() }
     }
 }
