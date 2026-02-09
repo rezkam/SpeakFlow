@@ -2,11 +2,22 @@ import AppKit
 @preconcurrency import ApplicationServices
 import OSLog
 
+/// Possible user responses to the accessibility permission prompt.
+public enum PermissionAlertResponse: Sendable {
+    case openSettings
+    case remindLater
+    case quitApp
+}
+
 /// Protocol for permission manager delegate callbacks
 @MainActor
 public protocol AccessibilityPermissionDelegate: AnyObject {
     func updateStatusIcon()
     func setupHotkey()
+    /// Show a permission request dialog and return the user's choice.
+    func showAccessibilityPermissionAlert() async -> PermissionAlertResponse
+    /// Show a success dialog after permission is granted.
+    func showAccessibilityGrantedAlert()
 }
 
 /// Manages accessibility permission requests and monitoring
@@ -62,43 +73,18 @@ public final class AccessibilityPermissionManager {
     }
 
     private func showPermissionAlert() {
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Enable Accessibility Access")
-        alert.informativeText = String(localized: """
-        This app needs Accessibility permission to type dictated text into other applications.
-
-        We've already added this app to your Accessibility settings.
-
-        To enable it:
-        1. Click "Open System Settings" below
-        2. Find this app in the Accessibility list (already added for you)
-        3. Click the toggle switch to turn it ON
-        4. Return to this app — we'll automatically detect when you enable it
-
-        💡 You may need to unlock the settings with your password first.
-        """)
-        alert.alertStyle = .informational
-        alert.icon = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: "Permission")
-
-        alert.addButton(withTitle: String(localized: "Open System Settings"))
-        alert.addButton(withTitle: String(localized: "Remind Me Later"))
-        alert.addButton(withTitle: String(localized: "Quit App"))
-
-        let response = alert.runModal()
-
-        switch response {
-        case .alertFirstButtonReturn: // Open System Settings
-            self.openAccessibilitySettings()
-
-        case .alertSecondButtonReturn: // Remind Me Later
-            Logger.permissions.info("User postponed accessibility permission")
-
-        case .alertThirdButtonReturn: // Quit
-            Logger.app.info("User chose to quit from permission dialog")
-            NSApp.terminate(nil)
-
-        default:
-            break
+        Task { @MainActor in
+            guard let delegate else { return }
+            let response = await delegate.showAccessibilityPermissionAlert()
+            switch response {
+            case .openSettings:
+                self.openAccessibilitySettings()
+            case .remindLater:
+                Logger.permissions.info("User postponed accessibility permission")
+            case .quitApp:
+                Logger.app.info("User chose to quit from permission dialog")
+                NSApp.terminate(nil)
+            }
         }
     }
 
@@ -150,21 +136,7 @@ public final class AccessibilityPermissionManager {
     }
 
     private func showPermissionGrantedAlert() {
-        let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
-
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Accessibility Permission Granted")
-        alert.informativeText = String(localized: """
-        The app now has permission to insert dictated text into other applications.
-
-        You can start using the dictation feature with \(hotkeyName).
-        """)
-        alert.alertStyle = .informational
-        alert.icon = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Success")
-
-        alert.addButton(withTitle: String(localized: "OK"))
-
-        alert.runModal()
+        delegate?.showAccessibilityGrantedAlert()
     }
 
     public func stopPolling() {

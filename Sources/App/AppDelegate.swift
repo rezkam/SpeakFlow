@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     var statusItem: NSStatusItem!
     var hotkeyListener: HotkeyListener?
     var recorder: StreamingRecorder?
+    var liveStreamingController: LiveStreamingController?
     var isRecording = false
     var isProcessingFinal = false  // Track if we're waiting for final transcriptions
     var hasPlayedCompletionSound = false  // Guard against playing completion sound twice
@@ -237,41 +238,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         menu.addItem(startItem)
         menu.addItem(.separator())
 
-        // Add accessibility status menu item
-        let accessibilityTitle = trusted
-            ? String(localized: "✅ Accessibility Enabled")
-            : String(localized: "⚠️ Enable Accessibility...")
+        // Permissions section
         let accessibilityItem = NSMenuItem(
-            title: accessibilityTitle,
+            title: String(localized: "Accessibility"),
             action: #selector(checkAccessibility),
             keyEquivalent: ""
         )
+        accessibilityItem.state = trusted ? .on : .off
+        if !trusted {
+            accessibilityItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        }
         accessibilityItem.setAccessibilityLabel(String(localized: "Accessibility permission status and action"))
         menu.addItem(accessibilityItem)
 
-        // Add microphone status menu item
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        let micTitle = micStatus == .authorized
-            ? String(localized: "✅ Microphone Enabled")
-            : String(localized: "⚠️ Enable Microphone...")
-        let micItem = NSMenuItem(title: micTitle, action: #selector(checkMicrophoneAction), keyEquivalent: "")
+        let micItem = NSMenuItem(
+            title: String(localized: "Microphone"),
+            action: #selector(checkMicrophoneAction),
+            keyEquivalent: ""
+        )
+        micItem.state = micStatus == .authorized ? .on : .off
+        if micStatus != .authorized {
+            micItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        }
         micItem.setAccessibilityLabel(String(localized: "Microphone permission status and action"))
         menu.addItem(micItem)
 
-        // Add login status menu item
+        menu.addItem(.separator())
+
+        // Accounts section
         let isLoggedIn = OpenAICodexAuth.isLoggedIn
-        let loginTitle = isLoggedIn
-            ? String(localized: "✅ Logged in to ChatGPT")
-            : String(localized: "⚠️ Login to ChatGPT...")
-        let loginItem = NSMenuItem(title: loginTitle, action: #selector(handleLoginAction), keyEquivalent: "")
-        loginItem.setAccessibilityLabel(String(localized: "ChatGPT login status and action"))
-        menu.addItem(loginItem)
+        let hasDeepgramKey = ProviderSettings.shared.hasApiKey(for: "deepgram")
+
+        let accountsSubmenu = NSMenu()
+
+        let chatgptItem = NSMenuItem(
+            title: isLoggedIn
+                ? String(localized: "ChatGPT — Logged In")
+                : String(localized: "ChatGPT — Login..."),
+            action: #selector(handleLoginAction),
+            keyEquivalent: ""
+        )
+        chatgptItem.state = isLoggedIn ? .on : .off
+        chatgptItem.setAccessibilityLabel(String(localized: "ChatGPT login status and action"))
+        accountsSubmenu.addItem(chatgptItem)
 
         if isLoggedIn {
-            let logoutItem = NSMenuItem(title: String(localized: "Logout"), action: #selector(handleLogout), keyEquivalent: "")
+            let logoutItem = NSMenuItem(title: String(localized: "Log Out of ChatGPT"), action: #selector(handleLogout), keyEquivalent: "")
+            logoutItem.indentationLevel = 1
             logoutItem.setAccessibilityLabel(String(localized: "Log out of ChatGPT"))
-            menu.addItem(logoutItem)
+            accountsSubmenu.addItem(logoutItem)
         }
+
+        accountsSubmenu.addItem(.separator())
+
+        let deepgramItem = NSMenuItem(
+            title: hasDeepgramKey
+                ? String(localized: "Deepgram — API Key Set")
+                : String(localized: "Deepgram — Set API Key..."),
+            action: #selector(handleDeepgramApiKey),
+            keyEquivalent: ""
+        )
+        deepgramItem.state = hasDeepgramKey ? .on : .off
+        deepgramItem.setAccessibilityLabel(String(localized: "Deepgram API key status and action"))
+        accountsSubmenu.addItem(deepgramItem)
+
+        if hasDeepgramKey {
+            let removeKeyItem = NSMenuItem(title: String(localized: "Remove API Key"), action: #selector(handleRemoveDeepgramKey), keyEquivalent: "")
+            removeKeyItem.indentationLevel = 1
+            removeKeyItem.setAccessibilityLabel(String(localized: "Remove Deepgram API key"))
+            accountsSubmenu.addItem(removeKeyItem)
+        }
+
+        let accountsMenuItem = NSMenuItem(title: String(localized: "Accounts"), action: nil, keyEquivalent: "")
+        accountsMenuItem.setAccessibilityLabel(String(localized: "Manage service accounts"))
+        accountsMenuItem.submenu = accountsSubmenu
+        menu.addItem(accountsMenuItem)
+
+        // Provider selection submenu
+        let providerSubmenu = NSMenu()
+        let activeProvider = ProviderSettings.shared.activeProviderId
+
+        let gptItem = NSMenuItem(title: "ChatGPT (GPT-4o)", action: #selector(selectProvider(_:)), keyEquivalent: "")
+        gptItem.representedObject = "gpt" as NSString
+        gptItem.state = activeProvider == "gpt" ? .on : .off
+        gptItem.isEnabled = isLoggedIn
+        providerSubmenu.addItem(gptItem)
+
+        let deepgramProviderItem = NSMenuItem(title: "Deepgram Nova-3", action: #selector(selectProvider(_:)), keyEquivalent: "")
+        deepgramProviderItem.representedObject = "deepgram" as NSString
+        deepgramProviderItem.state = activeProvider == "deepgram" ? .on : .off
+        deepgramProviderItem.isEnabled = hasDeepgramKey
+        providerSubmenu.addItem(deepgramProviderItem)
+
+        let providerMenuItem = NSMenuItem(title: String(localized: "Transcription Provider"), action: nil, keyEquivalent: "")
+        providerMenuItem.setAccessibilityLabel(String(localized: "Choose the transcription provider"))
+        providerMenuItem.submenu = providerSubmenu
+        menu.addItem(providerMenuItem)
+
         menu.addItem(.separator())
 
         // Hotkey submenu
@@ -389,65 +453,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     @objc private func showStatistics() {
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Transcription Statistics")
-        alert.informativeText = Statistics.shared.summary
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: String(localized: "OK"))
-        alert.addButton(withTitle: String(localized: "Reset..."))
-
-        if alert.runModal() == .alertSecondButtonReturn {
-            // User clicked Reset - confirm
-            let confirmAlert = NSAlert()
-            confirmAlert.messageText = String(localized: "Reset Statistics?")
-            confirmAlert.informativeText = String(localized: "This will permanently reset all transcription statistics to zero.")
-            confirmAlert.alertStyle = .warning
-            confirmAlert.addButton(withTitle: String(localized: "Reset"))
-            confirmAlert.addButton(withTitle: String(localized: "Cancel"))
-
-            if confirmAlert.runModal() == .alertFirstButtonReturn {
+        // Statistics needs a Reset option — use a custom SwiftUI view
+        DialogPresenter.showStatistics(
+            summary: Statistics.shared.summary,
+            onReset: {
                 Statistics.shared.reset()
             }
-        }
+        )
     }
 
     @objc private func handleLoginAction() {
         if OpenAICodexAuth.isLoggedIn {
-            // Already logged in - show status
-            let alert = NSAlert()
-            alert.messageText = String(localized: "Already Logged In")
-            alert.informativeText = String(localized: "You are already logged in to ChatGPT.")
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: String(localized: "OK"))
-            alert.runModal()
+            DialogPresenter.showAlert(
+                title: "Already Logged In",
+                message: "You are already logged in to ChatGPT.",
+                style: .info
+            )
         } else {
-            // Start login flow
             startLoginFlow()
         }
     }
 
     @objc private func handleLogout() {
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Logout from ChatGPT?")
-        alert.informativeText = String(localized: "This will remove your saved login credentials.")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: String(localized: "Logout"))
-        alert.addButton(withTitle: String(localized: "Cancel"))
-
-        if alert.runModal() == .alertFirstButtonReturn {
+        DialogPresenter.showConfirmation(
+            title: "Logout from ChatGPT?",
+            message: "This will remove your saved login credentials.",
+            confirmTitle: "Logout",
+            isDestructive: true
+        ) { [weak self] confirmed in
+            guard confirmed else { return }
             OpenAICodexAuth.deleteCredentials()
-
-            // Rebuild menu to update login status
             let trusted = AXIsProcessTrusted()
-            buildMenu(trusted: trusted)
-
-            let confirmAlert = NSAlert()
-            confirmAlert.messageText = String(localized: "Logged Out")
-            confirmAlert.informativeText = String(localized: "You have been logged out from ChatGPT.")
-            confirmAlert.alertStyle = .informational
-            confirmAlert.addButton(withTitle: String(localized: "OK"))
-            confirmAlert.runModal()
+            self?.buildMenu(trusted: trusted)
+            DialogPresenter.showAlert(
+                title: "Logged Out",
+                message: "You have been logged out from ChatGPT.",
+                style: .success
+            )
         }
+    }
+
+    @objc private func handleDeepgramApiKey() {
+        let hasKey = ProviderSettings.shared.hasApiKey(for: "deepgram")
+        DialogPresenter.showDeepgramApiKey(isUpdate: hasKey) { [weak self] key in
+            guard let key else { return }
+            ProviderSettings.shared.setApiKey(key, for: "deepgram")
+            let trusted = AXIsProcessTrusted()
+            self?.buildMenu(trusted: trusted)
+        }
+    }
+
+    @objc private func handleRemoveDeepgramKey() {
+        DialogPresenter.showConfirmation(
+            title: "Remove Deepgram API Key?",
+            message: "This will remove your saved Deepgram API key.",
+            confirmTitle: "Remove",
+            isDestructive: true
+        ) { [weak self] confirmed in
+            guard confirmed else { return }
+            ProviderSettings.shared.removeApiKey(for: "deepgram")
+            if ProviderSettings.shared.activeProviderId == "deepgram" {
+                ProviderSettings.shared.activeProviderId = "gpt"
+            }
+            let trusted = AXIsProcessTrusted()
+            self?.buildMenu(trusted: trusted)
+        }
+    }
+
+    @objc private func selectProvider(_ sender: NSMenuItem) {
+        guard let providerId = sender.representedObject as? NSString else { return }
+        let id = providerId as String
+
+        if id == "deepgram" && !ProviderSettings.shared.hasApiKey(for: "deepgram") {
+            handleDeepgramApiKey()
+            return
+        }
+
+        ProviderSettings.shared.activeProviderId = id
+        Logger.app.info("Transcription provider changed to \(id)")
+        let trusted = AXIsProcessTrusted()
+        buildMenu(trusted: trusted)
     }
 
     private func startLoginFlow() {
@@ -458,24 +543,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         let server = OAuthCallbackServer(expectedState: flow.state)
         oauthCallbackServer = server
 
-        // Show instructions
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Login to ChatGPT")
-        alert.informativeText = String(localized: """
-        A browser window will open for you to log in to ChatGPT.
+        // Show instructions and open browser
+        DialogPresenter.showConfirmation(
+            title: "Login to ChatGPT",
+            message: "A browser window will open for you to log in.\n\nAfter logging in, you'll be redirected back automatically.\n\nIf the redirect doesn't work, copy the URL and paste it when prompted.",
+            confirmTitle: "Open Browser"
+        ) { [weak self] confirmed in
+            guard confirmed, let self else { return }
 
-        After logging in, you'll be redirected back automatically.
-
-        If the redirect doesn't work, copy the URL from your browser and paste it when prompted.
-        """)
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: String(localized: "Open Browser"))
-        alert.addButton(withTitle: String(localized: "Cancel"))
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        // Open browser
-        NSWorkspace.shared.open(flow.url)
+            // Open browser
+            NSWorkspace.shared.open(flow.url)
         
         // Wait for callback in background
         Task {
@@ -492,46 +569,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                 }
             }
         }
+        } // showConfirmation
     }
 
     private func promptForManualCode(flow: OpenAICodexAuth.AuthorizationFlow) {
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Paste Authorization Code")
-        alert.informativeText = String(localized: "If the browser didn't redirect automatically, paste the URL or authorization code here:")
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: String(localized: "Submit"))
-        alert.addButton(withTitle: String(localized: "Cancel"))
+        DialogPresenter.showTextInput(
+            title: "Paste Authorization Code",
+            message: "If the browser didn't redirect automatically, paste the URL or authorization code here:",
+            placeholder: "Paste URL or code here",
+            submitTitle: "Submit"
+        ) { [weak self] inputValue in
+            guard let self, let inputValue else { return }
 
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        input.placeholderString = String(localized: "Paste URL or code here")
-        alert.accessoryView = input
-        
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        
-        let inputValue = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !inputValue.isEmpty else {
-            showError("No code provided")
-            return
-        }
-        
-        // Parse the input - could be full URL or just the code
-        let code: String
-        if let url = URL(string: inputValue),
-           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let codeParam = components.queryItems?.first(where: { $0.name == "code" })?.value {
-            // P2 Security: Validate state parameter if present to prevent CSRF attacks
-            if let stateParam = components.queryItems?.first(where: { $0.name == "state" })?.value {
-                guard stateParam == flow.state else {
-                    showError("Invalid state parameter. Please try logging in again.")
-                    return
+            // Parse the input - could be full URL or just the code
+            let code: String
+            if let url = URL(string: inputValue),
+               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+               let codeParam = components.queryItems?.first(where: { $0.name == "code" })?.value {
+                // P2 Security: Validate state parameter if present to prevent CSRF attacks
+                if let stateParam = components.queryItems?.first(where: { $0.name == "state" })?.value {
+                    guard stateParam == flow.state else {
+                        self.showError("Invalid state parameter. Please try logging in again.")
+                        return
+                    }
                 }
+                code = codeParam
+            } else {
+                code = inputValue
             }
-            code = codeParam
-        } else {
-            code = inputValue
+
+            self.exchangeCodeForTokens(code: code, flow: flow)
         }
-        
-        exchangeCodeForTokens(code: code, flow: flow)
     }
 
     private func exchangeCodeForTokens(code: String, flow: OpenAICodexAuth.AuthorizationFlow) {
@@ -544,12 +612,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
                     let trusted = AXIsProcessTrusted()
                     self.buildMenu(trusted: trusted)
                     
-                    let alert = NSAlert()
-                    alert.messageText = String(localized: "Login Successful")
-                    alert.informativeText = String(localized: "You are now logged in to ChatGPT. You can start using voice dictation.")
-                    alert.alertStyle = .informational
-                    alert.addButton(withTitle: String(localized: "OK"))
-                    alert.runModal()
+                    DialogPresenter.showAlert(
+                        title: "Login Successful",
+                        message: "You are now logged in to ChatGPT. You can start using voice dictation.",
+                        style: .success
+                    )
                 }
             } catch {
                 await MainActor.run {
@@ -560,12 +627,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     private func showError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Error")
-        alert.informativeText = message
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: String(localized: "OK"))
-        alert.runModal()
+        DialogPresenter.showAlert(title: "Error", message: message, style: .error)
+    }
+
+    func showAccessibilityPermissionAlert() async -> PermissionAlertResponse {
+        await withCheckedContinuation { continuation in
+            DialogPresenter.showAccessibilityPermission { response in
+                continuation.resume(returning: response)
+            }
+        }
+    }
+
+    func showAccessibilityGrantedAlert() {
+        let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
+        DialogPresenter.showAlert(
+            title: "Accessibility Permission Granted",
+            message: "The app now has permission to insert dictated text.\n\nYou can start using dictation with \(hotkeyName).",
+            style: .success
+        )
     }
 
     func setupHotkey() {
@@ -629,24 +708,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     @objc func checkAccessibility() {
         let trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
         if trusted {
-            let alert = NSAlert()
-            alert.messageText = String(localized: "Accessibility Permission Active")
-            alert.informativeText = String(localized: "The app has the necessary permissions to insert dictated text.")
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: String(localized: "OK"))
-            alert.runModal()
+            DialogPresenter.showAlert(
+                title: "Accessibility Permission Active",
+                message: "The app has the necessary permissions to insert dictated text.",
+                style: .success
+            )
         }
     }
 
     @objc func checkMicrophoneAction() {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         if status == .authorized {
-            let alert = NSAlert()
-            alert.messageText = String(localized: "Microphone Permission Active")
-            alert.informativeText = String(localized: "The app has access to your microphone for voice recording.")
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: String(localized: "OK"))
-            alert.runModal()
+            DialogPresenter.showAlert(
+                title: "Microphone Permission Active",
+                message: "The app has access to your microphone for voice recording.",
+                style: .success
+            )
         } else {
             checkMicrophonePermission()
         }
@@ -887,6 +964,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         updateStatusIcon()
         NSSound(named: "Blow")?.play()
 
+        if ProviderSettings.shared.activeProviderId == "deepgram" {
+            startDeepgramRecording()
+        } else {
+            startGPTRecording()
+        }
+        refreshUITestHarness()
+    }
+
+    /// Start recording with the GPT-4o (ChatGPT) batch transcription pipeline.
+    /// Local VAD + chunking → send WAV chunks to ChatGPT API → type text.
+    private func startGPTRecording() {
         recorder = StreamingRecorder()
         recorder?.onChunkReady = { chunk in
             Task { @MainActor in
@@ -904,22 +992,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
             await Transcription.shared.queueBridge.reset()
             let started = await recorder?.start() ?? false
             if started {
-                // Only start key listener after confirmed successful start.
-                // This prevents Enter/Escape interception when the recorder
-                // failed to start (e.g. no mic permission, engine error).
                 self.startKeyListener()
             } else {
                 Logger.audio.error("Recorder failed to start — rolling back app state")
                 isRecording = false
                 isProcessingFinal = false
                 recorder = nil
-                // stopKeyListener() for safety in case anything was partially set up
                 self.stopKeyListener()
                 updateStatusIcon()
                 NSSound(named: "Basso")?.play()
             }
         }
-        refreshUITestHarness()
+    }
+
+    /// Start recording with the Deepgram streaming transcription pipeline.
+    /// NO local VAD, NO chunking, NO silence detection.
+    /// Raw mic audio → Deepgram WebSocket → live interim/final results → type text.
+    private func startDeepgramRecording() {
+        guard let apiKey = ProviderSettings.shared.apiKey(for: "deepgram") else {
+            Logger.audio.error("Deepgram API key not set")
+            isRecording = false
+            NSSound(named: "Basso")?.play()
+            updateStatusIcon()
+            return
+        }
+
+        let provider = DeepgramProvider()
+        ProviderSettings.shared.setApiKey(apiKey, for: "deepgram")
+
+        let controller = LiveStreamingController()
+        self.liveStreamingController = controller
+
+        controller.onTextUpdate = { [weak self] text, replacingChars, isFinal in
+            guard let self, self.isRecording else { return }
+            if replacingChars > 0 {
+                self.deleteChars(replacingChars)
+            }
+            if !text.isEmpty {
+                if isFinal {
+                    let finalText = text + " "
+                    if !self.fullTranscript.isEmpty { self.fullTranscript += " " }
+                    self.fullTranscript += text
+                    self.insertText(finalText)
+                } else {
+                    self.insertText(text)
+                }
+            }
+        }
+
+        controller.onUtteranceEnd = {
+            Logger.audio.info("Deepgram: utterance end detected")
+        }
+
+        controller.onSpeechStarted = {
+            Logger.audio.info("Deepgram: speech started")
+        }
+
+        controller.onError = { [weak self] error in
+            Logger.audio.error("Deepgram error: \(error.localizedDescription)")
+            Task { @MainActor in
+                self?.stopRecording(reason: .autoEnd)
+            }
+        }
+
+        controller.onSessionClosed = { [weak self] in
+            Logger.audio.warning("Deepgram session closed unexpectedly")
+            Task { @MainActor in
+                if self?.isRecording == true {
+                    self?.stopRecording(reason: .autoEnd)
+                }
+            }
+        }
+
+        Task { @MainActor in
+            let started = await controller.start(provider: provider)
+            if started {
+                self.startKeyListener()
+                Logger.audio.info("🟢 Deepgram streaming started")
+            } else {
+                Logger.audio.error("Deepgram streaming failed to start")
+                isRecording = false
+                isProcessingFinal = false
+                liveStreamingController = nil
+                self.stopKeyListener()
+                updateStatusIcon()
+                NSSound(named: "Basso")?.play()
+            }
+        }
     }
 
     /// Why the recording stopped — logged for debugging P0 auto-end bug
@@ -949,18 +1108,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         }
 
         isRecording = false
-        isProcessingFinal = true  // Keep inserting text while waiting for final transcriptions
-        updateStatusIcon()
-        NSSound(named: "Pop")?.play()
-        recorder?.stop()
-        recorder = nil
-        refreshUITestHarness()
 
-        // Wait a moment for final chunks to process, then check completion
-        Task {
-            try? await Task.sleep(for: .seconds(1))
-            await MainActor.run { self.finishIfDone() }
+        if liveStreamingController != nil {
+            // Deepgram streaming mode
+            isProcessingFinal = true
+            updateStatusIcon()
+            NSSound(named: "Pop")?.play()
+            Task { @MainActor in
+                await liveStreamingController?.stop()
+                liveStreamingController = nil
+                isProcessingFinal = false
+                stopKeyListener()
+                targetElement = nil
+                updateStatusIcon()
+                if !hasPlayedCompletionSound {
+                    hasPlayedCompletionSound = true
+                    NSSound(named: "Purr")?.play()
+                }
+                if shouldPressEnterOnComplete {
+                    shouldPressEnterOnComplete = false
+                    pressEnterKey()
+                }
+                Logger.audio.info("Deepgram streaming finished. Transcript: \(self.fullTranscript.prefix(80))")
+            }
+        } else {
+            // GPT batch mode
+            isProcessingFinal = true
+            updateStatusIcon()
+            NSSound(named: "Pop")?.play()
+            recorder?.stop()
+            recorder = nil
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                await MainActor.run { self.finishIfDone() }
+            }
         }
+        refreshUITestHarness()
     }
 
     @MainActor
@@ -970,15 +1153,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
         stopKeyListener()
         isRecording = false
         isProcessingFinal = false
-        shouldPressEnterOnComplete = false  // Reset submit flag on cancel
-        fullTranscript = ""  // P2 Security: Reset transcript to prevent stale data
+        shouldPressEnterOnComplete = false
+        fullTranscript = ""
         targetElement = nil
         textInsertionTask?.cancel()
         textInsertionTask = nil
-        queuedInsertionCount = 0  // P3 Security: Reset queue count on cancel
-        recorder?.cancel()  // P2 Security: Use cancel() to skip final chunk emission
-        recorder = nil
-        Transcription.shared.cancelAll()
+        queuedInsertionCount = 0
+
+        if liveStreamingController != nil {
+            Task {
+                await liveStreamingController?.cancel()
+                await MainActor.run { self.liveStreamingController = nil }
+            }
+        } else {
+            recorder?.cancel()
+            recorder = nil
+            Transcription.shared.cancelAll()
+        }
+
         updateStatusIcon()
         refreshUITestHarness()
         Logger.audio.debug("Playing cancel sound (Glass)")
@@ -1078,6 +1270,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
 
     /// Maximum text length to prevent DoS from malicious transcriptions
     /// At 5ms per character, 100k chars = ~8 minutes of typing
+    /// Delete N characters by sending backspace keystrokes.
+    /// Used by Deepgram streaming mode to replace interim text.
+    func deleteChars(_ count: Int) {
+        guard count > 0 else { return }
+        let previousTask = textInsertionTask
+        queuedInsertionCount += 1
+        textInsertionTask = Task { [weak self] in
+            defer { Task { @MainActor in self?.queuedInsertionCount -= 1 } }
+            await previousTask?.value
+            guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
+            for _ in 0..<count {
+                try? Task.checkCancellation()
+                if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true),
+                   let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: false) {
+                    keyDown.post(tap: .cghidEventTap)
+                    keyUp.post(tap: .cghidEventTap)
+                    try? await Task.sleep(nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000)
+                }
+            }
+        }
+    }
+
     private static let maxTextInsertionLength = 100_000
 
     /// Delay between keystrokes in microseconds (5ms = smooth typing without overwhelming the system)
@@ -1296,29 +1510,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AccessibilityPermissio
     }
 
     private func showMicrophonePermissionAlert() {
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Microphone Access Required")
-        alert.informativeText = String(localized: """
-        This app needs microphone permission to record your voice for transcription.
-
-        To enable it:
-        1. Open System Settings > Privacy & Security > Microphone
-        2. Find this app and enable the toggle
-        3. Try recording again
-
-        💡 You may need to restart the app after changing permissions.
-        """)
-        alert.alertStyle = .warning
-        alert.icon = NSImage(systemSymbolName: "mic.slash.fill", accessibilityDescription: "Microphone Denied")
-
-        alert.addButton(withTitle: String(localized: "Open System Settings"))
-        alert.addButton(withTitle: String(localized: "OK"))
-
-        let response = alert.runModal()
-
-        if response == .alertFirstButtonReturn {
-            // Open Privacy & Security > Microphone
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+        DialogPresenter.showConfirmation(
+            title: "Microphone Access Required",
+            message: "This app needs microphone permission to record your voice.\n\nOpen System Settings → Privacy & Security → Microphone, find this app and enable the toggle.\n\nYou may need to restart the app after changing permissions.",
+            confirmTitle: "Open System Settings"
+        ) { confirmed in
+            if confirmed,
+               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
                 NSWorkspace.shared.open(url)
             }
         }
