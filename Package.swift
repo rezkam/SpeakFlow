@@ -33,6 +33,20 @@ let package = Package(
             dependencies: ["SpeakFlowCore"],
             path: "Sources/LiveE2E"
         ),
+        // Deepgram streaming E2E tests (requires DEEPGRAM_API_KEY env var)
+        .executableTarget(
+            name: "DeepgramE2E",
+            dependencies: ["SpeakFlowCore"],
+            path: "Sources/DeepgramE2E",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // Real mic + Deepgram streaming test (requires mic permission + DEEPGRAM_API_KEY)
+        .executableTarget(
+            name: "DeepgramTest",
+            dependencies: ["SpeakFlowCore"],
+            path: "Sources/DeepgramTest",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .testTarget(
             name: "SpeakFlowCoreTests",
             dependencies: ["SpeakFlowCore"],
