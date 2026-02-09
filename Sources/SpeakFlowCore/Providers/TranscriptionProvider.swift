@@ -37,7 +37,7 @@ public struct StreamingSessionConfig: Sendable {
     public var model: String
 
     public init(
-        language: String = "en",
+        language: String = "en-US",
         sampleRate: Int = 16000,
         encoding: AudioEncoding = .linear16,
         interimResults: Bool = true,

@@ -3546,31 +3546,23 @@ struct KeyListenerSafetyTests {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
 
         let body = extractFunctionBody(named: "startGPTRecording", from: source)
-        #expect(body != nil, "startRecording must exist")
+        #expect(body != nil, "startGPTRecording must exist")
         guard let body else { return }
 
-        // Key listener must only start AFTER confirmed successful recorder start
-        #expect(body.contains("if started"),
-                "startRecording must check if recorder.start() succeeded")
+        // Key listener must start eagerly so Escape works immediately
+        #expect(body.contains("startKeyListener()"),
+                "startGPTRecording must call startKeyListener()")
 
-        // The success branch must start the key listener
-        guard let successRange = body.range(of: "if started") else {
-            Issue.record("'if started' block not found")
-            return
-        }
-        let successBody = String(body[successRange.lowerBound...].prefix(500))
-        #expect(successBody.contains("startKeyListener()"),
-                "Key listener must only start after confirmed successful recorder start")
+        // The failure branch must call stopKeyListener
+        #expect(body.contains("stopKeyListener()"),
+                "Recorder start failure must call stopKeyListener() to clean up")
 
-        // The failure branch (else) after "if started" must call stopKeyListener for safety
-        let afterIfStarted = String(body[successRange.lowerBound...])
-        guard let failRange = afterIfStarted.range(of: "} else {") else {
-            Issue.record("else block not found after 'if started'")
-            return
+        // startKeyListener must appear before "recorder?.start()" (the async start)
+        if let keyListenerIdx = body.range(of: "startKeyListener()")?.lowerBound,
+           let recorderStartIdx = body.range(of: "recorder?.start()")?.lowerBound {
+            #expect(keyListenerIdx < recorderStartIdx,
+                    "startKeyListener() must be called before recorder?.start()")
         }
-        let failBody = String(afterIfStarted[failRange.lowerBound...].prefix(500))
-        #expect(failBody.contains("stopKeyListener()"),
-                "Recorder start failure must call stopKeyListener() to prevent stale key consumption")
     }
 
     @Test func testFlagClearedBeforeTapDisabled() throws {
@@ -3791,85 +3783,73 @@ struct PermissionPollingSwift6Tests {
 
 // MARK: - Key Listener Start Order Regression Tests (Issue #7)
 
-@Suite("Issue #7 Regression — Key Listener Start After Recorder Success")
+@Suite("Issue #7 Regression — Key Listener Immediate Start for Escape")
 struct KeyListenerStartOrderTests {
 
-    /// HIGH REGRESSION: startKeyListener must be called ONLY after recorder.start()
-    /// succeeds. Previously it was called synchronously before the async Task,
-    /// leaving Enter/Escape interception active even when recording failed to start.
-    @Test func testKeyListenerInsideSuccessBranch() throws {
+    /// Key listener must start BEFORE the async Task so Escape works immediately.
+    /// Previously it was inside the success branch, meaning Escape was dead
+    /// during the 1-2s audio engine / WebSocket startup.
+    @Test func testKeyListenerStartsBeforeAsyncWork() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        let body = extractFunctionBody(named: "startGPTRecording", from: source)
-        guard let body else {
-            Issue.record("startRecording not found")
-            return
+
+        // Check GPT mode: startKeyListener before recorder?.start()
+        let gptBody = extractFunctionBody(named: "startGPTRecording", from: source)
+        #expect(gptBody != nil, "startGPTRecording must exist")
+        guard let gptBody else { return }
+
+        #expect(gptBody.contains("startKeyListener()"),
+                "startGPTRecording must call startKeyListener()")
+
+        if let klIdx = gptBody.range(of: "startKeyListener()")?.lowerBound,
+           let startIdx = gptBody.range(of: "recorder?.start()")?.lowerBound {
+            #expect(klIdx < startIdx,
+                    "startKeyListener() must be called BEFORE recorder?.start() for immediate Escape")
         }
 
-        // Must have "if started { ... startKeyListener ... } else { ... stopKeyListener ... }"
-        #expect(body.contains("if started"),
-                "Must check recorder.start() result")
+        // Check Deepgram mode: startKeyListener before controller.start()
+        let dgBody = extractFunctionBody(named: "startDeepgramRecording", from: source)
+        #expect(dgBody != nil, "startDeepgramRecording must exist")
+        guard let dgBody else { return }
 
-        guard let ifPos = body.range(of: "if started")?.lowerBound,
-              let startKLPos = body.range(of: "startKeyListener()")?.lowerBound else {
-            Issue.record("Expected structure not found in startRecording")
-            return
-        }
+        #expect(dgBody.contains("startKeyListener()"),
+                "startDeepgramRecording must call startKeyListener()")
 
-        // startKeyListener must come AFTER "if started"
-        #expect(startKLPos > ifPos,
-                "REGRESSION: startKeyListener() must be inside the 'if started' success branch")
-
-        // Find the "} else {" that follows "if started" (not an earlier one)
-        let afterIf = String(body[ifPos...])
-        guard let elseInAfterIf = afterIf.range(of: "} else {") else {
-            Issue.record("else block after 'if started' not found")
-            return
+        if let klIdx = dgBody.range(of: "startKeyListener()")?.lowerBound,
+           let startIdx = dgBody.range(of: "controller.start(")?.lowerBound {
+            #expect(klIdx < startIdx,
+                    "startKeyListener() must be called BEFORE controller.start() for immediate Escape")
         }
-        // startKeyListener must appear before the else block relative to "if started"
-        guard let startKLInAfterIf = afterIf.range(of: "startKeyListener()") else {
-            Issue.record("startKeyListener not found after 'if started'")
-            return
-        }
-        #expect(startKLInAfterIf.lowerBound < elseInAfterIf.lowerBound,
-                "REGRESSION: startKeyListener() must be in success branch before else")
     }
 
-    /// Exactly one call to startKeyListener in startRecording (no duplicate).
+    /// Exactly one call to startKeyListener per recording function.
     @Test func testExactlyOneStartKeyListenerCall() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        let body = extractFunctionBody(named: "startGPTRecording", from: source)
-        guard let body else {
-            Issue.record("startRecording not found")
-            return
-        }
 
-        let count = body.components(separatedBy: "startKeyListener()").count - 1
-        #expect(count == 1,
-                "Must call startKeyListener() exactly once in startRecording, found \(count)")
+        for funcName in ["startGPTRecording", "startDeepgramRecording"] {
+            let body = extractFunctionBody(named: funcName, from: source)
+            guard let body else {
+                Issue.record("\(funcName) not found")
+                continue
+            }
+            let count = body.components(separatedBy: "startKeyListener()").count - 1
+            #expect(count == 1,
+                    "Must call startKeyListener() exactly once in \(funcName), found \(count)")
+        }
     }
 
-    /// The failure branch must still call stopKeyListener for safety.
+    /// The failure branch must call stopKeyListener to clean up the eagerly-started listener.
     @Test func testFailureBranchCallsStopKeyListener() throws {
         let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        let body = extractFunctionBody(named: "startGPTRecording", from: source)
-        guard let body else {
-            Issue.record("startRecording not found")
-            return
-        }
 
-        // Find the "} else {" that follows "if started" specifically
-        guard let ifStartedRange = body.range(of: "if started") else {
-            Issue.record("'if started' not found")
-            return
+        for funcName in ["startGPTRecording", "startDeepgramRecording"] {
+            let body = extractFunctionBody(named: funcName, from: source)
+            guard let body else {
+                Issue.record("\(funcName) not found")
+                continue
+            }
+            #expect(body.contains("stopKeyListener()"),
+                    "\(funcName) failure branch must call stopKeyListener() to clean up")
         }
-        let afterIfStarted = String(body[ifStartedRange.lowerBound...])
-        guard let elseRange = afterIfStarted.range(of: "} else {") else {
-            Issue.record("else block after 'if started' not found")
-            return
-        }
-        let elseBody = String(afterIfStarted[elseRange.lowerBound...].prefix(500))
-        #expect(elseBody.contains("stopKeyListener()"),
-                "Failure branch must call stopKeyListener() for safety")
     }
 }
 
@@ -6947,5 +6927,19 @@ struct LiveStreamingSourceTests {
     @Test func testCallbackSignatureIncludesFullText() throws {
         let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
         #expect(source.contains("fullText: String"), "onTextUpdate must include fullText parameter")
+    }
+
+    @Test func testProviderMenuShowsMode() throws {
+        let source = try readProjectSource("Sources/App/AppDelegate.swift")
+        #expect(source.contains("Batch"), "GPT provider menu must indicate 'Batch' mode")
+        #expect(source.contains("Real-time"), "Deepgram provider menu must indicate 'Real-time' mode")
+    }
+
+    @Test func testAudioSubsystemPreWarmed() throws {
+        let source = try readProjectSource("Sources/App/AppDelegate.swift")
+        #expect(source.contains("Audio subsystem pre-warmed") || source.contains("pre-warm"),
+                "App launch must pre-warm audio subsystem to avoid first-recording delay")
+        #expect(source.contains("engine.inputNode"),
+                "Pre-warm must access inputNode to trigger CoreAudio initialization")
     }
 }
