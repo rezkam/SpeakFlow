@@ -42,8 +42,8 @@ func makeController() -> (LiveStreamingController, TestCallbacks) {
     let controller = LiveStreamingController()
     let cb = TestCallbacks()
 
-    controller.onTextUpdate = { text, replacingChars, isFinal in
-        cb.updates.append(TextUpdate(text: text, replacingChars: replacingChars, isFinal: isFinal))
+    controller.onTextUpdate = { text, replacingChars, isFinal, fullText in
+        cb.updates.append(TextUpdate(text: text, replacingChars: replacingChars, isFinal: isFinal, fullText: fullText))
     }
     controller.onUtteranceEnd = { cb.utteranceEnds += 1 }
     controller.onSpeechStarted = { cb.speechStarts += 1 }
@@ -59,6 +59,7 @@ final class TestCallbacks {
         let text: String
         let replacingChars: Int
         let isFinal: Bool
+        let fullText: String
     }
     var updates: [TextUpdateEntry] = []
     var utteranceEnds = 0
@@ -68,7 +69,7 @@ final class TestCallbacks {
 
     var finals: [TextUpdateEntry] { updates.filter { $0.isFinal } }
     var interims: [TextUpdateEntry] { updates.filter { !$0.isFinal } }
-    var allText: String { finals.map(\.text).joined(separator: " ") }
+    var allText: String { finals.map(\.fullText).joined(separator: " ") }
 }
 
 typealias TextUpdate = TestCallbacks.TextUpdateEntry
