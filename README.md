@@ -1,11 +1,22 @@
-# SpeakFlow
+<p align="center">
+  <img src="docs/logo.png" width="128" height="128" alt="SpeakFlow">
+</p>
 
-> **You speak 3× faster than you type. SpeakFlow is a keyboard you talk to.**
+<h1 align="center">SpeakFlow</h1>
 
-A macOS menu bar app that turns your voice into text — anywhere. Press a hotkey, speak naturally, and your words are transcribed and typed into whatever app you're using.
+<p align="center">
+  <strong>You speak 3x faster than you type. SpeakFlow is a keyboard you talk to.</strong>
+</p>
 
-![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
-![Swift 6](https://img.shields.io/badge/Swift-6-orange)
+<p align="center">
+  A macOS menu bar app that turns your voice into text — anywhere.<br>
+  Press a hotkey, speak naturally, and your words appear in whatever app you're using.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-15%2B-blue" alt="macOS 15+">
+  <img src="https://img.shields.io/badge/Swift-6-orange" alt="Swift 6">
+</p>
 
 ## Two Transcription Modes
 
@@ -16,7 +27,7 @@ A macOS menu bar app that turns your voice into text — anywhere. Press a hotke
 | **Best for** | Live dictation, long-form writing, conversations | Short notes, high-accuracy single takes |
 | **Requires** | Deepgram API key | ChatGPT login |
 
-Switch between modes from the **Transcription Provider** submenu in the menu bar.
+Switch between modes from the **Transcription** tab in the settings window.
 
 ### Deepgram API Key
 
@@ -24,7 +35,7 @@ Deepgram offers a **free $200 credit** — no credit card required.
 
 1. Sign up at [deepgram.com/pricing](https://deepgram.com/pricing)
 2. Create an API key in the Deepgram console
-3. Paste it into SpeakFlow via the **Accounts → Deepgram API Key** menu
+3. Paste it into SpeakFlow via the **Accounts** tab in settings
 
 ## Features
 

@@ -14,4 +14,6 @@ public extension Logger {
     static let hotkey = Logger(subsystem: subsystem, category: "hotkey")
     /// General app lifecycle
     static let app = Logger(subsystem: subsystem, category: "app")
+    /// Authentication and OAuth
+    static let auth = Logger(subsystem: subsystem, category: "auth")
 }

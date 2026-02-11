@@ -467,8 +467,3 @@ public enum AuthError: LocalizedError {
     }
 }
 
-// MARK: - Logger Extension
-
-extension Logger {
-    static let auth = Logger(subsystem: "app.monodo.speakflow", category: "auth")
-}
