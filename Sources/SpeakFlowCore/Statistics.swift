@@ -1,97 +1,95 @@
 import Foundation
 import OSLog
 
-/// Tracks and persists usage statistics for the app
+/// Tracks and persists usage statistics as a JSON file in `~/.speakflow/`.
+///
+/// Uses `Codable` for clean serialization, independent of UserDefaults and
+/// bundle identifiers. The file is written atomically on every mutation to
+/// avoid data loss.
 @MainActor
 public final class Statistics {
     public static let shared = Statistics()
 
-    // MARK: - UserDefaults Keys
+    // MARK: - Persisted Data
 
-    private enum Keys {
-        static let totalSecondsTranscribed = "stats.totalSecondsTranscribed"
-        static let totalCharacters = "stats.totalCharacters"
-        static let totalWords = "stats.totalWords"
-        static let totalApiCalls = "stats.totalApiCalls"
+    private struct Data: Codable {
+        var totalSecondsTranscribed: Double = 0
+        var totalCharacters: Int = 0
+        var totalWords: Int = 0
+        var totalApiCalls: Int = 0
     }
 
-    // MARK: - Stored Properties
+    private var data: Data
 
-    private(set) var totalSecondsTranscribed: Double {
-        get { UserDefaults.standard.double(forKey: Keys.totalSecondsTranscribed) }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.totalSecondsTranscribed) }
+    private static let storageURL: URL = {
+        let base: URL
+        // Detect test runner: main bundle path contains .xctest, or xctest is in args
+        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
+            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
+        if isTestRun {
+            base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakflow-test-\(ProcessInfo.processInfo.processIdentifier)")
+        } else {
+            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".speakflow")
+        }
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("statistics.json")
+    }()
+
+    private init() {
+        if let fileData = try? Foundation.Data(contentsOf: Self.storageURL),
+           let decoded = try? JSONDecoder().decode(Data.self, from: fileData) {
+            data = decoded
+        } else {
+            data = Data()
+        }
     }
 
-    private(set) var totalCharacters: Int {
-        get { UserDefaults.standard.integer(forKey: Keys.totalCharacters) }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.totalCharacters) }
-    }
+    // MARK: - Public Counters
 
-    private(set) var totalWords: Int {
-        get { UserDefaults.standard.integer(forKey: Keys.totalWords) }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.totalWords) }
-    }
+    public var totalSecondsTranscribed: Double { data.totalSecondsTranscribed }
+    public var totalCharacters: Int { data.totalCharacters }
+    public var totalWords: Int { data.totalWords }
+    public var totalApiCalls: Int { data.totalApiCalls }
 
-    private(set) var totalApiCalls: Int {
-        get { UserDefaults.standard.integer(forKey: Keys.totalApiCalls) }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.totalApiCalls) }
-    }
+    /// Convenience aliases for automation/testing.
+    public var apiCallCount: Int { data.totalApiCalls }
+    public var wordCount: Int { data.totalWords }
 
-    private init() {}
+    // MARK: - Recording
 
-    // MARK: - Recording Methods
-
-    /// Record a completed transcription
     public func recordTranscription(text: String, audioDurationSeconds: Double) {
-        totalSecondsTranscribed += audioDurationSeconds
-        totalCharacters += text.count
+        data.totalSecondsTranscribed += audioDurationSeconds
+        data.totalCharacters += text.count
 
-        // Count words by splitting on whitespace
         let words = text.split(whereSeparator: { $0.isWhitespace })
-        totalWords += words.count
+        data.totalWords += words.count
+        save()
 
         Logger.app.debug("Stats updated: +\(String(format: "%.1f", audioDurationSeconds))s, +\(text.count) chars, +\(words.count) words")
     }
 
-    /// Record an API call (success or failure)
     public func recordApiCall() {
-        totalApiCalls += 1
+        data.totalApiCalls += 1
+        save()
     }
 
-    /// Reset all statistics
     public func reset() {
-        totalSecondsTranscribed = 0
-        totalCharacters = 0
-        totalWords = 0
-        totalApiCalls = 0
+        data = Data()
+        save()
         Logger.app.info("Statistics reset")
     }
 
     // MARK: - Formatting
 
-    // Explicit @MainActor — DateComponentsFormatter is not Sendable; even though the
-    // enclosing @MainActor class isolates static members in Swift 6, being explicit
-    // makes the intent clear and prevents accidental nonisolated access.
     @MainActor private static let durationFormatter: DateComponentsFormatter = {
         let formatter = DateComponentsFormatter()
         formatter.allowedUnits = [.day, .hour, .minute, .second]
-        formatter.unitsStyle = .full
-        formatter.maximumUnitCount = 4
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 3
         formatter.zeroFormattingBehavior = .dropAll
         return formatter
     }()
-
-    /// Format duration using locale-aware DateComponentsFormatter.
-    var formattedDuration: String {
-        let totalSeconds = max(totalSecondsTranscribed, 0)
-
-        if totalSeconds == 0 {
-            return String(localized: "0 seconds")
-        }
-
-        return Self.durationFormatter.string(from: totalSeconds)
-            ?? String(localized: "0 seconds")
-    }
 
     @MainActor private static let decimalFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -103,20 +101,15 @@ public final class Statistics {
         Self.decimalFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
-    /// Format character count with thousands separators
-    var formattedCharacters: String {
-        formatCount(totalCharacters)
+    public var formattedDuration: String {
+        let seconds = max(data.totalSecondsTranscribed, 0)
+        if seconds == 0 { return String(localized: "0s") }
+        return Self.durationFormatter.string(from: seconds) ?? String(localized: "0s")
     }
 
-    /// Format word count with thousands separators
-    var formattedWords: String {
-        formatCount(totalWords)
-    }
-
-    /// Format API call count with thousands separators
-    var formattedApiCalls: String {
-        formatCount(totalApiCalls)
-    }
+    public var formattedCharacters: String { formatCount(data.totalCharacters) }
+    public var formattedWords: String { formatCount(data.totalWords) }
+    public var formattedApiCalls: String { formatCount(data.totalApiCalls) }
 
 #if DEBUG
     static var _testFormatterIdentity: ObjectIdentifier {
@@ -128,19 +121,14 @@ public final class Statistics {
     }
 #endif
 
-    /// Full statistics summary for display
-    public var summary: String {
-        """
-        📊 \(String(localized: "Transcription Statistics"))
+    // MARK: - Persistence
 
-        ⏱ \(String(localized: "Total Duration")): \(formattedDuration)
-        📝 \(String(localized: "Characters")): \(formattedCharacters)
-        💬 \(String(localized: "Words")): \(formattedWords)
-        🌐 \(String(localized: "API Calls")): \(formattedApiCalls)
-        """
+    private func save() {
+        do {
+            let encoded = try JSONEncoder().encode(data)
+            try encoded.write(to: Self.storageURL, options: .atomic)
+        } catch {
+            Logger.app.error("Failed to save statistics: \(error.localizedDescription)")
+        }
     }
-
-    /// Raw counters exposed for automation/testing.
-    public var apiCallCount: Int { totalApiCalls }
-    public var wordCount: Int { totalWords }
 }

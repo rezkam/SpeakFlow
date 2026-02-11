@@ -112,7 +112,10 @@ public enum ChunkDuration: Double, CaseIterable, Sendable {
 
 // MARK: - User Settings
 
-/// User-configurable settings stored in UserDefaults
+/// User-configurable settings stored in UserDefaults.
+///
+/// In test runs, uses an isolated UserDefaults suite to avoid polluting the
+/// user's actual settings. Detection mirrors the `Statistics` pattern.
 @MainActor
 public final class Settings {
     public static let shared = Settings()
@@ -127,16 +130,28 @@ public final class Settings {
         public static let minSpeechRatio = "settings.minSpeechRatio"
     }
 
-    private init() {}
+    private let defaults: UserDefaults
+
+    private init() {
+        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
+            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
+        if isTestRun {
+            let suiteName = "app.monodo.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
+            defaults = UserDefaults(suiteName: suiteName) ?? .standard
+            defaults.removePersistentDomain(forName: suiteName)
+        } else {
+            defaults = .standard
+        }
+    }
 
     /// Maximum chunk duration before forced send
     public var chunkDuration: ChunkDuration {
         get {
-            let rawValue = UserDefaults.standard.double(forKey: Keys.chunkDuration)
+            let rawValue = defaults.double(forKey: Keys.chunkDuration)
             return ChunkDuration(rawValue: rawValue) ?? .minute1
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: Keys.chunkDuration)
+            defaults.set(newValue.rawValue, forKey: Keys.chunkDuration)
         }
     }
 
@@ -149,13 +164,13 @@ public final class Settings {
             // Default to true — skip purely-silent chunks to save API costs.
             // Final chunks are protected: if speech occurred in the session,
             // stop() always sends regardless of this flag.
-            if UserDefaults.standard.object(forKey: Keys.skipSilentChunks) == nil {
+            if defaults.object(forKey: Keys.skipSilentChunks) == nil {
                 return true
             }
-            return UserDefaults.standard.bool(forKey: Keys.skipSilentChunks)
+            return defaults.bool(forKey: Keys.skipSilentChunks)
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: Keys.skipSilentChunks)
+            defaults.set(newValue, forKey: Keys.skipSilentChunks)
         }
     }
 
@@ -164,13 +179,13 @@ public final class Settings {
     /// Whether Voice Activity Detection is enabled
     public var vadEnabled: Bool {
         get {
-            if UserDefaults.standard.object(forKey: Keys.vadEnabled) == nil {
+            if defaults.object(forKey: Keys.vadEnabled) == nil {
                 return true
             }
-            return UserDefaults.standard.bool(forKey: Keys.vadEnabled)
+            return defaults.bool(forKey: Keys.vadEnabled)
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: Keys.vadEnabled)
+            defaults.set(newValue, forKey: Keys.vadEnabled)
         }
     }
 
@@ -178,11 +193,11 @@ public final class Settings {
     public var vadThreshold: Float {
         get {
             // Only use stored value if the key actually exists (user explicitly changed it)
-            if UserDefaults.standard.object(forKey: Keys.vadThreshold) != nil {
-                let value = UserDefaults.standard.float(forKey: Keys.vadThreshold)
+            if defaults.object(forKey: Keys.vadThreshold) != nil {
+                let value = defaults.float(forKey: Keys.vadThreshold)
                 // Migrate: if user had old defaults (0.5 or 0.3), use new default (0.15)
                 if value == 0.5 || value == 0.3 {
-                    UserDefaults.standard.removeObject(forKey: Keys.vadThreshold)
+                    defaults.removeObject(forKey: Keys.vadThreshold)
                     return Config.vadThreshold
                 }
                 return value > 0 ? value : Config.vadThreshold
@@ -190,7 +205,7 @@ public final class Settings {
             return Config.vadThreshold
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: Keys.vadThreshold)
+            defaults.set(newValue, forKey: Keys.vadThreshold)
         }
     }
 
@@ -199,13 +214,13 @@ public final class Settings {
     /// Whether auto-end session is enabled
     public var autoEndEnabled: Bool {
         get {
-            if UserDefaults.standard.object(forKey: Keys.autoEndEnabled) == nil {
+            if defaults.object(forKey: Keys.autoEndEnabled) == nil {
                 return true
             }
-            return UserDefaults.standard.bool(forKey: Keys.autoEndEnabled)
+            return defaults.bool(forKey: Keys.autoEndEnabled)
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: Keys.autoEndEnabled)
+            defaults.set(newValue, forKey: Keys.autoEndEnabled)
         }
     }
 
@@ -213,14 +228,14 @@ public final class Settings {
     /// Clamped to minimum 3.0s to prevent accidental premature auto-end from stale UserDefaults
     public var autoEndSilenceDuration: Double {
         get {
-            let value = UserDefaults.standard.double(forKey: Keys.autoEndSilenceDuration)
+            let value = defaults.double(forKey: Keys.autoEndSilenceDuration)
             if value > 0 {
                 return max(value, 3.0)  // Safety clamp: never less than 3 seconds
             }
             return Config.autoEndSilenceDuration
         }
         set {
-            UserDefaults.standard.set(max(newValue, 3.0), forKey: Keys.autoEndSilenceDuration)
+            defaults.set(max(newValue, 3.0), forKey: Keys.autoEndSilenceDuration)
         }
     }
 
@@ -229,12 +244,80 @@ public final class Settings {
     /// Default: 0.03 (3%) - lower values catch quieter speech but may include noise
     public var minSpeechRatio: Float {
         get {
-            let value = UserDefaults.standard.float(forKey: Keys.minSpeechRatio)
+            let value = defaults.float(forKey: Keys.minSpeechRatio)
             return value > 0 ? value : Config.minSpeechRatio
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: Keys.minSpeechRatio)
+            defaults.set(newValue, forKey: Keys.minSpeechRatio)
         }
+    }
+
+    // MARK: - Streaming Auto-End
+
+    /// Whether auto-end is enabled for streaming mode (disabled by default)
+    public var streamingAutoEndEnabled: Bool {
+        get {
+            if defaults.object(forKey: "settings.streaming.autoEndEnabled") == nil {
+                return false
+            }
+            return defaults.bool(forKey: "settings.streaming.autoEndEnabled")
+        }
+        set {
+            defaults.set(newValue, forKey: "settings.streaming.autoEndEnabled")
+        }
+    }
+
+    // MARK: - Deepgram Streaming Settings
+
+    private enum DeepgramKeys {
+        static let interimResults = "settings.deepgram.interimResults"
+        static let smartFormat = "settings.deepgram.smartFormat"
+        static let endpointingMs = "settings.deepgram.endpointingMs"
+        static let model = "settings.deepgram.model"
+        static let language = "settings.deepgram.language"
+    }
+
+    /// Show partial transcription results as you speak
+    public var deepgramInterimResults: Bool {
+        get {
+            if defaults.object(forKey: DeepgramKeys.interimResults) == nil {
+                return true
+            }
+            return defaults.bool(forKey: DeepgramKeys.interimResults)
+        }
+        set { defaults.set(newValue, forKey: DeepgramKeys.interimResults) }
+    }
+
+    /// Automatic punctuation and capitalization
+    public var deepgramSmartFormat: Bool {
+        get {
+            if defaults.object(forKey: DeepgramKeys.smartFormat) == nil {
+                return true
+            }
+            return defaults.bool(forKey: DeepgramKeys.smartFormat)
+        }
+        set { defaults.set(newValue, forKey: DeepgramKeys.smartFormat) }
+    }
+
+    /// Endpointing threshold in milliseconds (how quickly utterance boundaries are detected)
+    public var deepgramEndpointingMs: Int {
+        get {
+            let val = defaults.integer(forKey: DeepgramKeys.endpointingMs)
+            return val > 0 ? val : 300
+        }
+        set { defaults.set(max(newValue, 100), forKey: DeepgramKeys.endpointingMs) }
+    }
+
+    /// Deepgram transcription model
+    public var deepgramModel: String {
+        get { defaults.string(forKey: DeepgramKeys.model) ?? "nova-3" }
+        set { defaults.set(newValue, forKey: DeepgramKeys.model) }
+    }
+
+    /// Deepgram transcription language
+    public var deepgramLanguage: String {
+        get { defaults.string(forKey: DeepgramKeys.language) ?? "en-US" }
+        set { defaults.set(newValue, forKey: DeepgramKeys.language) }
     }
 
     // MARK: - Computed Properties for Audio Processing
