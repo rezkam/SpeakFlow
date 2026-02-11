@@ -76,13 +76,19 @@ public actor VADModelCache {
             }
         }
 
-        // Cold path — load on demand
+        // Cold path — load on demand, coalescing concurrent callers via warmUpTask
         logger.warning("VAD model loaded on demand (no warm-up)")
-        let config = VadConfig(defaultThreshold: threshold)
-        let manager = try await VadManager(config: config)
-        cachedManager = manager
-        cachedThreshold = threshold
-        return manager
+        let task = Task {
+            let config = VadConfig(defaultThreshold: threshold)
+            let manager = try await VadManager(config: config)
+            self.cachedManager = manager
+            self.cachedThreshold = threshold
+            self.warmUpTask = nil
+            return manager
+        }
+        warmUpTask = task
+        warmUpThreshold = threshold
+        return try await task.value
     }
 }
 
