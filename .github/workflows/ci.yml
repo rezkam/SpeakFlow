@@ -12,14 +12,24 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            xcode: '26.2'
+          - os: macos-26
+            xcode: '26.0'
+
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    name: ${{ matrix.os }} (Xcode ${{ matrix.xcode }})
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.2.app || sudo xcode-select -s /Applications/Xcode.app
+      - name: Select Xcode ${{ matrix.xcode }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app || sudo xcode-select -s /Applications/Xcode.app
 
       - name: Resolve dependencies
         run: swift package resolve
