@@ -3536,7 +3536,7 @@ struct VADModelCacheThresholdTests {
             Issue.record("getManager not found")
             return
         }
-        let body = String(source[getManagerRange.lowerBound...].prefix(1200))
+        let body = String(source[getManagerRange.lowerBound...].prefix(1500))
 
         // The on-demand (cold) path must also store the threshold
         #expect(body.contains("cachedThreshold = threshold"),
