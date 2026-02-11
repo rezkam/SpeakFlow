@@ -96,7 +96,7 @@ private final class AudioSampleQueue: @unchecked Sendable {
 /// Internal for testing.
 ///
 /// Uses a class-based flag to avoid capturing a `var` in a `@Sendable` closure,
-/// which is prohibited in Swift 6.2 strict concurrency mode.
+/// which is prohibited in Swift 6 strict concurrency mode.
 func createOneShotInputBlock(buffer: AVAudioPCMBuffer) -> AVAudioConverterInputBlock {
     // Wraps both the one-shot flag and the non-Sendable AVAudioPCMBuffer
     // in a single @unchecked Sendable container. This is safe because the
