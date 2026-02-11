@@ -62,9 +62,9 @@ public actor TranscriptionService {
     // MARK: - Private Methods
 
     /// Retry helper with exponential backoff and jitter
-    private func withRetry<T>(
+    private func withRetry<T: Sendable>(
         maxAttempts: Int,
-        operation: @escaping () async throws -> T
+        operation: @Sendable @escaping () async throws -> T
     ) async throws -> T {
         var lastError: Error?
 
