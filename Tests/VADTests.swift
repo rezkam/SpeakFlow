@@ -1132,7 +1132,13 @@ struct HotkeyListenerCleanupRegressionTests {
             _ = listener // Silence "never read" warning
             listener = nil
 
+            #if compiler(>=6.2)
+            // Isolated deinit calls stop() on deallocation
             #expect(stopCalls == 1)
+            #else
+            // Swift 6.1 has no isolated deinit — cleanup via explicit stop() only
+            #expect(stopCalls == 0)
+            #endif
         }
     }
 
@@ -1146,7 +1152,13 @@ struct HotkeyListenerCleanupRegressionTests {
             listener?.stop()
             listener = nil
 
+            #if compiler(>=6.2)
+            // Manual stop() + isolated deinit stop()
             #expect(stopCalls == 2)
+            #else
+            // Swift 6.1: only the explicit stop() call
+            #expect(stopCalls == 1)
+            #endif
         }
     }
 
@@ -1154,6 +1166,7 @@ struct HotkeyListenerCleanupRegressionTests {
         let source = try readProjectSource("Sources/SpeakFlowCore/Hotkey/HotkeyListener.swift")
 
         #expect(source.contains("@MainActor deinit"))
+        #expect(source.contains("#if compiler(>=6.2)"))
         #expect(source.contains("stop()"))
     }
 }
