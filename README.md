@@ -37,6 +37,38 @@ Deepgram offers a **free $200 credit** — no credit card required.
 2. Create an API key in the Deepgram console
 3. Paste it into SpeakFlow via the **Accounts** tab in settings
 
+## Installation
+
+### From DMG (recommended)
+
+1. Download `SpeakFlow.dmg` from the [Releases](https://github.com/rezkam/SpeakFlow/releases) page
+2. Open the DMG and drag SpeakFlow to Applications
+3. Launch SpeakFlow — the settings window opens automatically
+4. Grant **Accessibility** and **Microphone** permissions from the General tab
+5. Log in to ChatGPT or add a Deepgram API key from the Accounts tab
+
+### Build from Source
+
+```bash
+git clone https://github.com/rezkam/SpeakFlow.git
+cd SpeakFlow
+swift build -c release --product SpeakFlow
+
+# Or build the full .app bundle + DMG:
+bash scripts/build-release.sh 0.1.0
+```
+
+Requires **macOS 15+** and **Xcode 26+** (Swift 6.2).
+
+## Permissions
+
+SpeakFlow needs two permissions, both granted from the **General** tab in settings:
+
+- **Accessibility** — required to type transcribed text into any app. Clicking "Grant Access" opens System Settings where you toggle SpeakFlow on.
+- **Microphone** — required to hear your voice. Clicking "Grant Access" shows the macOS permission dialog.
+
+Permissions are never requested automatically on launch — you choose when to grant them.
+
 ## Features
 
 - **Real-time streaming transcription** — words appear as you speak with Deepgram Nova-3; interim results refine in-place using smart diff (only changed characters are retyped, no flickering)
