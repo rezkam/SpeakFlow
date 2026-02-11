@@ -2,7 +2,7 @@
 set -e
 
 # SpeakFlow Release Build Script
-# Creates a ready-to-use app bundle
+# Creates a signed .app bundle and optional DMG installer
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -12,12 +12,12 @@ VERSION="${1:-1.0.0}"
 
 cd "$PROJECT_DIR"
 
-echo "🔨 Building $APP_NAME v$VERSION..."
+echo "Building $APP_NAME v$VERSION..."
 
-# Build release binary (only main app, not test runner)
-swift build -c release --product SpeakFlow
+# Build release binary
+swift build -c release --product SpeakFlow 2>&1 | grep -v "Found unhandled resource"
 
-# Create app bundle
+# Create app bundle structure
 rm -rf "$APP_NAME.app"
 mkdir -p "$APP_NAME.app/Contents/MacOS"
 mkdir -p "$APP_NAME.app/Contents/Resources"
@@ -25,14 +25,11 @@ mkdir -p "$APP_NAME.app/Contents/Resources"
 # Copy binary
 cp ".build/release/$APP_NAME" "$APP_NAME.app/Contents/MacOS/"
 
-# Copy resources
+# Copy SPM resource bundle (contains DockIcon, MenuBarIcon, AppIcon via Bundle.module)
 cp -r ".build/release/${APP_NAME}_${APP_NAME}.bundle" "$APP_NAME.app/Contents/Resources/" 2>/dev/null || true
 
-# Copy menu bar icon to main Resources (needed for Bundle.main access)
-cp Sources/Resources/AppIcon.png "$APP_NAME.app/Contents/Resources/"
-
-# Create icon
-echo "🎨 Creating app icon..."
+# Generate .icns from the high-res logo
+echo "Creating app icon..."
 mkdir -p AppIcon.iconset
 sips -z 16 16 Sources/Resources/AppIcon.png --out AppIcon.iconset/icon_16x16.png 2>/dev/null
 sips -z 32 32 Sources/Resources/AppIcon.png --out AppIcon.iconset/icon_16x16@2x.png 2>/dev/null
@@ -81,13 +78,13 @@ cat > "$APP_NAME.app/Contents/Info.plist" << EOF
 </plist>
 EOF
 
-# Sign the app (ad-hoc by default, or with certificate if available)
-echo "🔏 Signing app..."
+# Ad-hoc sign the app
+echo "Signing app..."
 codesign --force --deep --sign - "$APP_NAME.app"
 
-# Create DMG if create-dmg is available, otherwise skip
+# Create DMG if create-dmg is available
 if command -v create-dmg &> /dev/null; then
-    echo "📦 Creating DMG..."
+    echo "Creating DMG..."
     rm -f "$APP_NAME.dmg"
     create-dmg \
         --volname "$APP_NAME" \
@@ -101,25 +98,19 @@ if command -v create-dmg &> /dev/null; then
         "$APP_NAME.dmg" \
         "$APP_NAME.app"
     echo ""
-    echo "✅ Build complete!"
-    echo "   App: $APP_NAME.app"
-    echo "   DMG: $APP_NAME.dmg"
+    echo "Done! App: $APP_NAME.app | DMG: $APP_NAME.dmg"
     ls -lh "$APP_NAME.dmg"
 else
     echo ""
-    echo "✅ Build complete!"
-    echo "   App: $APP_NAME.app"
+    echo "Done! App: $APP_NAME.app"
     echo ""
-    echo "To install, run:"
-    echo "   cp -r $APP_NAME.app /Applications/"
+    echo "To install: cp -r $APP_NAME.app /Applications/"
+    echo "To create a DMG: brew install create-dmg && bash $0 $VERSION"
 fi
 
 echo ""
-echo "📋 Next steps:"
-echo "   1. Move app to /Applications (or run from current location)"
-echo "   2. Launch the app"
-echo "   3. Grant Microphone permission when prompted"
-echo "   4. Grant Accessibility permission in System Settings"
-echo "   5. Login to ChatGPT via the menu bar icon"
-echo ""
-echo "See README.md for detailed permission setup instructions."
+echo "Next steps:"
+echo "  1. Drag SpeakFlow.app to /Applications"
+echo "  2. Launch SpeakFlow — settings window opens automatically"
+echo "  3. Grant Accessibility and Microphone from the General tab"
+echo "  4. Add a transcription provider from the Accounts tab"

@@ -123,7 +123,7 @@ final class AppState {
         currentHotkey = HotkeySettings.shared.currentHotkey
         chunkDuration = Settings.shared.chunkDuration
         skipSilentChunks = Settings.shared.skipSilentChunks
-        launchAtLogin = (try? SMAppService.mainApp.status == .enabled) ?? false
+        launchAtLogin = (SMAppService.mainApp.status == .enabled)
         vadEnabled = Settings.shared.vadEnabled
         vadThreshold = Settings.shared.vadThreshold
         autoEndEnabled = Settings.shared.autoEndEnabled
