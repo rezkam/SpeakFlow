@@ -69,6 +69,17 @@ SpeakFlow needs two permissions, both granted from the **General** tab in settin
 
 Permissions are never requested automatically on launch — you choose when to grant them.
 
+### Troubleshooting Accessibility
+
+SpeakFlow is self-signed (ad-hoc), so macOS ties the accessibility trust to the exact binary. If you rebuild the app or install a new version and accessibility stops working:
+
+1. Open **System Settings → Privacy & Security → Accessibility**
+2. Remove the old SpeakFlow entry (select it and click the minus button)
+3. Re-add `SpeakFlow.app` from `/Applications` (click the plus button)
+4. Restart SpeakFlow
+
+This is required because macOS revokes accessibility trust when the binary changes for apps without an Apple Developer ID signature.
+
 ## Features
 
 - **Real-time streaming transcription** — words appear as you speak with Deepgram Nova-3; interim results refine in-place using smart diff (only changed characters are retyped, no flickering)

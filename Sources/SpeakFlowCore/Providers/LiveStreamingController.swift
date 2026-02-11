@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 import OSLog
 
@@ -140,7 +140,7 @@ public final class LiveStreamingController {
                 guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
 
                 var error: NSError?
-                var consumed = false
+                nonisolated(unsafe) var consumed = false
                 converter.convert(to: convertedBuffer, error: &error) { _, status in
                     if consumed {
                         status.pointee = .noDataNow
@@ -177,7 +177,7 @@ public final class LiveStreamingController {
             // Start listening to events
             eventTask = Task { [weak self] in
                 for await event in streamSession.events {
-                    await self?.handleEvent(event)
+                    self?.handleEvent(event)
                 }
             }
 

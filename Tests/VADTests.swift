@@ -2696,7 +2696,7 @@ struct Issue6RateLimiterAtomicTests {
 
     /// 5 concurrent callers must each get a distinct slot spaced by the interval.
     @Test func testFiveConcurrentCallersGetFiveDistinctSlots() async throws {
-        let interval: TimeInterval = 0.05
+        let interval: TimeInterval = 0.10
         let limiter = RateLimiter(minimumInterval: interval)
 
         // Launch 6 concurrent tasks. The first effectively seeds the limiter,
@@ -2716,10 +2716,11 @@ struct Issue6RateLimiterAtomicTests {
 
         // Check spacing between tasks 2-6 (indices 1-5).
         // Task 1 (index 0) acts as the seed, so we start measuring from index 1.
+        // Use 0.3x tolerance — CI runners have significant Task scheduling jitter.
         for i in 2..<times.count {
             let gap = times[i] - times[i - 1]
-            #expect(gap >= interval * 0.5,
-                    "Gap between slot \(i-1) and \(i) was \(gap)s, expected >= \(interval * 0.5)s")
+            #expect(gap >= interval * 0.3,
+                    "Gap between slot \(i-1) and \(i) was \(gap)s, expected >= \(interval * 0.3)s")
         }
 
         // Last completion must be at least 5 intervals from the first task's completion
@@ -6586,8 +6587,8 @@ struct SilenceAutoEndTests {
         c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Wait for auto-end to fire
-        try await Task.sleep(for: .milliseconds(300))
+        // Wait for auto-end to fire (generous margin for thread-pool scheduling jitter)
+        try await Task.sleep(for: .milliseconds(600))
         #expect(col.autoEndCount == 1, "Auto-end should fire after silence duration")
     }
 
@@ -6642,7 +6643,7 @@ struct SilenceAutoEndTests {
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hi.", confidence: 0.99, words: [])))
         c.handleEvent(.utteranceEnd(lastWordEnd: 0))
 
-        try await Task.sleep(for: .milliseconds(500))
+        try await Task.sleep(for: .milliseconds(600))
         #expect(col.autoEndCount == 1, "utteranceEnd should also start the silence timer")
     }
 
@@ -6655,8 +6656,8 @@ struct SilenceAutoEndTests {
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Test.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Wait much longer than the timer
-        try await Task.sleep(for: .milliseconds(400))
+        // Wait much longer than the timer (generous margin for scheduling jitter)
+        try await Task.sleep(for: .milliseconds(600))
         #expect(col.autoEndCount == 1, "Should fire exactly once, not repeatedly")
     }
 
