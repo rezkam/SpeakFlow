@@ -50,8 +50,7 @@ let package = Package(
         .testTarget(
             name: "SpeakFlowCoreTests",
             dependencies: ["SpeakFlowCore"],
-            path: "Tests",
-            sources: ["VADTests.swift"]
+            path: "Tests"
         ),
     ]
 )
