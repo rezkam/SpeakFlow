@@ -17,7 +17,7 @@ jobs:
       matrix:
         include:
           - os: macos-15
-            xcode: '26.2'
+            xcode: '16.4'
           - os: macos-26
             xcode: '26.0'
 
@@ -27,9 +27,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Select Xcode ${{ matrix.xcode }}
-        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app || sudo xcode-select -s /Applications/Xcode.app
 
       - name: Resolve dependencies
         run: swift package resolve

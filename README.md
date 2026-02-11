@@ -58,7 +58,7 @@ swift build -c release --product SpeakFlow
 bash scripts/build-release.sh 0.1.0
 ```
 
-Requires **macOS 15+** and **Xcode 26+** (Swift 6.2).
+Requires **macOS 15+** and **Swift 6.1+** (Xcode 16.4 or later).
 
 ## Permissions
 
