@@ -12,7 +12,7 @@ import SpeakFlowCore
 /// only registering it in the registry; AppState adapts automatically.
 @MainActor
 @Observable
-final class AppState {
+final class AppState: BannerPresenting {
     static let shared = AppState()
 
     // MARK: - Permissions

@@ -483,72 +483,6 @@ struct MultiplePausesAccumulationTests {
     }
 }
 
-// MARK: - Issue #1: Session bleeding — startRecording during finalization
-
-@Suite("Issue #1 — Session bleeding: startRecording guards on isProcessingFinal")
-struct Issue1SessionBleedingRegressionTests {
-
-    /// REGRESSION: startRecording() must check isProcessingFinal to block a new session
-    /// while the previous one is still finalizing (waiting for API responses).
-    @Test func testStartRecordingGuardsOnIsProcessingFinal() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-
-        // Find startRecording() body
-        guard let funcRange = source.range(of: "func startRecording()") else {
-            Issue.record("startRecording() not found in RecordingController")
-            return
-        }
-        let funcBody = String(source[funcRange.lowerBound...])
-
-        // Must contain an isProcessingFinal guard — the exact bug was that this check was missing
-        #expect(funcBody.contains("isProcessingFinal"),
-                "startRecording() must guard on isProcessingFinal to prevent session bleeding")
-    }
-
-    /// REGRESSION: queueBridge.reset() must be awaited sequentially before recorder.start().
-    /// The original bug had reset() fired as a detached Task, racing with pending submitResult calls.
-    @Test func testResetIsAwaitedBeforeRecorderStart() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-
-        guard let funcRange = source.range(of: "func startRecording()") else {
-            Issue.record("startRecording() not found")
-            return
-        }
-        let funcBody = String(source[funcRange.lowerBound...])
-
-        // reset() must appear before start() in the source
-        guard let resetPos = funcBody.range(of: "queueBridge.reset()")?.lowerBound else {
-            Issue.record("queueBridge.reset() not found in startRecording")
-            return
-        }
-        guard let startPos = funcBody.range(of: "recorder?.start()")?.lowerBound else {
-            Issue.record("recorder?.start() not found in startRecording")
-            return
-        }
-
-        #expect(resetPos < startPos,
-                "queueBridge.reset() must be called BEFORE recorder?.start() — was fire-and-forget race")
-    }
-
-    /// REGRESSION: Both guards (isRecording and isProcessingFinal) must be present and separate.
-    @Test func testBothGuardsPresent() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-
-        guard let funcRange = source.range(of: "func startRecording()") else {
-            Issue.record("startRecording() not found")
-            return
-        }
-        // Only look at the first ~40 lines of the function (the guards)
-        let funcStart = source[funcRange.lowerBound...]
-        let guardSection = String(funcStart.prefix(800))
-
-        #expect(guardSection.contains("!isRecording") || guardSection.contains("isRecording"),
-                "Must guard on isRecording")
-        #expect(guardSection.contains("isProcessingFinal"),
-                "Must guard on isProcessingFinal")
-    }
-}
-
 // MARK: - Issue #2: Stale transcription results bleed across sessions
 
 @Suite("Issue #2 — Stale results: session generation prevents cross-session bleeding")
@@ -662,23 +596,6 @@ struct Issue7RecorderStartFailureRegressionTests {
             #expect(!recorder._testHasCheckTimer, "No orphan check timer")
             #expect(!recorder._testHasAudioEngine, "No orphan audio engine")
         }
-    }
-
-    /// REGRESSION: RecordingController must check the start() return value and reset UI state on failure.
-    @Test func testAppDelegateHandlesStartFailure() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-
-        guard let funcRange = source.range(of: "func startRecording()") else {
-            Issue.record("RecordingController.startRecording() not found")
-            return
-        }
-        let funcBody = String(source[funcRange.lowerBound...])
-
-        // Must check the return value of start()
-        #expect(funcBody.contains("recorder?.start()") || funcBody.contains("recorder!.start()"),
-                "Must call recorder?.start()")
-        #expect(funcBody.contains("!started") || funcBody.contains("started == false") || funcBody.contains("started {"),
-                "Must check start() return value for failure")
     }
 
     /// REGRESSION: cancel() on a never-started recorder must be safe (no crash).

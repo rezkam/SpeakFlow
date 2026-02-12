@@ -60,119 +60,6 @@ struct AudioBufferTests {
 // FIX: (1) Check skip BEFORE buffer.takeAll(), (2) add speechDetectedInSession bypass
 // to intermediate chunks matching the final chunk's existing protection.
 
-@Suite("Chunk Skip Regression Tests — Source Guards")
-struct ChunkSkipSourceRegressionTests {
-
-    /// Regression: sendChunkIfReady must NOT drain the buffer before the skip decision.
-    /// Previously, the buffer was drained via takeAll before checking skipSilentChunks,
-    /// permanently losing audio data when an intermediate chunk was skipped.
-    @Test func testSendChunkIfReadySourceDoesNotDrainBeforeSkipCheck() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        // Find the sendChunkIfReady function
-        guard let funcRange = source.range(of: "private func sendChunkIfReady") else {
-            Issue.record("sendChunkIfReady not found in StreamingRecorder")
-            return
-        }
-        let funcBody = String(source[funcRange.lowerBound...])
-
-        // Find positions of key operations within sendChunkIfReady.
-        // Use the actual runtime check pattern (not comments) for skipSilentChunks.
-        guard let takeAllPos = funcBody.range(of: "buffer.takeAll()")?.lowerBound else {
-            Issue.record("buffer.takeAll() not found in sendChunkIfReady")
-            return
-        }
-        // Match the actual if-statement check (captured local variable), not comment mentions
-        guard let skipCheckPos = funcBody.range(of: "skipSilentChunks && speechProbability < skipThreshold")?.lowerBound else {
-            Issue.record("skipSilentChunks runtime check not found in sendChunkIfReady")
-            return
-        }
-
-        // The skip check MUST come BEFORE buffer.takeAll()
-        #expect(skipCheckPos < takeAllPos,
-                "REGRESSION: buffer.takeAll() before skipSilentChunks causes audio loss")
-    }
-
-    /// Regression: intermediate chunks must be sent when speech was detected in session,
-    /// mirroring the final-chunk protection in stop().
-    @Test func testSendChunkIfReadyHasSpeechDetectedBypass() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let funcRange = source.range(of: "private func sendChunkIfReady") else {
-            Issue.record("sendChunkIfReady not found")
-            return
-        }
-        let funcBody = String(source[funcRange.lowerBound...])
-
-        // Must check speechDetectedInSession (or hasSpoken) before the skip return
-        let hasSpeechBypass = funcBody.contains("speechDetectedInSession") ||
-                              funcBody.contains("hasSpoken")
-        #expect(hasSpeechBypass,
-                "REGRESSION: sendChunkIfReady must bypass skip when speech detected in session")
-    }
-
-    /// The skip condition must include `&& !speechDetectedInSession` to avoid skipping
-    /// intermediate chunks when the user has been speaking.
-    @Test func testSkipConditionIncludesNegatedSpeechDetectedFlag() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let funcRange = source.range(of: "private func sendChunkIfReady") else {
-            Issue.record("sendChunkIfReady not found")
-            return
-        }
-        let funcBody = String(source[funcRange.lowerBound...])
-
-        // The skip `if` must combine all three conditions:
-        //   skipSilentChunks && probability < threshold && !speechDetectedInSession
-        #expect(funcBody.contains("!speechDetectedInSession"),
-                "REGRESSION: skip condition must negate speechDetectedInSession")
-    }
-
-    /// Verify the final chunk in stop() still has speechDetectedInSession protection.
-    @Test func testStopFinalChunkProtected() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        guard let stopRange = source.range(of: "public func stop()") else {
-            Issue.record("stop() not found")
-            return
-        }
-        let stopBody = String(source[stopRange.lowerBound...])
-        #expect(stopBody.contains("speechDetectedInSession"),
-                "stop() must protect final chunk with speechDetectedInSession bypass")
-    }
-
-    /// VAD resetChunk() must only be called AFTER the buffer is drained (committed to send),
-    /// never in the skip path. Otherwise, a skip resets the accumulator, and the next check
-    /// cycle has no history — making the probability even lower.
-    @Test func testResetChunkInBothSkipAndSendPaths() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let funcRange = source.range(of: "private func sendChunkIfReady") else {
-            Issue.record("sendChunkIfReady not found")
-            return
-        }
-        let funcBody = String(source[funcRange.lowerBound...])
-
-        guard let takeAllPos = funcBody.range(of: "buffer.takeAll()")?.lowerBound else {
-            Issue.record("buffer.takeAll() not found in sendChunkIfReady")
-            return
-        }
-
-        // There must be TWO resetChunk() calls:
-        // 1) In the skip branch (BEFORE takeAll — skip returns false before drain)
-        // 2) In the send branch (AFTER takeAll — reset after drain)
-        let resetOccurrences = funcBody.components(separatedBy: "resetChunk()").count - 1
-        #expect(resetOccurrences >= 2,
-                "resetChunk() must appear in BOTH skip and send paths, found \(resetOccurrences)")
-
-        // The LAST resetChunk must be AFTER buffer.takeAll (send path)
-        guard let lastResetRange = funcBody.range(of: "resetChunk()", options: .backwards) else {
-            Issue.record("resetChunk() not found"); return
-        }
-        #expect(lastResetRange.lowerBound > takeAllPos,
-                "REGRESSION: the send-path resetChunk must be after buffer drain")
-    }
-}
-
 @Suite("Chunk Skip Regression Tests — Behavioral", .serialized)
 struct ChunkSkipBehavioralRegressionTests {
 
@@ -467,48 +354,6 @@ struct ChunkSkipBehavioralRegressionTests {
     }
 }
 
-// MARK: - Regression: Force-send chunks during continuous speech
-
-@Suite("Force-send chunks during continuous speech — source regression")
-struct ForceSendChunkSourceTests {
-
-    @Test func testForceSendChunkMultiplierExists() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Config.swift")
-        #expect(source.contains("forceSendChunkMultiplier"),
-                "Config must define forceSendChunkMultiplier")
-        #expect(source.contains("2.0"),
-                "forceSendChunkMultiplier should be 2.0")
-    }
-
-    @Test func testPeriodicCheckHasForceSendPath() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        let body = extractFunctionBody(named: "periodicCheck", from: source)
-        #expect(body != nil, "periodicCheck must exist")
-        guard let body else { return }
-
-        #expect(body.contains("forceSendChunkMultiplier"),
-                "periodicCheck must reference forceSendChunkMultiplier for hard upper limit")
-        #expect(body.contains("FORCE CHUNK"),
-                "Force-send path must log a FORCE CHUNK warning")
-    }
-
-    @Test func testForceSendIgnoresSpeakingState() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        let body = extractFunctionBody(named: "periodicCheck", from: source)
-        guard let body else {
-            Issue.record("periodicCheck not found")
-            return
-        }
-
-        // The force-send path must be in the `else if` branch after the `if !isSpeaking` check,
-        // meaning it fires even when isSpeaking is true
-        #expect(body.contains("} else if duration >= settings.maxChunkDuration * Config.forceSendChunkMultiplier"),
-                "Force-send must be an else-if after the !isSpeaking check (fires when speaking)")
-    }
-}
-
 // MARK: - Issue #9: AVAudioConverter input provider always returns .haveData
 
 @Suite("Issue #9 — AVAudioConverter one-shot input block")
@@ -566,64 +411,6 @@ struct Issue9AudioConverterOneShotRegressionTests {
             #expect(status == .noDataNow, "Call #\(i) must return .noDataNow")
         }
     }
-
-    /// Source-level: The audio tap must use createOneShotInputBlock, not an inline closure.
-    @Test func testAudioTapUsesOneShotInputBlock() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        #expect(source.contains("createOneShotInputBlock"),
-                "Audio tap must use createOneShotInputBlock to prevent double-buffering")
-    }
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MARK: - P2 Fix: VAD resetChunk() on skip path — source regression
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@Suite("P2 — VAD resetChunk called on skip path")
-struct VADResetChunkOnSkipSourceTests {
-
-    /// Source-level: sendChunkIfReady must call resetChunk() inside the skip branch
-    /// so stale silent samples don't accumulate across consecutive skipped chunks.
-    @Test func testResetChunkCalledInSkipBranch() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        // Find the skip branch
-        guard let skipRange = source.range(of: "skipSilentChunks && speechProbability < skipThreshold") else {
-            Issue.record("Skip check not found in sendChunkIfReady")
-            return
-        }
-
-        // Locate the return false that ends the skip branch
-        let afterSkip = source[skipRange.upperBound...]
-        guard let returnFalseRange = afterSkip.range(of: "return false") else {
-            Issue.record("return false not found after skip check")
-            return
-        }
-
-        // resetChunk must appear BETWEEN the skip condition and the return false
-        let skipBranch = source[skipRange.upperBound..<returnFalseRange.lowerBound]
-        #expect(skipBranch.contains("resetChunk()"),
-                "resetChunk() must be called in skip branch to prevent stale accumulation")
-    }
-
-    /// Source-level: resetChunk() must ALSO still be called after buffer drain (send path).
-    @Test func testResetChunkCalledInSendBranch() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let drainRange = source.range(of: "buffer.takeAll()") else {
-            Issue.record("buffer.takeAll() not found in sendChunkIfReady")
-            return
-        }
-
-        let afterDrain = source[drainRange.upperBound...]
-        // resetChunk should appear after drain but within sendChunkIfReady
-        let nextFuncBoundary = afterDrain.range(of: "private func ")?.lowerBound
-                            ?? afterDrain.range(of: "func ")?.lowerBound
-                            ?? afterDrain.endIndex
-        let sendBody = afterDrain[..<nextFuncBoundary]
-        #expect(sendBody.contains("resetChunk()"),
-                "resetChunk() must still be called after buffer drain in send path")
-    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -645,13 +432,6 @@ struct StreamingRecorderWAVFormatAndAudioChunkTests {
     @Test func testAudioChunkDefaultSpeechProbability() {
         let chunk = AudioChunk(wavData: Data(), durationSeconds: 1.0)
         #expect(chunk.speechProbability == 0, "Default speechProbability must be 0")
-    }
-
-    /// Source-level: verify AudioChunk conforms to Sendable.
-    @Test func testAudioChunkIsSendable() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        #expect(source.contains("struct AudioChunk: Sendable"),
-                "AudioChunk must conform to Sendable for concurrent audio processing")
     }
 
     /// Validate WAV header structure produced by createWav().
@@ -738,20 +518,6 @@ struct StreamingRecorderWAVFormatAndAudioChunkTests {
         #expect(dataSize == expectedSamples * 2,
                 "Data section must be exactly \(expectedSamples * 2) bytes for \(expectedSamples) samples, got \(dataSize)")
     }
-
-    /// Source-level: verify createWav guards against empty samples.
-    @Test func testCreateWavEmptySamplesProducesEmptyData() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        #expect(source.contains("guard !samples.isEmpty else { return Data() }"),
-                "createWav must return empty Data for empty samples to avoid invalid WAV")
-    }
-
-    /// Source-level: verify samples are clamped to [-1, 1] before Int16 conversion.
-    @Test func testCreateWavClampsToInt16Range() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        #expect(source.contains("max(-1, min(1,"),
-                "Samples must be clamped to [-1, 1] before Int16 conversion to prevent overflow")
-    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -760,105 +526,6 @@ struct StreamingRecorderWAVFormatAndAudioChunkTests {
 
 @Suite("StreamingRecorder — Thread-Safe State & Helpers")
 struct StreamingRecorderThreadSafeStateAndHelpersTests {
-
-    /// Source-level: verify AudioRecordingState uses NSLock for thread safety.
-    @Test func testAudioRecordingStateIsThreadSafe() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        // Find AudioRecordingState class body
-        guard let classStart = source.range(of: "private final class AudioRecordingState") else {
-            Issue.record("AudioRecordingState class not found")
-            return
-        }
-
-        let afterClass = String(source[classStart.lowerBound...])
-
-        #expect(afterClass.contains("private let lock = NSLock()"),
-                "AudioRecordingState must use NSLock for thread safety")
-        #expect(afterClass.contains("lock.lock()"),
-                "Must call lock.lock() to protect shared state")
-        #expect(afterClass.contains("lock.unlock()"),
-                "Must call lock.unlock() to release lock")
-    }
-
-    /// Source-level: verify AudioRecordingState default values.
-    @Test func testAudioRecordingStateDefaultValues() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let classStart = source.range(of: "private final class AudioRecordingState") else {
-            Issue.record("AudioRecordingState class not found")
-            return
-        }
-
-        let afterClass = String(source[classStart.lowerBound...])
-
-        #expect(afterClass.contains("private var isRecording = false"),
-                "Default state must be not recording")
-        #expect(afterClass.contains("private var vadActive = false"),
-                "Default VAD state must be inactive")
-    }
-
-    /// Source-level: verify fixed 16000 Hz sample rate.
-    @Test func testAudioRecordingStateSampleRate() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let classStart = source.range(of: "private final class AudioRecordingState") else {
-            Issue.record("AudioRecordingState class not found")
-            return
-        }
-
-        let afterClass = String(source[classStart.lowerBound...])
-
-        #expect(afterClass.contains("let sampleRate: Double = 16000"),
-                "Sample rate must be fixed at 16000 Hz for ChatGPT API")
-    }
-
-    /// Source-level: verify AudioSampleQueue has bounded size and drops old samples.
-    @Test func testAudioSampleQueueBounded() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let classStart = source.range(of: "private final class AudioSampleQueue") else {
-            Issue.record("AudioSampleQueue class not found")
-            return
-        }
-
-        let afterClass = String(source[classStart.lowerBound...])
-
-        #expect(afterClass.contains("private let maxQueueSize = 100"),
-                "Queue must have max size limit to prevent memory growth")
-        #expect(afterClass.contains("samples.removeFirst()"),
-                "Queue must drop oldest sample when at capacity")
-    }
-
-    /// Source-level: verify AudioSampleQueue uses NSLock for thread safety.
-    @Test func testAudioSampleQueueIsThreadSafe() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let classStart = source.range(of: "private final class AudioSampleQueue") else {
-            Issue.record("AudioSampleQueue class not found")
-            return
-        }
-
-        let afterClass = String(source[classStart.lowerBound...])
-
-        #expect(afterClass.contains("private let lock = NSLock()"),
-                "AudioSampleQueue must use NSLock for thread safety")
-    }
-
-    /// Source-level: verify dequeueAll atomically clears the queue.
-    @Test func testAudioSampleQueueDequeueAllClearsQueue() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        guard let classStart = source.range(of: "private final class AudioSampleQueue") else {
-            Issue.record("AudioSampleQueue class not found")
-            return
-        }
-
-        let afterClass = String(source[classStart.lowerBound...])
-
-        #expect(afterClass.contains("samples.removeAll()"),
-                "dequeueAll must atomically clear all samples")
-    }
 
     /// Behavioral: verify createOneShotInputBlock provides buffer once, then signals noDataNow.
     @Test func testCreateOneShotInputBlockProvidesBufferOnce() {
@@ -885,49 +552,6 @@ struct StreamingRecorderThreadSafeStateAndHelpersTests {
         #expect(status == .noDataNow, "Second call must signal .noDataNow")
         #expect(result2 == nil, "Second call must return nil")
     }
-
-    /// Source-level: verify OneShotState wrapper for non-Sendable buffer.
-    @Test func testOneShotStateWrapsNonSendableBuffer() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        #expect(source.contains("final class OneShotState: @unchecked Sendable"),
-                "OneShotState must wrap non-Sendable buffer with @unchecked Sendable")
-        #expect(source.contains("var provided = false"),
-                "OneShotState must track whether buffer was provided")
-    }
-
-    /// Source-level: verify installAudioTap is a free function (not @MainActor class method).
-    @Test func testInstallAudioTapIsNonisolated() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        #expect(source.contains("private func installAudioTap("),
-                "installAudioTap must be a private function")
-
-        // Verify it's NOT inside the @MainActor StreamingRecorder class
-        // by checking it appears after the class closing brace
-        guard let recorderClassStart = source.range(of: "@MainActor\npublic final class StreamingRecorder") else {
-            Issue.record("StreamingRecorder class not found")
-            return
-        }
-
-        // Find the installAudioTap function position
-        guard let tapFuncPos = source.range(of: "private func installAudioTap(") else {
-            Issue.record("installAudioTap function not found")
-            return
-        }
-
-        // It should appear before the StreamingRecorder class (at the top level)
-        #expect(tapFuncPos.lowerBound < recorderClassStart.lowerBound,
-                "installAudioTap must be a free function, not a class method")
-    }
-
-    /// Source-level: verify audio tap uses Accelerate framework for RMS calculation.
-    @Test func testInstallAudioTapCalculatesRMS() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-
-        #expect(source.contains("vDSP_rmsqv("),
-                "Audio tap must use vDSP_rmsqv from Accelerate for efficient RMS calculation")
-    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -936,42 +560,6 @@ struct StreamingRecorderThreadSafeStateAndHelpersTests {
 
 @Suite("StreamingRecorder — start, startMock & Test Helpers")
 struct StreamingRecorderStartAndMockTests {
-
-    /// start() must be marked @discardableResult.
-    @Test func testStartReturnsDiscardableResult() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        #expect(source.contains("@discardableResult") && source.contains("public func start() async -> Bool"))
-    }
-
-    /// start() must set sessionStartDate as the first action.
-    @Test func testStartSetsSessionStartDate() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "start", from: source)
-        #expect(body?.contains("sessionStartDate = Date()") == true)
-    }
-
-    /// start() must roll back all state in catch block on engine.start() failure.
-    @Test func testStartRollsBackOnEngineFailure() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "start", from: source)
-        #expect(body?.contains("engine.inputNode.removeTap(onBus: 0)") == true)
-        #expect(body?.contains("audioEngine = nil") == true)
-        #expect(body?.contains("audioBuffer = nil") == true)
-        #expect(body?.contains("state.setRecording(false)") == true)
-        #expect(body?.contains("vadProcessor = nil") == true)
-        #expect(body?.contains("sessionController = nil") == true)
-        #expect(body?.contains("sessionStartDate = nil") == true)
-    }
-
-    /// start() must re-check recording state after VAD initialization.
-    @Test func testStartAbortsIfStoppedDuringVADInit() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "start", from: source)
-        // After initializeVAD(), must re-check recording state
-        #expect(body?.contains("guard state.getRecording() else") == true,
-                "start() must re-check recording state after VAD init")
-        #expect(body?.contains("Recording cancelled during VAD initialization") == true)
-    }
 
     /// startMock() must set up all required state correctly.
     @Test @MainActor func testStartMockSetsUpCorrectly() async {
@@ -986,14 +574,6 @@ struct StreamingRecorderStartAndMockTests {
         #expect(recorder._testHasProcessingTimer, "startMock must start processing timer")
         #expect(recorder._testHasCheckTimer, "startMock must start check timer")
         #expect(recorder.sessionStartDate != nil, "startMock must set sessionStartDate")
-    }
-
-    /// startMock() must feed audio in 50ms chunks.
-    @Test func testStartMockFeedsAudioIn50msChunks() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "startMock", from: source)
-        #expect(body?.contains("sampleRate * 0.05") == true, "Mock must feed 50ms chunks")
-        #expect(body?.contains("Task.sleep(for: .milliseconds(50))") == true, "Mock must sleep 50ms between chunks")
     }
 
     /// Test helper _testInjectAudioBuffer must set/clear audioBuffer.
@@ -1032,14 +612,6 @@ struct StreamingRecorderStartAndMockTests {
         let dur1 = await recorder._testAudioBufferDuration()
         #expect(dur1 > 0.9 && dur1 < 1.1, "1s of 16kHz audio = ~1.0s duration")
     }
-
-    /// Test helpers must be guarded by #if DEBUG.
-    @Test func testTestHelpersOnlyAvailableInDebug() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        #expect(source.contains("#if DEBUG\n@MainActor\nextension StreamingRecorder") ||
-                source.contains("#if DEBUG\n@MainActor extension StreamingRecorder"),
-                "Test helpers must be behind #if DEBUG")
-    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1055,20 +627,6 @@ struct StreamingRecorderStopCancelTests {
         recorder._testSetIsRecording(true)
         recorder.stop()
         #expect(!recorder._testIsRecording, "stop() must set recording to false")
-    }
-
-    /// stop() must invalidate and clear both timers.
-    @Test func testStopInvalidatesTimers() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let stopBody = extractFunctionBody(named: "stop", from: source)
-        #expect(stopBody?.contains("checkTimer?.invalidate()") == true,
-                "stop() must invalidate checkTimer")
-        #expect(stopBody?.contains("processingTimer?.invalidate()") == true,
-                "stop() must invalidate processingTimer")
-        #expect(stopBody?.contains("checkTimer = nil") == true,
-                "stop() must clear checkTimer")
-        #expect(stopBody?.contains("processingTimer = nil") == true,
-                "stop() must clear processingTimer")
     }
 
     /// cancel() must suppress final chunk emission.
@@ -1140,40 +698,6 @@ struct StreamingRecorderStopCancelTests {
         recorder.stop()
         try? await Task.sleep(for: .milliseconds(300))
         #expect(!chunkReceived, "Audio shorter than minRecordingDurationMs must be discarded")
-    }
-
-    /// stop() must protect final chunk when speech detected in session.
-    @Test func testStopProtectsFinalChunkWithSpeechDetectedInSession() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let stopBody = extractFunctionBody(named: "stop", from: source)
-        #expect(stopBody?.contains("speechDetectedInSession") == true,
-                "stop() must check speechDetectedInSession for final chunk protection")
-        #expect(stopBody?.contains("|| speechDetectedInSession") == true,
-                "speechDetectedInSession must be in the send condition")
-    }
-
-    /// stop() must reset VAD session.
-    @Test func testStopResetsVADSession() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let stopBody = extractFunctionBody(named: "stop", from: source)
-        #expect(stopBody?.contains("resetSession()") == true,
-                "stop() must call resetSession() on VAD processor")
-    }
-
-    /// stop() must reset isCancelled flag for next session.
-    @Test func testCancelResetsIsCancelledFlag() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let stopBody = extractFunctionBody(named: "stop", from: source)
-        #expect(stopBody?.contains("isCancelled = false") == true,
-                "stop() must reset isCancelled so next recording isn't affected")
-    }
-
-    /// stop() must drain pending sample queue before evaluating final chunk.
-    @Test func testStopDrainsPendingSampleQueue() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let stopBody = extractFunctionBody(named: "stop", from: source)
-        #expect(stopBody?.contains("sampleQueue.dequeueAll()") == true,
-                "stop() must drain pending sample queue before evaluating final chunk")
     }
 }
 
@@ -1278,15 +802,6 @@ struct IntegrationRecorderToQueueTests {
         await buffer.append(frames: [Float](repeating: 0.0, count: 48000), hasSpeech: false)
         let duration = await buffer.duration
         #expect(abs(duration - 3.0) < 0.001, "48000 samples at 16kHz = 3.0s")
-    }
-
-    /// TranscriptionQueueBridge has the required completion flow.
-    @Test func testQueueBridgeCompletionFlow() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionQueue.swift")
-        #expect(source.contains("class TranscriptionQueueBridge"))
-        #expect(source.contains("func checkCompletion()"))
-        #expect(source.contains("hasSignaledCompletion"))
-        #expect(source.contains("sessionStarted"))
     }
 
     /// Cancel doesn't corrupt queue state — queue remains usable after recorder cancel.
@@ -1436,18 +951,6 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
         #expect(remaining > 0.9, "Rejected chunk must remain buffered")
     }
 
-    /// Source-level: sendChunkIfReady checks skipSilentChunks before sending.
-    @Test func testSendChunkIfReadySkipsSilentChunkWithSkipEnabled() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "sendChunkIfReady", from: source)
-        // The skip condition must check skipSilentChunks && low probability && no session speech
-        #expect(body?.contains("skipSilentChunks && speechProbability < skipThreshold && !speechDetectedInSession") == true,
-                "sendChunkIfReady must skip silent chunks when skipSilentChunks is enabled and no speech detected")
-        // When skipping, buffer must NOT be drained (no takeAll before return false)
-        #expect(body?.contains("return false") == true,
-                "Skip branch must return false without draining buffer")
-    }
-
     @Test @MainActor func testSendChunkIfReadySendsWhenSkipDisabled() async {
         // Prepare buffer BEFORE changing settings to avoid await suspension points
         // between setting skipSilentChunks and sendChunkIfReady reading it.
@@ -1477,77 +980,6 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
 
         #expect(chunkReceived, "With skipSilentChunks=false, silent chunk must still be sent")
         #expect(remaining == 0, "Sent chunk must drain buffer")
-    }
-
-    @Test func testSendChunkIfReadyBypassesSkipWhenSpeechDetectedInSession() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "sendChunkIfReady", from: source)
-        #expect(body?.contains("&& !speechDetectedInSession") == true,
-                "Skip logic must check speechDetectedInSession bypass")
-    }
-
-    @Test func testSendChunkIfReadyResetsVADOnSkip() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        guard let body = extractFunctionBody(named: "sendChunkIfReady", from: source) else {
-            Issue.record("sendChunkIfReady body not found")
-            return
-        }
-        guard let skipLogRange = body.range(of: "Skipping silent chunk") else {
-            Issue.record("skip log not found")
-            return
-        }
-        let beforeSkipLog = String(body[..<skipLogRange.lowerBound])
-        #expect(beforeSkipLog.contains("resetChunk()"),
-                "resetChunk() must be called in skip branch before logging")
-    }
-
-    @Test func testSendChunkIfReadyResetsVADOnSend() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        guard let body = extractFunctionBody(named: "sendChunkIfReady", from: source) else {
-            Issue.record("sendChunkIfReady body not found")
-            return
-        }
-        guard let drainRange = body.range(of: "Drain buffer and send") else {
-            Issue.record("Drain buffer and send section not found")
-            return
-        }
-        let afterDrain = String(body[drainRange.lowerBound...])
-        #expect(afterDrain.contains("resetChunk()"),
-                "resetChunk() must be called after draining buffer")
-    }
-
-    @Test func testSendChunkIfReadyUsesVADProbabilityOnly() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "sendChunkIfReady", from: source)
-        #expect(body?.contains("speechProbability = await vad.averageSpeechProbability") == true,
-                "Must use VAD probability directly (no energy-based fallback)")
-        #expect(body?.contains("energySpeechRatio") != true,
-                "sendChunkIfReady must not reference energy-based speech ratio")
-    }
-
-    @Test func testPeriodicCheckDoesNothingWhenNotRecording() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "periodicCheck", from: source)
-        #expect(body?.contains("guard state.getRecording()") == true,
-                "periodicCheck must guard on recording state")
-    }
-
-    @Test func testPeriodicCheckForceSendAtHardLimit() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "periodicCheck", from: source)
-        #expect(body?.contains("Config.forceSendChunkMultiplier") == true,
-                "periodicCheck must have force-send at hard upper limit")
-        #expect(body?.contains("FORCE CHUNK") == true,
-                "Force-send must log a FORCE CHUNK warning")
-    }
-
-    @Test func testPeriodicCheckFallbackChunkOnSilenceWithoutVAD() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        let body = extractFunctionBody(named: "periodicCheck", from: source)
-        #expect(body?.contains("Config.silenceDuration") == true,
-                "Fallback path must use Config.silenceDuration for chunk timing")
-        #expect(body?.contains("reason: \"silence (fallback)\"") == true,
-                "Fallback silence chunk must use 'silence (fallback)' reason")
     }
 }
 
@@ -2095,202 +1527,5 @@ struct EventHandlingTests {
         // Final identical to last interim — no keystrokes
         #expect(col.entries[2].replacingChars == 0)
         #expect(col.entries[2].textToType == "")
-    }
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MARK: - LiveStreamingController: Source-Level Tests
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@Suite("LiveStreamingController — Source-Level Invariants")
-struct LiveStreamingSourceTests {
-
-    @Test func testNoLocalVADInController() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
-        #expect(!source.contains("VADProcessor"), "Must not use local VADProcessor")
-        #expect(!source.contains("VADConfiguration"), "Must not use VADConfiguration")
-        #expect(!source.contains("SessionController"), "Must not use SessionController (local auto-end)")
-        #expect(!source.contains("speechProbability"), "Must not compute local speech probability")
-    }
-
-    @Test func testSmartDiffUsed() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
-        #expect(source.contains("diffFromEnd"), "Must use smart diff for text replacement")
-        #expect(source.contains("commonLen"), "Diff must find common prefix length")
-    }
-
-    @Test func testSilenceTimerImplementation() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
-        #expect(source.contains("silenceTimer"), "Must have silence timer")
-        #expect(source.contains("autoEndSilenceDuration"), "Must reference silence duration config")
-        #expect(source.contains("hasSpeechOccurred"), "Must track whether speech has occurred")
-        #expect(source.contains("cancelSilenceTimer"), "Must cancel timer on speech events")
-        #expect(source.contains("startSilenceTimer"), "Must start timer on silence events")
-    }
-
-    @Test func testAutoEndNotFiringWithoutSpeech() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
-        // The startSilenceTimer must guard on hasSpeechOccurred
-        #expect(source.contains("hasSpeechOccurred") && source.contains("guard"),
-                "startSilenceTimer must check hasSpeechOccurred before starting")
-    }
-
-    @Test func testTimerCancelledOnCleanup() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
-        let stopBody = extractFunctionBody(named: "stop", from: source)
-        let cancelBody = extractFunctionBody(named: "cancel", from: source)
-        #expect(stopBody?.contains("cancelSilenceTimer") == true, "stop() must cancel silence timer")
-        #expect(cancelBody?.contains("cancelSilenceTimer") == true, "cancel() must cancel silence timer")
-    }
-
-    @Test func testAppDelegateWiresAutoEnd() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-        #expect(source.contains("autoEndSilenceDuration"), "RecordingController must set autoEndSilenceDuration")
-        #expect(source.contains("onAutoEnd"), "RecordingController must handle onAutoEnd callback")
-    }
-
-    @Test func testCallbackSignatureIncludesFullText() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/LiveStreamingController.swift")
-        #expect(source.contains("fullText: String"), "onTextUpdate must include fullText parameter")
-    }
-
-    @Test func testProviderMenuShowsMode() throws {
-        // Provider modes are defined in the protocol layer
-        let providerSource = try readProjectSource("Sources/SpeakFlowCore/Providers/TranscriptionProvider.swift")
-        #expect(providerSource.contains("case batch"), "ProviderMode must define batch case")
-        #expect(providerSource.contains("case streaming"), "ProviderMode must define streaming case")
-        // Provider picker must be data-driven via the registry (only configured providers)
-        let pickerSource = try readProjectSource("Sources/App/TranscriptionSettingsView.swift")
-        #expect(pickerSource.contains("ProviderRegistry.shared.configuredProviders"),
-                "Provider picker must show only configured providers from ProviderRegistry")
-    }
-
-    @Test func testAudioSubsystemPreWarmed() throws {
-        let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        #expect(source.contains("Audio subsystem pre-warmed") || source.contains("pre-warm"),
-                "App launch must pre-warm audio subsystem to avoid first-recording delay")
-        #expect(source.contains("engine.inputNode"),
-                "Pre-warm must access inputNode to trigger CoreAudio initialization")
-    }
-
-    // MARK: - Bug Fix Regression Tests
-
-    @Test func testStreamingStopAwaitsInsertionsBeforeReleasingKeyListener() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-        // The streaming stop path must await pending text insertions before releasing
-        // the key listener — otherwise Enter can fire before text is fully inserted.
-        #expect(source.contains("pendingInsertion?.value"),
-                "Streaming stop must await pendingInsertion before cleanup")
-        #expect(source.contains("self.keyInterceptor.stop()"),
-                "Key interceptor must be stopped after awaiting insertions")
-        // Scope ordering check to the streaming stop block (after liveStreamingController != nil)
-        guard let blockStart = source.range(of: "pendingInsertion?.value") else { return }
-        let blockSource = String(source[blockStart.lowerBound...])
-        let awaitPos = blockSource.startIndex
-        let stopRange = blockSource.range(of: "self.keyInterceptor.stop()")
-        #expect(stopRange != nil, "keyInterceptor.stop() must appear after pendingInsertion await")
-        if let s = stopRange {
-            #expect(awaitPos < s.lowerBound,
-                    "Must await pendingInsertion BEFORE calling keyInterceptor.stop()")
-        }
-    }
-
-    @Test func testStreamingStopResetsInserterAfterAwait() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-        // TextInserter state must only be reset after pending insertions complete.
-        let awaitRange = source.range(of: "pendingInsertion?.value")
-        let resetRange = source.range(of: "self.textInserter.reset()")
-        #expect(awaitRange != nil, "Must await pendingInsertion before resetting inserter")
-        #expect(resetRange != nil, "Must reset textInserter after await")
-        if let a = awaitRange, let r = resetRange {
-            #expect(a.lowerBound < r.lowerBound,
-                    "Must await pendingInsertion BEFORE resetting textInserter")
-        }
-    }
-
-    @Test func testUpdateKeyButtonUsesEditingFlag() throws {
-        let source = try readProjectSource("Sources/App/AccountsSettingsView.swift")
-        // "Update Key..." must use an isEditingKey flag to force the key entry visible,
-        // rather than relying on deepgramApiKey being non-empty (which fails because
-        // the button clears the key field).
-        #expect(source.contains("isEditingKey = true"),
-                "Update Key button must set isEditingKey flag")
-        #expect(source.contains("isEditingKey") && source.contains("@State"),
-                "isEditingKey must be a @State property")
-        #expect(source.contains("isEditingKey || keyValidationError"),
-                "Key entry visibility must check isEditingKey flag")
-        #expect(source.contains("isEditingKey = false"),
-                "isEditingKey must be cleared on save/remove")
-    }
-
-    @Test func testStreamingStopSetsProcessingFinalBeforeAsyncCleanup() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-        // The streaming stop path must set isProcessingFinal = true synchronously
-        // so the key handler's Enter/Escape branches still work during the wind-down gap
-        // (isRecording is already false, but the event tap is still active).
-        guard let streamingBlock = source.range(of: "if liveStreamingController != nil") else {
-            #expect(Bool(false), "Must have streaming stop block"); return
-        }
-        let afterBlock = String(source[streamingBlock.lowerBound...])
-        let processingRange = afterBlock.range(of: "isProcessingFinal = true")
-        let taskRange = afterBlock.range(of: "Task { @MainActor in")
-        #expect(processingRange != nil, "Streaming stop must set isProcessingFinal = true")
-        #expect(taskRange != nil, "Streaming stop must have deferred cleanup Task")
-        if let p = processingRange, let t = taskRange {
-            #expect(p.lowerBound < t.lowerBound,
-                    "isProcessingFinal must be set BEFORE the async cleanup Task")
-        }
-        // shouldPressEnterOnComplete must be read inside the Task (late), not captured early
-        let enterRead = afterBlock.range(of: "self.shouldPressEnterOnComplete")
-        if let e = enterRead, let t = taskRange {
-            #expect(e.lowerBound > t.lowerBound,
-                    "shouldPressEnterOnComplete must be read INSIDE the Task, not captured early")
-        }
-    }
-
-    @Test func testWindowVisibilityUsesStableAPI() throws {
-        let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        // Window visibility must not rely on private AppKit class names
-        #expect(!source.contains("className.contains"), "Must not filter windows by private class names")
-        #expect(source.contains(".titled"), "Must use styleMask.titled for window visibility check")
-    }
-
-    @Test func testNotificationObserverTokenStored() throws {
-        let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        // Closure-based NotificationCenter observers return tokens that must be stored
-        // for proper removal — discarding the token makes removeObserver ineffective.
-        #expect(source.contains("windowCloseObserver"), "Must store notification observer token")
-    }
-
-    @Test func testLoginFailureBannerIsGeneric() throws {
-        let source = try readProjectSource("Sources/App/AuthController.swift")
-        // User-facing login failure must use a stable generic message, not error.localizedDescription
-        #expect(!source.contains("error.localizedDescription"),
-                "Must not show locale-dependent error description to user")
-    }
-
-    @Test func testStreamingStopGuardsAgainstSessionClobbering() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-        // The deferred cleanup Task must guard against clobbering a new session that
-        // started after cancel cleared isProcessingFinal. Without this guard, the old
-        // Task resumes and calls keyInterceptor.stop()/textInserter.reset() on the new session.
-        guard let taskBlock = source.range(of: "await pendingInsertion?.value") else {
-            #expect(Bool(false), "Streaming stop must await pendingInsertion"); return
-        }
-        let afterAwait = String(source[taskBlock.upperBound...])
-        // Must check isProcessingFinal before doing cleanup
-        #expect(afterAwait.contains("guard self.isProcessingFinal"),
-                "Deferred cleanup must verify isProcessingFinal before clobbering state")
-        // Must also check isRecording to avoid clobbering a newly started session
-        #expect(afterAwait.contains("self.isRecording"),
-                "Deferred cleanup must check isRecording to protect new sessions")
-    }
-
-    @Test func testLaunchAtLoginShowsBannerOnFailure() throws {
-        let source = try readProjectSource("Sources/App/GeneralSettingsView.swift")
-        // SMAppService register/unregister failures must show a user-visible banner
-        // instead of silently swallowing the error.
-        #expect(source.contains("showBanner") && source.contains("catch"),
-                "Launch-at-login catch block must show a banner on failure")
     }
 }

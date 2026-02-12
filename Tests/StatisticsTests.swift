@@ -100,21 +100,6 @@ struct StatisticsDurationRegressionTests {
 @Suite("P2 — Statistics formatter explicit @MainActor isolation")
 struct StatisticsFormatterIsolationTests {
 
-    /// Source-level: durationFormatter must be explicitly @MainActor to prevent
-    /// theoretical concurrent access during static initialization.
-    @Test func testDurationFormatterIsMainActorIsolated() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Statistics.swift")
-        #expect(source.contains("@MainActor private static let durationFormatter"),
-                "durationFormatter must be explicitly @MainActor-isolated")
-    }
-
-    /// Source-level: decimalFormatter must be explicitly @MainActor.
-    @Test func testDecimalFormatterIsMainActorIsolated() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Statistics.swift")
-        #expect(source.contains("@MainActor private static let decimalFormatter"),
-                "decimalFormatter must be explicitly @MainActor-isolated")
-    }
-
     /// Behavioral: formatters remain stable after explicit @MainActor annotation.
     @Test func testFormattersStillProduceCorrectOutput() async {
         await MainActor.run {

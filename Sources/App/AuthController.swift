@@ -10,9 +10,9 @@ import SpeakFlowCore
 final class AuthController {
     static let shared = AuthController()
 
-    private var oauthCallbackServer: OAuthCallbackServer?
+    private(set) var oauthCallbackServer: OAuthCallbackServer?
 
-    private init() {}
+    init() {}
 
     // MARK: - ChatGPT
 

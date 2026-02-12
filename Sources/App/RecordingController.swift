@@ -17,10 +17,10 @@ final class RecordingController {
     // MARK: - Recording State
 
     var isRecording = false {
-        didSet { AppState.shared.isRecording = isRecording }
+        didSet { appState.isRecording = isRecording }
     }
     var isProcessingFinal = false {
-        didSet { AppState.shared.isProcessingFinal = isProcessingFinal }
+        didSet { appState.isProcessingFinal = isProcessingFinal }
     }
 
     // MARK: - Internal
@@ -30,10 +30,11 @@ final class RecordingController {
     var liveStreamingController: LiveStreamingController?
     var hasPlayedCompletionSound = false
     var fullTranscript = ""
-    private var shouldPressEnterOnComplete = false
+    var shouldPressEnterOnComplete = false
 
-    private let textInserter = TextInserter.shared
-    private let keyInterceptor = KeyInterceptor.shared
+    let textInserter: any TextInserting
+    let keyInterceptor: any KeyIntercepting
+    let appState: any BannerPresenting
 
     // UI test support (configured externally by AppDelegate)
     var isUITestMode = false
@@ -44,9 +45,16 @@ final class RecordingController {
 
     private static let maxFinishRetries = 30
 
-    private init() {
-        keyInterceptor.onEscapePressed = { [weak self] in self?.cancelRecording() }
-        keyInterceptor.onEnterPressed = { [weak self] in
+    init(
+        keyInterceptor: any KeyIntercepting = KeyInterceptor.shared,
+        textInserter: any TextInserting = TextInserter.shared,
+        appState: any BannerPresenting = AppState.shared
+    ) {
+        self.keyInterceptor = keyInterceptor
+        self.textInserter = textInserter
+        self.appState = appState
+        self.keyInterceptor.onEscapePressed = { [weak self] in self?.cancelRecording() }
+        self.keyInterceptor.onEnterPressed = { [weak self] in
             guard let self else { return }
             if self.isRecording { self.stopRecordingAndSubmit() }
             else if self.isProcessingFinal { self.shouldPressEnterOnComplete = true }
@@ -131,7 +139,7 @@ final class RecordingController {
         let provider = ProviderRegistry.shared.provider(for: providerId)
         guard let provider, provider.isConfigured else {
             NSSound(named: "Basso")?.play()
-            AppState.shared.showBanner(
+            appState.showBanner(
                 "Set up a transcription provider in Accounts to start dictating",
                 style: .error
             )

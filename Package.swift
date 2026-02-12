@@ -49,7 +49,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SpeakFlowCoreTests",
-            dependencies: ["SpeakFlowCore"],
+            dependencies: ["SpeakFlowCore", "SpeakFlow"],
             path: "Tests"
         ),
     ]
