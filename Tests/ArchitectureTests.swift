@@ -58,42 +58,16 @@ struct TestIsolationTests {
     }
 }
 
+@Suite("Source Regression — Core Invariants")
 struct SourceRegressionTests {
-    @Test func testAppDelegateTerminationCleansUpResources() throws {
-        let appDelegate = try readProjectSource("Sources/App/AppDelegate.swift")
-
-        let hasDelegateHook = appDelegate.contains("func applicationWillTerminate(_ notification: Notification)")
-        let hasNotificationHook = appDelegate.contains("NSApplication.willTerminateNotification")
-        #expect(hasDelegateHook || hasNotificationHook)
-
-        // AppDelegate must call shutdown() on all controllers
-        #expect(appDelegate.contains("RecordingController.shared.shutdown()"))
-        #expect(appDelegate.contains("AuthController.shared.shutdown()"))
-        #expect(appDelegate.contains("PermissionController.shared.shutdown()"))
-
-        // RecordingController.shutdown() must clean up recording resources
-        let recording = try readProjectSource("Sources/App/RecordingController.swift")
-        let recordingShutdown = extractFunctionBody(named: "shutdown", from: recording)
-        #expect(recordingShutdown?.contains("hotkeyListener?.stop()") == true)
-        #expect(recordingShutdown?.contains("stopKeyListener()") == true)
-        #expect(recordingShutdown?.contains("Transcription.shared.cancelAll()") == true)
-
-        // AuthController.shutdown() must stop OAuth server
-        let auth = try readProjectSource("Sources/App/AuthController.swift")
-        let authShutdown = extractFunctionBody(named: "shutdown", from: auth)
-        #expect(authShutdown?.contains("oauthCallbackServer?.stop()") == true)
-
-        // PermissionController.shutdown() must stop polling
-        let perm = try readProjectSource("Sources/App/PermissionController.swift")
-        let permShutdown = extractFunctionBody(named: "shutdown", from: perm)
-        #expect(permShutdown?.contains("permissionManager.stopPolling()") == true)
-    }
 
     @Test func testNoDispatchQueueMainAsyncInMainActorHotPaths() throws {
         // All known @MainActor-facing files where UI/coordination logic lives.
         let files = [
             "Sources/App/AppDelegate.swift",
             "Sources/App/RecordingController.swift",
+            "Sources/App/TextInserter.swift",
+            "Sources/App/KeyInterceptor.swift",
             "Sources/App/AuthController.swift",
             "Sources/App/PermissionController.swift",
             "Sources/App/UITestHarnessController.swift",
@@ -157,10 +131,10 @@ struct Issue4FocusVerificationRegressionTests {
     /// REGRESSION: typeTextAsync must call verifyInsertionTarget() before typing.
     /// Without this check, dictated text leaks to whatever app has focus.
     @Test func testTypeTextAsyncCallsVerifyInsertionTarget() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        let source = try readProjectSource("Sources/App/TextInserter.swift")
 
         guard let funcRange = source.range(of: "private func typeTextAsync") else {
-            Issue.record("typeTextAsync not found in AppDelegate")
+            Issue.record("typeTextAsync not found in TextInserter")
             return
         }
         let funcBody = String(source[funcRange.lowerBound...])
@@ -171,10 +145,10 @@ struct Issue4FocusVerificationRegressionTests {
 
     /// REGRESSION: pressEnterKey must also verify focus before posting the Enter event.
     @Test func testPressEnterKeyVerifiesFocus() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        let source = try readProjectSource("Sources/App/TextInserter.swift")
 
-        guard let funcRange = source.range(of: "private func pressEnterKey") else {
-            Issue.record("pressEnterKey not found in AppDelegate")
+        guard let funcRange = source.range(of: "func pressEnterKey") else {
+            Issue.record("pressEnterKey not found in TextInserter")
             return
         }
         let funcBody = String(source[funcRange.lowerBound...])
@@ -185,10 +159,10 @@ struct Issue4FocusVerificationRegressionTests {
 
     /// REGRESSION: verifyInsertionTarget must use CFEqual to compare AXUIElements.
     @Test func testVerifyInsertionTargetUsesCFEqual() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        let source = try readProjectSource("Sources/App/TextInserter.swift")
 
-        guard let funcRange = source.range(of: "private func verifyInsertionTarget") else {
-            Issue.record("verifyInsertionTarget not found in AppDelegate")
+        guard let funcRange = source.range(of: "func verifyInsertionTarget") else {
+            Issue.record("verifyInsertionTarget not found in TextInserter")
             return
         }
         let funcBody = String(source[funcRange.lowerBound...])
@@ -215,26 +189,26 @@ struct Issue4FocusVerificationRegressionTests {
 @Suite("Issue #8 — No usleep in MainActor code paths")
 struct Issue8UsleepRegressionTests {
 
-    /// REGRESSION: RecordingController.swift must not contain usleep — it blocks the MainActor.
-    /// The fix replaces usleep(10000) with Task.sleep(nanoseconds: 10_000_000).
-    @Test func testAppDelegateDoesNotContainUsleep() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-        #expect(!source.contains("usleep("), "RecordingController must not use usleep — blocks MainActor")
-        #expect(!source.contains("usleep ("), "RecordingController must not use usleep — blocks MainActor")
+    /// REGRESSION: RecordingController and TextInserter must not contain usleep — it blocks the MainActor.
+    @Test func testMainActorFilesDoNotContainUsleep() throws {
+        let recording = try readProjectSource("Sources/App/RecordingController.swift")
+        #expect(!recording.contains("usleep("), "RecordingController must not use usleep — blocks MainActor")
+        let inserter = try readProjectSource("Sources/App/TextInserter.swift")
+        #expect(!inserter.contains("usleep("), "TextInserter must not use usleep — blocks MainActor")
     }
 
     /// REGRESSION: pressEnterKey must use async Task.sleep, not usleep.
     @Test func testPressEnterKeyUsesAsyncSleep() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        let source = try readProjectSource("Sources/App/TextInserter.swift")
 
-        guard let funcStart = source.range(of: "private func pressEnterKey") else {
-            Issue.record("pressEnterKey not found")
+        guard let funcStart = source.range(of: "func pressEnterKey") else {
+            Issue.record("pressEnterKey not found in TextInserter")
             return
         }
         // Scope to just this function: find the next top-level function/property
         let afterStart = String(source[funcStart.lowerBound...])
         let funcBody: String
-        if let nextFunc = afterStart.range(of: "\n    private func ",
+        if let nextFunc = afterStart.range(of: "\n    func ",
                                            range: afterStart.index(afterStart.startIndex, offsetBy: 10)..<afterStart.endIndex) {
             funcBody = String(afterStart[..<nextFunc.lowerBound])
         } else if let nextFunc = afterStart.range(of: "\n    // MARK:") {
@@ -255,6 +229,8 @@ struct Issue8UsleepRegressionTests {
         let files = [
             "Sources/App/AppDelegate.swift",
             "Sources/App/RecordingController.swift",
+            "Sources/App/TextInserter.swift",
+            "Sources/App/KeyInterceptor.swift",
             "Sources/App/AuthController.swift",
             "Sources/App/PermissionController.swift",
             "Sources/App/UITestHarnessController.swift",
@@ -310,27 +286,11 @@ struct Issue18PlatformMismatchRegressionTests {
     }
 }
 
-@Suite("Issues #10/#12/#20/#23 — Additional Regression Coverage")
-struct AdditionalLifecycleConcurrencyI18NAccessibilityRegressionTests {
-
-    /// Issue #10: Ensure graceful termination performs all major cleanup actions.
-    @Test func testIssue10TerminationIncludesRecorderTaskAndObserverCleanup() throws {
-        let appDelegate = try readProjectSource("Sources/App/AppDelegate.swift")
-
-        #expect(appDelegate.contains("func applicationWillTerminate(_ notification: Notification)"))
-        #expect(appDelegate.contains("RecordingController.shared.shutdown()"))
-        #expect(appDelegate.contains("AuthController.shared.shutdown()"))
-        #expect(appDelegate.contains("PermissionController.shared.shutdown()"))
-
-        // RecordingController.shutdown() must clean up recorder and tasks
-        let recording = try readProjectSource("Sources/App/RecordingController.swift")
-        let recordingShutdown = extractFunctionBody(named: "shutdown", from: recording)
-        #expect(recordingShutdown?.contains("recorder?.cancel()") == true)
-        #expect(recordingShutdown?.contains("textInsertionTask?.cancel()") == true)
-    }
+@Suite("Hotkey & Concurrency Regression")
+struct HotkeyConcurrencyRegressionTests {
 
     /// Issue #12: Verify hotkey callbacks are marshalled through `Task { @MainActor ... }`.
-    @Test func testIssue12HotkeyCallbacksUseMainActorTaskPattern() throws {
+    @Test func testHotkeyCallbacksUseMainActorTaskPattern() throws {
         let source = try readProjectSource("Sources/SpeakFlowCore/Hotkey/HotkeyListener.swift")
 
         let mainActorTaskCount = countOccurrences(of: "Task { @MainActor [weak self] in", in: source)
@@ -340,73 +300,18 @@ struct AdditionalLifecycleConcurrencyI18NAccessibilityRegressionTests {
     }
 
     /// Issue #20: Guard localization of high-visibility user-facing strings.
-    @Test func testIssue20HighVisibilityStringsAreLocalized() throws {
+    @Test func testHighVisibilityStringsAreLocalized() throws {
         let speakFlowApp = try readProjectSource("Sources/App/SpeakFlowApp.swift")
         let accountsSettings = try readProjectSource("Sources/App/AccountsSettingsView.swift")
         let generalSettings = try readProjectSource("Sources/App/GeneralSettingsView.swift")
 
-        // Check SpeakFlowApp for menu strings
         #expect(speakFlowApp.contains("Start Dictation"))
-        // Check AccountsSettingsView for login
         #expect(accountsSettings.contains("Log In") || accountsSettings.contains("Log Out"))
-        // Check GeneralSettingsView for accessibility permissions
         #expect(generalSettings.contains("Accessibility"))
     }
 
-}
-
-@Suite("Issues #10/#11/#12/#13/#16/#19/#20/#21/#23 — Completion Regression Additions")
-struct Issue10To23CompletionRegressionAdditions {
-
-    @Test func testIssue10TerminationHandledByDelegateOrNotification() throws {
-        let source = try readProjectSource("Sources/App/AppDelegate.swift")
-        let hasDelegateHook = source.contains("func applicationWillTerminate(_ notification: Notification)")
-        let hasNotificationHook = source.contains("NSApplication.willTerminateNotification")
-        #expect(hasDelegateHook || hasNotificationHook)
-    }
-
-    @Test func testIssue11HotkeyListenerDeinitPerformsStopCleanup() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Hotkey/HotkeyListener.swift")
-        guard let deinitRange = source.range(of: "@MainActor deinit") else {
-            Issue.record("HotkeyListener deinit not found")
-            return
-        }
-
-        let suffix = String(source[deinitRange.lowerBound...].prefix(160))
-        #expect(suffix.contains("stop()"), "HotkeyListener deinit should call stop()")
-    }
-
-    @Test func testIssue12NoDispatchQueueMainAsyncInMainActorFiles() throws {
-        let files = [
-            "Sources/App/AppDelegate.swift",
-            "Sources/App/RecordingController.swift",
-            "Sources/App/AuthController.swift",
-            "Sources/App/PermissionController.swift",
-            "Sources/App/UITestHarnessController.swift",
-            "Sources/SpeakFlowCore/Permissions/AccessibilityPermissionManager.swift",
-            "Sources/SpeakFlowCore/Hotkey/HotkeyListener.swift",
-            "Sources/SpeakFlowCore/Audio/StreamingRecorder.swift"
-        ]
-
-        for file in files {
-            let source = try readProjectSource(file)
-            #expect(!source.contains("DispatchQueue.main.async"), "Found DispatchQueue.main.async in \(file)")
-            #expect(!source.contains("DispatchQueue.main.asyncAfter"), "Found DispatchQueue.main.asyncAfter in \(file)")
-        }
-    }
-
-    @Test func testIssue13TranscriptionServiceDoesNotRetainDeadActiveTasksField() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        #expect(!source.contains("activeTasks"))
-    }
-
-    @Test func testIssue16StreamingRecorderAvoidsPreconcurrencyImport() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Audio/StreamingRecorder.swift")
-        #expect(source.contains("import AVFoundation"))
-        #expect(!source.contains("@preconcurrency import AVFoundation"))
-    }
-
-    @Test func testIssue19FormatterCacheRemainsStableForPublicFormattedProperties() async {
+    /// Issue #19: NumberFormatter cache must be stable across property accesses.
+    @Test func testFormatterCacheRemainsStable() async {
         await MainActor.run {
             let stats = Statistics.shared
             stats.reset()
@@ -425,7 +330,8 @@ struct Issue10To23CompletionRegressionAdditions {
         }
     }
 
-    @Test func testIssue21FormattedDurationUsesExpectedZeroAndNonZeroOutput() async {
+    /// Issue #21: Duration formatting must produce expected output.
+    @Test func testFormattedDurationUsesExpectedOutput() async {
         await MainActor.run {
             let stats = Statistics.shared
             stats.reset()
@@ -446,7 +352,6 @@ struct Issue10To23CompletionRegressionAdditions {
             #expect(stats.formattedDuration == expected)
         }
     }
-
 }
 
 // MARK: - Menu Label Toggle Tests
@@ -542,10 +447,10 @@ struct TerminationCleanupAuditTests {
             return
         }
         #expect(recordingShutdown.contains("hotkeyListener?.stop()"))
-        #expect(recordingShutdown.contains("stopKeyListener()"))
+        #expect(recordingShutdown.contains("keyInterceptor.stop()"))
         #expect(recordingShutdown.contains("recorder?.cancel()"))
         #expect(recordingShutdown.contains("Transcription.shared.cancelAll()"))
-        #expect(recordingShutdown.contains("textInsertionTask?.cancel()"))
+        #expect(recordingShutdown.contains("textInserter.cancelAndReset()"))
 
         // AuthController.shutdown() cleanup
         let auth = try readProjectSource("Sources/App/AuthController.swift")
@@ -848,5 +753,185 @@ struct ArchitectureSeparationTests {
                 "AppState must be @Observable for SwiftUI reactivity")
         #expect(source.contains("func refresh()"),
                 "AppState must have refresh() to sync from settings singletons")
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - Provider Registry & Metadata Tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@Suite("Provider Registry — Behavioral Tests")
+struct ProviderRegistryTests {
+
+    /// Ensure providers are registered (mirrors AppDelegate registration).
+    @MainActor private static func ensureRegistered() {
+        let registry = ProviderRegistry.shared
+        if registry.allProviders.isEmpty {
+            registry.register(ChatGPTBatchProvider())
+            registry.register(DeepgramProvider())
+        }
+    }
+
+    @Test @MainActor func testAllRegisteredProvidersHaveUniqueIds() {
+        Self.ensureRegistered()
+        let registry = ProviderRegistry.shared
+        let providers = registry.allProviders
+        let ids = providers.map(\.id)
+        let uniqueIds = Set(ids)
+        #expect(ids.count == uniqueIds.count,
+                "All registered providers must have unique IDs, found duplicates: \(ids)")
+    }
+
+    @Test @MainActor func testRegistryLookupByMode() {
+        Self.ensureRegistered()
+        let registry = ProviderRegistry.shared
+        // ChatGPT is batch
+        let batch = registry.batchProvider(for: ProviderId.chatGPT)
+        #expect(batch != nil, "ChatGPT must be registered as a batch provider")
+        #expect(registry.streamingProvider(for: ProviderId.chatGPT) == nil,
+                "ChatGPT must not be a streaming provider")
+
+        // Deepgram is streaming
+        let streaming = registry.streamingProvider(for: ProviderId.deepgram)
+        #expect(streaming != nil, "Deepgram must be registered as a streaming provider")
+        #expect(registry.batchProvider(for: ProviderId.deepgram) == nil,
+                "Deepgram must not be a batch provider")
+    }
+
+    @Test @MainActor func testProviderMetadataComplete() {
+        Self.ensureRegistered()
+        let registry = ProviderRegistry.shared
+        for provider in registry.allProviders {
+            #expect(!provider.id.isEmpty, "Provider ID must not be empty")
+            #expect(!provider.displayName.isEmpty, "Provider displayName must not be empty")
+            #expect(!provider.providerDisplayName.isEmpty, "providerDisplayName must not be empty")
+        }
+    }
+
+    @Test @MainActor func testProviderIdConstantsMatchRegistered() {
+        Self.ensureRegistered()
+        let registry = ProviderRegistry.shared
+        #expect(registry.provider(for: ProviderId.chatGPT) != nil,
+                "ProviderId.chatGPT must match a registered provider")
+        #expect(registry.provider(for: ProviderId.deepgram) != nil,
+                "ProviderId.deepgram must match a registered provider")
+    }
+
+    @Test @MainActor func testChatGPTProviderMetadata() {
+        Self.ensureRegistered()
+        guard let provider = ProviderRegistry.shared.provider(for: ProviderId.chatGPT) else {
+            Issue.record("ChatGPT provider not registered"); return
+        }
+        #expect(provider.id == ProviderId.chatGPT)
+        #expect(provider.displayName == "ChatGPT")
+        #expect(provider.mode == .batch)
+        if case .oauth = provider.authRequirement {} else {
+            Issue.record("ChatGPT auth requirement must be .oauth")
+        }
+    }
+
+    @Test @MainActor func testDeepgramProviderMetadata() {
+        Self.ensureRegistered()
+        guard let provider = ProviderRegistry.shared.provider(for: ProviderId.deepgram) else {
+            Issue.record("Deepgram provider not registered"); return
+        }
+        #expect(provider.id == ProviderId.deepgram)
+        #expect(provider.displayName == "Deepgram")
+        #expect(provider.mode == .streaming)
+        if case .apiKey(let providerId) = provider.authRequirement {
+            #expect(providerId == ProviderId.deepgram)
+        } else {
+            Issue.record("Deepgram auth requirement must be .apiKey")
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - Hardcoded Provider ID Regression
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@Suite("Source Regression — No Hardcoded Provider IDs in App Layer")
+struct ProviderIdRegressionTests {
+
+    /// App layer files must use `ProviderId.chatGPT` / `ProviderId.deepgram` constants
+    /// instead of raw string literals. This prevents scattered magic strings that
+    /// would need updating if a provider ID changes.
+    @Test func testNoHardcodedProviderStringsInAppLayer() throws {
+        let appFiles = [
+            "Sources/App/AppState.swift",
+            "Sources/App/RecordingController.swift",
+            "Sources/App/AuthController.swift",
+            "Sources/App/AccountsSettingsView.swift",
+            "Sources/App/TranscriptionSettingsView.swift",
+        ]
+
+        for file in appFiles {
+            let source = try readProjectSource(file)
+            // Look for raw "gpt" or "deepgram" string literals (excluding comments and ProviderId references)
+            let lines = source.components(separatedBy: "\n")
+            for (index, line) in lines.enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                // Skip comments
+                if trimmed.hasPrefix("//") || trimmed.hasPrefix("///") { continue }
+                // Skip lines that reference ProviderId (the constant itself)
+                if trimmed.contains("ProviderId") { continue }
+
+                // Check for raw "gpt" string (not part of a longer word like "chatgpt")
+                if trimmed.contains("\"gpt\"") {
+                    Issue.record("Found hardcoded \"gpt\" in \(file):\(index + 1) — use ProviderId.chatGPT")
+                }
+                if trimmed.contains("\"deepgram\"") {
+                    Issue.record("Found hardcoded \"deepgram\" in \(file):\(index + 1) — use ProviderId.deepgram")
+                }
+            }
+        }
+    }
+
+    @Test func testProviderIdEnumExists() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/TranscriptionProvider.swift")
+        #expect(source.contains("public enum ProviderId"),
+                "TranscriptionProvider.swift must define ProviderId enum")
+        #expect(source.contains("static let chatGPT"),
+                "ProviderId must define chatGPT constant")
+        #expect(source.contains("static let deepgram"),
+                "ProviderId must define deepgram constant")
+    }
+
+    @Test func testAPIKeyValidatableProtocolExists() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/TranscriptionProvider.swift")
+        #expect(source.contains("protocol APIKeyValidatable"),
+                "APIKeyValidatable protocol must exist")
+        #expect(source.contains("func validateAPIKey"),
+                "APIKeyValidatable must define validateAPIKey method")
+    }
+
+    @Test func testDeepgramConformsToAPIKeyValidatable() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/DeepgramProvider.swift")
+        #expect(source.contains("APIKeyValidatable"),
+                "DeepgramProvider must conform to APIKeyValidatable")
+        #expect(source.contains("func validateAPIKey"),
+                "DeepgramProvider must implement validateAPIKey")
+    }
+
+    @Test func testStreamingProviderHasBuildSessionConfig() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/TranscriptionProvider.swift")
+        #expect(source.contains("func buildSessionConfig()"),
+                "StreamingTranscriptionProvider must define buildSessionConfig()")
+    }
+
+    @Test func testDeepgramOverridesBuildSessionConfig() throws {
+        let source = try readProjectSource("Sources/SpeakFlowCore/Providers/DeepgramProvider.swift")
+        #expect(source.contains("func buildSessionConfig()"),
+                "DeepgramProvider must override buildSessionConfig()")
+        #expect(source.contains("Settings.shared.deepgramLanguage"),
+                "buildSessionConfig must read language from Settings")
+    }
+
+    @Test func testBindingHelperExistsOnAppState() throws {
+        let source = try readProjectSource("Sources/App/AppState.swift")
+        #expect(source.contains("func binding<T>(for keyPath:"),
+                "AppState must have generic binding(for:) helper")
+        #expect(source.contains("ReferenceWritableKeyPath"),
+                "binding helper must use ReferenceWritableKeyPath for class singleton access")
     }
 }

@@ -211,13 +211,13 @@ func test09_BadApiKey() async -> Bool {
     let (controller, cb) = makeController()
 
     // Temporarily set bad key
-    let originalKey = ProviderSettings.shared.apiKey(for: "deepgram")
-    ProviderSettings.shared.setApiKey("invalid_key_12345", for: "deepgram")
+    let originalKey = ProviderSettings.shared.apiKey(for: ProviderId.deepgram)
+    ProviderSettings.shared.setApiKey("invalid_key_12345", for: ProviderId.deepgram)
 
     let started = await controller.start(provider: provider)
 
     // Restore key
-    ProviderSettings.shared.setApiKey(originalKey, for: "deepgram")
+    ProviderSettings.shared.setApiKey(originalKey, for: ProviderId.deepgram)
 
     if !started {
         // Failed at connect — good
@@ -236,11 +236,11 @@ func test09_BadApiKey() async -> Bool {
 func test10_ProviderSettings() async -> Bool {
     let original = ProviderSettings.shared.activeProviderId
 
-    ProviderSettings.shared.activeProviderId = "deepgram"
-    let isDg = ProviderSettings.shared.activeProviderId == "deepgram"
+    ProviderSettings.shared.activeProviderId = ProviderId.deepgram
+    let isDg = ProviderSettings.shared.activeProviderId == ProviderId.deepgram
 
-    ProviderSettings.shared.activeProviderId = "gpt"
-    let isGpt = ProviderSettings.shared.activeProviderId == "gpt"
+    ProviderSettings.shared.activeProviderId = ProviderId.chatGPT
+    let isGpt = ProviderSettings.shared.activeProviderId == ProviderId.chatGPT
 
     ProviderSettings.shared.activeProviderId = original
     return isDg && isGpt
@@ -249,15 +249,15 @@ func test10_ProviderSettings() async -> Bool {
 /// 11. Validate key endpoint works for good key.
 @MainActor
 func test11_ValidateGoodKey() async -> Bool {
-    guard let key = ProviderSettings.shared.apiKey(for: "deepgram") else { return false }
-    let error = await ProviderSettings.shared.validateDeepgramKey(key)
+    guard let key = ProviderSettings.shared.apiKey(for: ProviderId.deepgram) else { return false }
+    let error = await DeepgramProvider().validateAPIKey(key)
     return error == nil
 }
 
 /// 12. Validate key endpoint rejects bad key.
 @MainActor
 func test12_ValidateBadKey() async -> Bool {
-    let error = await ProviderSettings.shared.validateDeepgramKey("totally_invalid_key")
+    let error = await DeepgramProvider().validateAPIKey("totally_invalid_key")
     return error != nil
 }
 
@@ -298,7 +298,7 @@ func runAllTests() async {
         }
     }
 
-    ProviderSettings.shared.setApiKey(apiKey, for: "deepgram")
+    ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
 
     print("═══════════════════════════════════════════════════")
     print("  DeepgramTest — Real Mic + Deepgram E2E Tests")

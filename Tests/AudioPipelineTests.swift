@@ -2155,12 +2155,13 @@ struct LiveStreamingSourceTests {
     }
 
     @Test func testProviderMenuShowsMode() throws {
-        let source = try readProjectSource("Sources/App/AppState.swift")
-        #expect(source.contains("Batch"), "Provider list must indicate 'Batch' mode")
-        #expect(source.contains("Streaming"), "Provider list must indicate 'Streaming' mode")
-        // Verify provider picker is data-driven via ProviderInfo.all
+        // Provider modes are defined in the protocol layer
+        let providerSource = try readProjectSource("Sources/SpeakFlowCore/Providers/TranscriptionProvider.swift")
+        #expect(providerSource.contains("case batch"), "ProviderMode must define batch case")
+        #expect(providerSource.contains("case streaming"), "ProviderMode must define streaming case")
+        // Provider picker must be data-driven via the registry
         let pickerSource = try readProjectSource("Sources/App/TranscriptionSettingsView.swift")
-        #expect(pickerSource.contains("ProviderInfo.all"), "Provider picker must use data-driven ProviderInfo.all")
+        #expect(pickerSource.contains("ProviderRegistry.shared.allProviders"), "Provider picker must use ProviderRegistry")
     }
 
     @Test func testAudioSubsystemPreWarmed() throws {
@@ -2179,31 +2180,30 @@ struct LiveStreamingSourceTests {
         // the key listener — otherwise Enter can fire before text is fully inserted.
         #expect(source.contains("pendingInsertion?.value"),
                 "Streaming stop must await pendingInsertion before cleanup")
-        #expect(source.contains("self.stopKeyListener()"),
-                "Key listener must be stopped after awaiting insertions")
+        #expect(source.contains("self.keyInterceptor.stop()"),
+                "Key interceptor must be stopped after awaiting insertions")
         // Scope ordering check to the streaming stop block (after liveStreamingController != nil)
         guard let blockStart = source.range(of: "pendingInsertion?.value") else { return }
         let blockSource = String(source[blockStart.lowerBound...])
         let awaitPos = blockSource.startIndex
-        let stopRange = blockSource.range(of: "self.stopKeyListener()")
-        #expect(stopRange != nil, "stopKeyListener must appear after pendingInsertion await")
+        let stopRange = blockSource.range(of: "self.keyInterceptor.stop()")
+        #expect(stopRange != nil, "keyInterceptor.stop() must appear after pendingInsertion await")
         if let s = stopRange {
             #expect(awaitPos < s.lowerBound,
-                    "Must await pendingInsertion BEFORE calling stopKeyListener")
+                    "Must await pendingInsertion BEFORE calling keyInterceptor.stop()")
         }
     }
 
-    @Test func testStreamingStopResetsQueueCountAfterAwait() throws {
+    @Test func testStreamingStopResetsInserterAfterAwait() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
-        // queuedInsertionCount must only be reset after pending insertions complete,
-        // otherwise deferred decrements in Task closures drive the count negative.
+        // TextInserter state must only be reset after pending insertions complete.
         let awaitRange = source.range(of: "pendingInsertion?.value")
-        let resetRange = source.range(of: "self.queuedInsertionCount = 0")
-        #expect(awaitRange != nil, "Must await pendingInsertion before resetting queue count")
-        #expect(resetRange != nil, "Must reset queuedInsertionCount to 0")
+        let resetRange = source.range(of: "self.textInserter.reset()")
+        #expect(awaitRange != nil, "Must await pendingInsertion before resetting inserter")
+        #expect(resetRange != nil, "Must reset textInserter after await")
         if let a = awaitRange, let r = resetRange {
             #expect(a.lowerBound < r.lowerBound,
-                    "Must await pendingInsertion BEFORE resetting queuedInsertionCount")
+                    "Must await pendingInsertion BEFORE resetting textInserter")
         }
     }
 
@@ -2272,7 +2272,7 @@ struct LiveStreamingSourceTests {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
         // The deferred cleanup Task must guard against clobbering a new session that
         // started after cancel cleared isProcessingFinal. Without this guard, the old
-        // Task resumes and calls stopKeyListener()/targetElement=nil on the new session.
+        // Task resumes and calls keyInterceptor.stop()/textInserter.reset() on the new session.
         guard let taskBlock = source.range(of: "await pendingInsertion?.value") else {
             #expect(Bool(false), "Streaming stop must await pendingInsertion"); return
         }

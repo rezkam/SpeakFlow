@@ -1,33 +1,15 @@
 import AVFoundation
 import OSLog
 import Observation
+import SwiftUI
 import SpeakFlowCore
-
-// MARK: - Provider Descriptor
-
-/// Describes a transcription provider and its mode.
-/// Add new entries here when integrating additional providers.
-enum ProviderMode: String { case batch, streaming }
-
-struct ProviderInfo: Identifiable, Hashable {
-    let id: String
-    let name: String
-    let mode: ProviderMode
-
-    var displayName: String {
-        let modeLabel = mode == .streaming ? "Streaming" : "Batch"
-        return "\(name) — \(modeLabel)"
-    }
-
-    /// All known providers, in display order.
-    static let all: [ProviderInfo] = [
-        ProviderInfo(id: "gpt", name: "ChatGPT", mode: .batch),
-        ProviderInfo(id: "deepgram", name: "Deepgram", mode: .streaming),
-    ]
-}
 
 /// Central observable state for the app.
 /// Single source of truth that SwiftUI views observe for reactive updates.
+///
+/// Provider information is delegated to `ProviderRegistry` — no hardcoded
+/// provider lists or per-provider booleans. Adding a new provider requires
+/// only registering it in the registry; AppState adapts automatically.
 @MainActor
 @Observable
 final class AppState {
@@ -37,30 +19,19 @@ final class AppState {
     var accessibilityGranted = false
     var microphoneGranted = false
 
-    // MARK: - Accounts
-    var isLoggedIn = false
-    var hasDeepgramKey = false
-
     // MARK: - Provider
-    var activeProviderId: String = "gpt"
+    var activeProviderId: String = ProviderId.chatGPT
+
     var isStreamingProvider: Bool {
-        ProviderInfo.all.first(where: { $0.id == activeProviderId })?.mode == .streaming
+        ProviderRegistry.shared.provider(for: activeProviderId)?.mode == .streaming
     }
 
-    /// Providers that the user has configured (logged in / has API key).
-    var configuredProviders: [ProviderInfo] {
-        ProviderInfo.all.filter { isProviderConfigured($0.id) }
-    }
-
+    /// Whether a specific provider is configured and ready to use.
     func isProviderConfigured(_ id: String) -> Bool {
-        switch id {
-        case "gpt": return isLoggedIn
-        case "deepgram": return hasDeepgramKey
-        default: return false
-        }
+        ProviderRegistry.shared.isProviderConfigured(id)
     }
 
-    // MARK: - Deepgram Settings
+    // MARK: - Streaming Settings
     var deepgramInterimResults = true
     var deepgramSmartFormat = true
     var deepgramEndpointingMs = 300
@@ -112,13 +83,25 @@ final class AppState {
         bannerVisible = false
     }
 
+    // MARK: - Settings Binding
+
+    /// Creates a two-way Binding that reads from `Settings.shared` and writes back + refreshes.
+    /// Eliminates boilerplate binding properties in settings views.
+    func binding<T>(for keyPath: ReferenceWritableKeyPath<SpeakFlowCore.Settings, T>) -> Binding<T> {
+        Binding(
+            get: { SpeakFlowCore.Settings.shared[keyPath: keyPath] },
+            set: { newValue in
+                SpeakFlowCore.Settings.shared[keyPath: keyPath] = newValue
+                self.refresh()
+            }
+        )
+    }
+
     // MARK: - Refresh
 
     func refresh() {
         accessibilityGranted = AXIsProcessTrusted()
         microphoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        isLoggedIn = OpenAICodexAuth.isLoggedIn
-        hasDeepgramKey = ProviderSettings.shared.hasApiKey(for: "deepgram")
         activeProviderId = ProviderSettings.shared.activeProviderId
         currentHotkey = HotkeySettings.shared.currentHotkey
         chunkDuration = Settings.shared.chunkDuration

@@ -63,16 +63,17 @@ struct MenuBarView: View {
         }
 
         // Show provider switcher when more than one provider is configured
-        if state.configuredProviders.count > 1 {
+        let configured = ProviderRegistry.shared.configuredProviders
+        if configured.count > 1 {
             Divider()
 
-            ForEach(state.configuredProviders) { provider in
+            ForEach(configured, id: \.id) { provider in
                 Button {
                     switchProvider(provider.id)
                 } label: {
                     Text(state.activeProviderId == provider.id
-                        ? "✓ \(provider.displayName)"
-                        : "   \(provider.displayName)")
+                        ? "✓ \(provider.providerDisplayName)"
+                        : "   \(provider.providerDisplayName)")
                 }
             }
         }

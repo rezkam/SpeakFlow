@@ -10,25 +10,33 @@ struct AccountsSettingsView: View {
     @State private var showRemoveKeyConfirm = false
     @State private var isEditingKey = false
 
+    private var isChatGPTConfigured: Bool {
+        ProviderRegistry.shared.isProviderConfigured(ProviderId.chatGPT)
+    }
+
+    private var isDeepgramConfigured: Bool {
+        ProviderRegistry.shared.isProviderConfigured(ProviderId.deepgram)
+    }
+
     var body: some View {
         Form {
             Section {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
-                            Image(systemName: state.isLoggedIn ? "checkmark.circle.fill" : "xmark.circle")
-                                .foregroundStyle(state.isLoggedIn ? .green : .secondary)
+                            Image(systemName: isChatGPTConfigured ? "checkmark.circle.fill" : "xmark.circle")
+                                .foregroundStyle(isChatGPTConfigured ? .green : .secondary)
                             Text("ChatGPT")
                                 .fontWeight(.medium)
                         }
-                        Text(state.isLoggedIn ? "Logged in — GPT-4o transcription available" : "Log in to use ChatGPT batch transcription")
+                        Text(isChatGPTConfigured ? "Logged in — GPT-4o transcription available" : "Log in to use ChatGPT batch transcription")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer()
 
-                    if state.isLoggedIn {
+                    if isChatGPTConfigured {
                         Button("Log Out", role: .destructive) {
                             AuthController.shared.handleLogout()
                         }
@@ -50,19 +58,19 @@ struct AccountsSettingsView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
-                            Image(systemName: state.hasDeepgramKey ? "checkmark.circle.fill" : "xmark.circle")
-                                .foregroundStyle(state.hasDeepgramKey ? .green : .secondary)
+                            Image(systemName: isDeepgramConfigured ? "checkmark.circle.fill" : "xmark.circle")
+                                .foregroundStyle(isDeepgramConfigured ? .green : .secondary)
                             Text("Deepgram")
                                 .fontWeight(.medium)
                         }
-                        Text(state.hasDeepgramKey ? "API key configured — real-time streaming available" : "Set an API key to use Deepgram real-time transcription")
+                        Text(isDeepgramConfigured ? "API key configured — real-time streaming available" : "Set an API key to use Deepgram real-time transcription")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer()
 
-                    if state.hasDeepgramKey {
+                    if isDeepgramConfigured {
                         HStack(spacing: 8) {
                             Button("Update Key...") {
                                 deepgramApiKey = ""
@@ -79,7 +87,7 @@ struct AccountsSettingsView: View {
                     }
                 }
 
-                if !state.hasDeepgramKey || isEditingKey || keyValidationError != nil {
+                if !isDeepgramConfigured || isEditingKey || keyValidationError != nil {
                     deepgramKeyEntry
                 }
             } header: {
@@ -92,7 +100,7 @@ struct AccountsSettingsView: View {
         .navigationTitle("Accounts")
         .alert("Remove Deepgram API Key?", isPresented: $showRemoveKeyConfirm) {
             Button("Remove", role: .destructive) {
-                AuthController.shared.handleRemoveDeepgramKey()
+                AuthController.shared.handleRemoveApiKey(for: ProviderId.deepgram)
                 deepgramApiKey = ""
                 keyValidationError = nil
                 isEditingKey = false
@@ -134,12 +142,13 @@ struct AccountsSettingsView: View {
         keyValidationError = nil
 
         Task {
-            let error = await ProviderSettings.shared.validateDeepgramKey(key)
+            let validator = ProviderRegistry.shared.provider(for: ProviderId.deepgram) as? APIKeyValidatable
+            let error = await validator?.validateAPIKey(key)
             isValidatingKey = false
             if let error {
                 keyValidationError = error
             } else {
-                ProviderSettings.shared.setApiKey(key, for: "deepgram")
+                ProviderSettings.shared.setApiKey(key, for: ProviderId.deepgram)
                 deepgramApiKey = ""
                 keyValidationError = nil
                 isEditingKey = false

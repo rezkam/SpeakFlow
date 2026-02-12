@@ -14,8 +14,8 @@ struct TranscriptionSettingsView: View {
 
             Section {
                 Picker("Transcription Provider", selection: providerBinding) {
-                    ForEach(ProviderInfo.all) { provider in
-                        Text(provider.displayName).tag(provider.id)
+                    ForEach(ProviderRegistry.shared.allProviders, id: \.id) { provider in
+                        Text(provider.providerDisplayName).tag(provider.id)
                     }
                 }
                 .pickerStyle(.radioGroup)
@@ -55,9 +55,17 @@ struct TranscriptionSettingsView: View {
 
     @ViewBuilder
     private var providerWarning: some View {
-        let message = state.activeProviderId == "gpt"
-            ? "Log in to ChatGPT in the Accounts tab to use this provider."
-            : "Set a Deepgram API key in the Accounts tab to use this provider."
+        let provider = ProviderRegistry.shared.provider(for: state.activeProviderId)
+        let message: String = {
+            switch provider?.authRequirement {
+            case .oauth:
+                return "Log in to \(provider?.displayName ?? "this provider") in the Accounts tab to use this provider."
+            case .apiKey:
+                return "Set an API key in the Accounts tab to use \(provider?.displayName ?? "this provider")."
+            default:
+                return "Configure this provider in the Accounts tab."
+            }
+        }()
 
         Label(message, systemImage: "exclamationmark.triangle.fill")
             .foregroundStyle(.orange)
@@ -69,8 +77,8 @@ struct TranscriptionSettingsView: View {
     @ViewBuilder
     private var streamingSettings: some View {
         Section {
-            Toggle("Show Interim Results", isOn: deepgramInterimBinding)
-            Toggle("Smart Formatting", isOn: deepgramSmartFormatBinding)
+            Toggle("Show Interim Results", isOn: state.binding(for: \.deepgramInterimResults))
+            Toggle("Smart Formatting", isOn: state.binding(for: \.deepgramSmartFormat))
         } header: {
             Text("Real-Time Options")
         } footer: {
@@ -106,13 +114,13 @@ struct TranscriptionSettingsView: View {
         }
 
         Section {
-            Picker("Model", selection: deepgramModelBinding) {
+            Picker("Model", selection: state.binding(for: \.deepgramModel)) {
                 Text("Nova 3").tag("nova-3")
                 Text("Nova 2").tag("nova-2")
             }
             .pickerStyle(.menu)
 
-            Picker("Language", selection: deepgramLanguageBinding) {
+            Picker("Language", selection: state.binding(for: \.deepgramLanguage)) {
                 Text("English (US)").tag("en-US")
                 Text("English (UK)").tag("en-GB")
                 Text("Spanish").tag("es")
@@ -131,7 +139,7 @@ struct TranscriptionSettingsView: View {
         }
 
         Section {
-            Toggle("Auto-End on Silence", isOn: streamingAutoEndBinding)
+            Toggle("Auto-End on Silence", isOn: state.binding(for: \.streamingAutoEndEnabled))
 
             if state.streamingAutoEndEnabled {
                 VStack(alignment: .leading, spacing: 4) {
@@ -142,7 +150,7 @@ struct TranscriptionSettingsView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
-                    Slider(value: autoEndDurationBinding, in: 3...30, step: 1)
+                    Slider(value: state.binding(for: \.autoEndSilenceDuration), in: 3...30, step: 1)
                     HStack {
                         Text("3s — quick stop")
                         Spacer()
@@ -164,14 +172,14 @@ struct TranscriptionSettingsView: View {
     @ViewBuilder
     private var batchSettings: some View {
         Section {
-            Picker("Chunk Duration", selection: chunkDurationBinding) {
+            Picker("Chunk Duration", selection: state.binding(for: \.chunkDuration)) {
                 ForEach(ChunkDuration.allCases, id: \.self) { duration in
                     Text(duration.displayName).tag(duration)
                 }
             }
             .pickerStyle(.menu)
 
-            Toggle("Skip Silent Chunks", isOn: skipSilentBinding)
+            Toggle("Skip Silent Chunks", isOn: state.binding(for: \.skipSilentChunks))
         } header: {
             Text("Recording")
         } footer: {
@@ -179,7 +187,7 @@ struct TranscriptionSettingsView: View {
         }
 
         Section {
-            Toggle("Enable Voice Activity Detection", isOn: vadEnabledBinding)
+            Toggle("Enable Voice Activity Detection", isOn: state.binding(for: \.vadEnabled))
 
             if state.vadEnabled {
                 VStack(alignment: .leading, spacing: 4) {
@@ -190,7 +198,7 @@ struct TranscriptionSettingsView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
-                    Slider(value: vadThresholdBinding, in: 0.05...0.50, step: 0.05)
+                    Slider(value: state.binding(for: \.vadThreshold), in: 0.05...0.50, step: 0.05)
                     HStack {
                         Text("More sensitive")
                         Spacer()
@@ -207,7 +215,7 @@ struct TranscriptionSettingsView: View {
         }
 
         Section {
-            Toggle("Auto-End Recording on Silence", isOn: autoEndEnabledBinding)
+            Toggle("Auto-End Recording on Silence", isOn: state.binding(for: \.autoEndEnabled))
 
             if state.autoEndEnabled {
                 VStack(alignment: .leading, spacing: 4) {
@@ -218,7 +226,7 @@ struct TranscriptionSettingsView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
-                    Slider(value: autoEndDurationBinding, in: 3...30, step: 1)
+                    Slider(value: state.binding(for: \.autoEndSilenceDuration), in: 3...30, step: 1)
                     HStack {
                         Text("3s — quick stop")
                         Spacer()
@@ -243,7 +251,7 @@ struct TranscriptionSettingsView: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
-                Slider(value: minSpeechRatioBinding, in: 0.01...0.10, step: 0.01)
+                Slider(value: state.binding(for: \.minSpeechRatio), in: 0.01...0.10, step: 0.01)
                 HStack {
                     Text("1% — very sensitive")
                     Spacer()
@@ -259,135 +267,14 @@ struct TranscriptionSettingsView: View {
         }
     }
 
-    // MARK: - Batch Bindings
+    // MARK: - Special-Case Bindings
 
-    private var chunkDurationBinding: Binding<ChunkDuration> {
-        Binding(
-            get: { state.chunkDuration },
-            set: { newValue in
-                Settings.shared.chunkDuration = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var skipSilentBinding: Binding<Bool> {
-        Binding(
-            get: { state.skipSilentChunks },
-            set: { newValue in
-                Settings.shared.skipSilentChunks = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var vadEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { state.vadEnabled },
-            set: { newValue in
-                Settings.shared.vadEnabled = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var vadThresholdBinding: Binding<Float> {
-        Binding(
-            get: { state.vadThreshold },
-            set: { newValue in
-                Settings.shared.vadThreshold = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var autoEndEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { state.autoEndEnabled },
-            set: { newValue in
-                Settings.shared.autoEndEnabled = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var autoEndDurationBinding: Binding<Double> {
-        Binding(
-            get: { state.autoEndSilenceDuration },
-            set: { newValue in
-                Settings.shared.autoEndSilenceDuration = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var minSpeechRatioBinding: Binding<Float> {
-        Binding(
-            get: { state.minSpeechRatio },
-            set: { newValue in
-                Settings.shared.minSpeechRatio = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    // MARK: - Streaming Bindings
-
-    private var deepgramInterimBinding: Binding<Bool> {
-        Binding(
-            get: { state.deepgramInterimResults },
-            set: { newValue in
-                Settings.shared.deepgramInterimResults = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var deepgramSmartFormatBinding: Binding<Bool> {
-        Binding(
-            get: { state.deepgramSmartFormat },
-            set: { newValue in
-                Settings.shared.deepgramSmartFormat = newValue
-                state.refresh()
-            }
-        )
-    }
-
+    /// Endpointing requires Double↔Int conversion for the Slider.
     private var deepgramEndpointingBinding: Binding<Double> {
         Binding(
             get: { Double(state.deepgramEndpointingMs) },
             set: { newValue in
                 Settings.shared.deepgramEndpointingMs = Int(newValue)
-                state.refresh()
-            }
-        )
-    }
-
-    private var deepgramModelBinding: Binding<String> {
-        Binding(
-            get: { state.deepgramModel },
-            set: { newValue in
-                Settings.shared.deepgramModel = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var deepgramLanguageBinding: Binding<String> {
-        Binding(
-            get: { state.deepgramLanguage },
-            set: { newValue in
-                Settings.shared.deepgramLanguage = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private var streamingAutoEndBinding: Binding<Bool> {
-        Binding(
-            get: { state.streamingAutoEndEnabled },
-            set: { newValue in
-                Settings.shared.streamingAutoEndEnabled = newValue
                 state.refresh()
             }
         )
