@@ -996,4 +996,36 @@ struct ProviderConfigurationGateTests {
         #expect(source.contains("refreshVersion"),
                 "AccountsSettingsView must read state.refreshVersion to trigger re-evaluation on config changes")
     }
+
+    /// REGRESSION: TranscriptionSettingsView must read refreshVersion for reactive updates.
+    @Test func testTranscriptionSettingsViewReadsRefreshVersion() throws {
+        let source = try readProjectSource("Sources/App/TranscriptionSettingsView.swift")
+        #expect(source.contains("refreshVersion"),
+                "TranscriptionSettingsView must read state.refreshVersion to trigger re-evaluation on config changes")
+    }
+
+    /// REGRESSION: Provider picker must only show configured providers, not all providers.
+    @Test func testTranscriptionPickerUsesConfiguredProviders() throws {
+        let source = try readProjectSource("Sources/App/TranscriptionSettingsView.swift")
+        #expect(source.contains("configuredProviders"),
+                "TranscriptionSettingsView must use configuredProviders for the provider picker")
+        #expect(!source.contains("allProviders"),
+                "TranscriptionSettingsView must not use allProviders — only configured providers should be selectable")
+    }
+
+    /// REGRESSION: Transcription settings must show a warning when no provider is configured.
+    @Test func testTranscriptionSettingsShowsWarningWhenNoProviderConfigured() throws {
+        let source = try readProjectSource("Sources/App/TranscriptionSettingsView.swift")
+        #expect(source.contains("configured.isEmpty"),
+                "TranscriptionSettingsView must handle the case where no providers are configured")
+        #expect(source.contains("exclamationmark.triangle"),
+                "TranscriptionSettingsView must show a warning icon when no providers are configured")
+    }
+
+    /// REGRESSION: Transcription settings must auto-select a valid provider when current is unconfigured.
+    @Test func testTranscriptionSettingsAutoSelectsConfiguredProvider() throws {
+        let source = try readProjectSource("Sources/App/TranscriptionSettingsView.swift")
+        #expect(source.contains("onAppear"),
+                "TranscriptionSettingsView must have an onAppear to handle unconfigured active provider")
+    }
 }
