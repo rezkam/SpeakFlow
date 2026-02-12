@@ -44,12 +44,15 @@ final class AuthController {
         }
     }
 
-    // MARK: - Deepgram
+    // MARK: - API Key Management
 
-    func handleRemoveDeepgramKey() {
-        ProviderSettings.shared.removeApiKey(for: "deepgram")
-        if ProviderSettings.shared.activeProviderId == "deepgram" {
-            ProviderSettings.shared.activeProviderId = "gpt"
+    func handleRemoveApiKey(for providerId: String) {
+        ProviderSettings.shared.removeApiKey(for: providerId)
+        if ProviderSettings.shared.activeProviderId == providerId {
+            // Fall back to the first remaining configured provider, or first registered
+            let fallback = ProviderRegistry.shared.configuredProviders.first
+                ?? ProviderRegistry.shared.allProviders.first
+            ProviderSettings.shared.activeProviderId = fallback?.id ?? ProviderId.chatGPT
         }
         AppState.shared.refresh()
     }

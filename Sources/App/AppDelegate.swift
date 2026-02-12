@@ -32,6 +32,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.applicationIconImage = icon
         }
 
+        // Register all transcription providers
+        let registry = ProviderRegistry.shared
+        registry.register(ChatGPTBatchProvider())
+        registry.register(DeepgramProvider())
+
         let recording = RecordingController.shared
         let permissions = PermissionController.shared
 

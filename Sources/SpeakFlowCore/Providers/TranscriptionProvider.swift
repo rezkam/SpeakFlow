@@ -1,18 +1,77 @@
 import Foundation
 
+// MARK: - Provider IDs
+
+/// Canonical provider identifiers used across the app.
+/// New providers should add their ID here to avoid scattered string literals.
+public enum ProviderId {
+    public static let chatGPT = "gpt"
+    public static let deepgram = "deepgram"
+}
+
+// MARK: - Provider Mode & Auth
+
+/// Whether a provider operates in batch or streaming mode.
+public enum ProviderMode: String, Sendable, Hashable {
+    case batch
+    case streaming
+}
+
+/// How a provider authenticates — used by UI to show the right setup flow.
+public enum ProviderAuthRequirement: Sendable {
+    case oauth
+    case apiKey(providerId: String)
+    case none
+}
+
 // MARK: - Provider Protocol
 
 /// A transcription provider that can convert audio to text.
-/// Implementations may be batch (send file, get text) or streaming (send audio stream, get live text).
+///
+/// Each provider is self-describing: it carries its own metadata (mode, auth requirement,
+/// configuration status) so the app layer doesn't need hardcoded switch statements.
+/// Conform to `BatchTranscriptionProvider` or `StreamingTranscriptionProvider` for the
+/// actual transcription capability.
 public protocol TranscriptionProvider: Sendable {
-    /// Unique identifier for this provider (e.g. "deepgram", "gpt")
+    /// Unique identifier for this provider (use constants from `ProviderId`)
     var id: String { get }
 
     /// Human-readable name
     var displayName: String { get }
 
-    /// Whether this provider supports real-time streaming
-    var supportsStreaming: Bool { get }
+    /// Whether this provider operates in batch or streaming mode.
+    var mode: ProviderMode { get }
+
+    /// Whether the provider is ready to use (credentials configured).
+    var isConfigured: Bool { get }
+
+    /// How this provider authenticates (OAuth, API key, etc.)
+    var authRequirement: ProviderAuthRequirement { get }
+}
+
+extension TranscriptionProvider {
+    /// Display name with mode label for UI (e.g. "ChatGPT — Batch").
+    public var providerDisplayName: String {
+        let modeLabel = mode == .streaming ? "Streaming" : "Batch"
+        return "\(displayName) — \(modeLabel)"
+    }
+}
+
+// MARK: - API Key Validation
+
+/// Providers that authenticate via API key can conform to validate keys before saving.
+/// Returns nil on success, or a user-facing error message on failure.
+public protocol APIKeyValidatable: Sendable {
+    func validateAPIKey(_ key: String) async -> String?
+}
+
+// MARK: - Batch Provider
+
+/// A provider that transcribes a complete audio file and returns text.
+/// Audio is recorded locally, then sent as a single request after recording stops.
+public protocol BatchTranscriptionProvider: TranscriptionProvider {
+    /// Transcribe a complete audio buffer and return the resulting text.
+    func transcribe(audio: Data) async throws -> String
 }
 
 // MARK: - Streaming Provider
@@ -22,6 +81,14 @@ public protocol TranscriptionProvider: Sendable {
 public protocol StreamingTranscriptionProvider: TranscriptionProvider {
     /// Start a streaming session. Returns a session object for sending audio and receiving results.
     func startSession(config: StreamingSessionConfig) async throws -> StreamingSession
+
+    /// Build session configuration from the provider's stored settings.
+    /// Default implementation returns `StreamingSessionConfig.default`.
+    @MainActor func buildSessionConfig() -> StreamingSessionConfig
+}
+
+extension StreamingTranscriptionProvider {
+    @MainActor public func buildSessionConfig() -> StreamingSessionConfig { .default }
 }
 
 // MARK: - Session Config
@@ -160,12 +227,13 @@ public struct WordInfo: Sendable {
 // MARK: - Provider Settings
 
 /// Stores API keys and settings for transcription providers.
-/// Keys are stored in `~/.speakflow/<provider>.json` with restricted permissions (600),
-/// matching the OpenAI credential storage pattern.
+/// Keys are stored in the unified `~/.speakflow/auth.json` via `UnifiedAuthStorage`.
 /// Environment variables (e.g. DEEPGRAM_API_KEY) are checked as fallback for CI/testing.
 @MainActor
 public final class ProviderSettings {
     public static let shared = ProviderSettings()
+
+    private let storage = UnifiedAuthStorage.shared
 
     private enum Keys {
         static let activeProvider = "provider.active"
@@ -175,35 +243,24 @@ public final class ProviderSettings {
 
     // MARK: - Active Provider
 
-    /// The currently active provider ID ("gpt" or "deepgram").
+    /// The currently active provider ID.
     public var activeProviderId: String {
-        get { UserDefaults.standard.string(forKey: Keys.activeProvider) ?? "gpt" }
+        get { UserDefaults.standard.string(forKey: Keys.activeProvider) ?? ProviderId.chatGPT }
         set { UserDefaults.standard.set(newValue, forKey: Keys.activeProvider) }
     }
 
-    // MARK: - API Key Storage (file-based, like OpenAI credentials)
-
-    private static var speakflowDir: URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".speakflow")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
-    private static func keyFileURL(for providerId: String) -> URL {
-        speakflowDir.appendingPathComponent("\(providerId).json")
-    }
+    // MARK: - API Key Storage (delegated to UnifiedAuthStorage)
 
     /// Get the API key for a provider.
-    /// Checks file storage first, then falls back to environment variable for CI/testing.
+    /// Checks unified auth storage first, then falls back to environment variable for CI/testing.
     public func apiKey(for providerId: String) -> String? {
-        // 1. File storage (primary — set by the user via menu)
-        if let key = loadKeyFromFile(providerId: providerId), !key.isEmpty {
+        // 1. Unified file storage (primary — set by the user via settings)
+        if let key = storage.apiKey(for: providerId), !key.isEmpty {
             return key
         }
 
         // 2. Environment variable fallback (for CI/testing only)
-        let envName = envVarName(for: providerId)
+        let envName = "\(providerId.uppercased())_API_KEY"
         if let envKey = ProcessInfo.processInfo.environment[envName], !envKey.isEmpty {
             return envKey
         }
@@ -211,21 +268,9 @@ public final class ProviderSettings {
         return nil
     }
 
-    /// Save the API key for a provider to `~/.speakflow/<provider>.json`.
+    /// Save the API key for a provider to unified auth storage.
     public func setApiKey(_ apiKey: String?, for providerId: String) {
-        let fileURL = Self.keyFileURL(for: providerId)
-
-        if let apiKey, !apiKey.isEmpty {
-            let payload: [String: String] = ["api_key": apiKey]
-            if let data = try? JSONEncoder().encode(payload) {
-                try? data.write(to: fileURL, options: .atomic)
-                try? FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600], ofItemAtPath: fileURL.path
-                )
-            }
-        } else {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
+        storage.setApiKey(apiKey, for: providerId)
     }
 
     /// Check if a provider has an API key configured (file or env).
@@ -235,49 +280,7 @@ public final class ProviderSettings {
 
     /// Remove the stored API key for a provider.
     public func removeApiKey(for providerId: String) {
-        let fileURL = Self.keyFileURL(for: providerId)
-        try? FileManager.default.removeItem(at: fileURL)
+        storage.removeApiKey(for: providerId)
     }
 
-    // MARK: - Validation
-
-    /// Validate a Deepgram API key by calling the /v1/projects endpoint (free, no cost).
-    /// Returns nil on success, or an error message on failure.
-    public nonisolated func validateDeepgramKey(_ apiKey: String) async -> String? {
-        let url = URL(string: "https://api.deepgram.com/v1/projects")!
-        var request = URLRequest(url: url)
-        request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpMethod = "GET"
-        request.timeoutInterval = 10
-
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                return "Invalid response from Deepgram"
-            }
-            switch http.statusCode {
-            case 200: return nil  // Valid key
-            case 401, 403: return "Invalid API key (authentication failed)"
-            default: return "Unexpected response (HTTP \(http.statusCode))"
-            }
-        } catch {
-            return "Network error: \(error.localizedDescription)"
-        }
-    }
-
-    // MARK: - Private
-
-    private func loadKeyFromFile(providerId: String) -> String? {
-        let fileURL = Self.keyFileURL(for: providerId)
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = try? Data(contentsOf: fileURL),
-              let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
-            return nil
-        }
-        return dict["api_key"]
-    }
-
-    private func envVarName(for providerId: String) -> String {
-        "\(providerId.uppercased())_API_KEY"
-    }
 }

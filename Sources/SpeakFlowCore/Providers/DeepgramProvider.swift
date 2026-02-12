@@ -6,13 +6,29 @@ import OSLog
 /// Deepgram Nova-3 streaming transcription provider.
 /// Connects via WebSocket and streams audio in real-time.
 public final class DeepgramProvider: StreamingTranscriptionProvider, @unchecked Sendable {
-    public let id = "deepgram"
-    public let displayName = "Deepgram Nova-3"
-    public let supportsStreaming = true
+    public let id = ProviderId.deepgram
+    public let displayName = "Deepgram"
+    public let mode: ProviderMode = .streaming
+    public var authRequirement: ProviderAuthRequirement { .apiKey(providerId: ProviderId.deepgram) }
+
+    public var isConfigured: Bool {
+        UnifiedAuthStorage.shared.apiKey(for: id) != nil
+    }
 
     private let logger = Logger(subsystem: "SpeakFlow", category: "Deepgram")
 
     public init() {}
+
+    @MainActor
+    public func buildSessionConfig() -> StreamingSessionConfig {
+        StreamingSessionConfig(
+            language: Settings.shared.deepgramLanguage,
+            interimResults: Settings.shared.deepgramInterimResults,
+            smartFormat: Settings.shared.deepgramSmartFormat,
+            endpointingMs: Settings.shared.deepgramEndpointingMs,
+            model: Settings.shared.deepgramModel
+        )
+    }
 
     public func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
         let apiKey = await ProviderSettings.shared.apiKey(for: id)
@@ -23,6 +39,34 @@ public final class DeepgramProvider: StreamingTranscriptionProvider, @unchecked 
         let session = DeepgramStreamingSession(apiKey: apiKey, config: config)
         try await session.connect()
         return session
+    }
+}
+
+// MARK: - API Key Validation
+
+extension DeepgramProvider: APIKeyValidatable {
+    /// Validate a Deepgram API key by calling the /v1/projects endpoint (free, no cost).
+    /// Returns nil on success, or a user-facing error message on failure.
+    public nonisolated func validateAPIKey(_ key: String) async -> String? {
+        let url = URL(string: "https://api.deepgram.com/v1/projects")!
+        var request = URLRequest(url: url)
+        request.setValue("Token \(key)", forHTTPHeaderField: "Authorization")
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return "Invalid response from Deepgram"
+            }
+            switch http.statusCode {
+            case 200: return nil
+            case 401, 403: return "Invalid API key (authentication failed)"
+            default: return "Unexpected response (HTTP \(http.statusCode))"
+            }
+        } catch {
+            return "Network error: \(error.localizedDescription)"
+        }
     }
 }
 

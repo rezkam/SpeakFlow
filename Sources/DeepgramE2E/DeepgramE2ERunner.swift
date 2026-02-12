@@ -293,7 +293,7 @@ func looseMatch(expected: String, actual: String) -> Bool {
         print("   Usage: DEEPGRAM_API_KEY=your_key swift run DeepgramE2E")
         exit(1)
     }
-    ProviderSettings.shared.setApiKey(apiKey, for: "deepgram")
+    ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
 
     var passed = 0
     var failed = 0
@@ -1299,17 +1299,17 @@ func looseMatch(expected: String, actual: String) -> Bool {
     print("    Current provider: \(ProviderSettings.shared.activeProviderId)")
 
     // Switch to deepgram
-    ProviderSettings.shared.activeProviderId = "deepgram"
-    let isDG = ProviderSettings.shared.activeProviderId == "deepgram"
+    ProviderSettings.shared.activeProviderId = ProviderId.deepgram
+    let isDG = ProviderSettings.shared.activeProviderId == ProviderId.deepgram
     print("    After set to deepgram: \(ProviderSettings.shared.activeProviderId) (correct: \(isDG))")
 
     // Check API key
-    let hasKey = ProviderSettings.shared.apiKey(for: "deepgram") != nil
+    let hasKey = ProviderSettings.shared.apiKey(for: ProviderId.deepgram) != nil
     print("    Deepgram API key present: \(hasKey)")
 
     // Switch back to gpt
-    ProviderSettings.shared.activeProviderId = "gpt"
-    let isW = ProviderSettings.shared.activeProviderId == "gpt"
+    ProviderSettings.shared.activeProviderId = ProviderId.chatGPT
+    let isW = ProviderSettings.shared.activeProviderId == ProviderId.chatGPT
     print("    After set to gpt: \(ProviderSettings.shared.activeProviderId) (correct: \(isW))")
 
     // Restore

@@ -2,37 +2,22 @@ import Foundation
 import CryptoKit
 import OSLog
 
-/// OAuth credentials for OpenAI Codex (matches ~/.codex/auth.json format)
+/// OAuth credentials for ChatGPT transcription
 public struct OAuthCredentials: Codable, Sendable {
     public var accessToken: String
     public var refreshToken: String
     public var idToken: String?
     public var accountId: String
     public var lastRefresh: Date
-    
+
     public var isExpired: Bool {
         // Access tokens typically expire in 10 days, but we refresh more frequently
         Date().timeIntervalSince(lastRefresh) > 86400 // 24 hours
     }
-    
+
     /// Check if token should be refreshed (within given seconds of last refresh)
     public func shouldRefresh(after seconds: TimeInterval) -> Bool {
         Date().timeIntervalSince(lastRefresh) > seconds
-    }
-}
-
-/// Codex auth.json file format (matches ~/.codex/auth.json exactly)
-private struct CodexAuthFile: Codable {
-    var auth_mode: String
-    var OPENAI_API_KEY: String?
-    var tokens: CodexTokens
-    var last_refresh: String
-    
-    struct CodexTokens: Codable {
-        var id_token: String?
-        var access_token: String
-        var refresh_token: String
-        var account_id: String
     }
 }
 
@@ -120,13 +105,7 @@ public final class OpenAICodexAuth {
         set { _httpProviderLock.withLock { $0 = newValue } }
     }
     
-    // Credential storage path: ~/.speakflow/auth.json (SpeakFlow's own storage)
-    private static var credentialsURL: URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let speakflowDir = home.appendingPathComponent(".speakflow")
-        try? FileManager.default.createDirectory(at: speakflowDir, withIntermediateDirectories: true)
-        return speakflowDir.appendingPathComponent("auth.json")
-    }
+    private static let storage = UnifiedAuthStorage.shared
     
     // MARK: - PKCE
     
@@ -354,67 +333,19 @@ public final class OpenAICodexAuth {
         return accountId
     }
     
-    // MARK: - Credential Storage (Codex format: ~/.codex/auth.json)
-    
+    // MARK: - Credential Storage (delegated to UnifiedAuthStorage)
+
     public static func saveCredentials(_ credentials: OAuthCredentials) throws {
-        let iso8601Formatter = ISO8601DateFormatter()
-        iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        
-        let authFile = CodexAuthFile(
-            auth_mode: "chatgpt",
-            OPENAI_API_KEY: nil,
-            tokens: CodexAuthFile.CodexTokens(
-                id_token: credentials.idToken,
-                access_token: credentials.accessToken,
-                refresh_token: credentials.refreshToken,
-                account_id: credentials.accountId
-            ),
-            last_refresh: iso8601Formatter.string(from: credentials.lastRefresh)
-        )
-        
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(authFile)
-        
-        // Write with restricted permissions (600)
-        let fileURL = credentialsURL
-        try data.write(to: fileURL, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-        
-        Logger.auth.debug("Credentials saved to \(fileURL.path)")
+        try storage.saveChatGPTCredentials(credentials)
+        Logger.auth.debug("Credentials saved")
     }
-    
+
     public static func loadCredentials() -> OAuthCredentials? {
-        let fileURL = credentialsURL
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            return nil
-        }
-        
-        do {
-            let data = try Data(contentsOf: fileURL)
-            let authFile = try JSONDecoder().decode(CodexAuthFile.self, from: data)
-            
-            // Parse last_refresh date
-            // P2 Security: Use distantPast on parse failure to force refresh, not Date() which skips it
-            let iso8601Formatter = ISO8601DateFormatter()
-            iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let lastRefresh = iso8601Formatter.date(from: authFile.last_refresh) ?? Date.distantPast
-            
-            return OAuthCredentials(
-                accessToken: authFile.tokens.access_token,
-                refreshToken: authFile.tokens.refresh_token,
-                idToken: authFile.tokens.id_token,
-                accountId: authFile.tokens.account_id,
-                lastRefresh: lastRefresh
-            )
-        } catch {
-            Logger.auth.error("Failed to load credentials: \(error.localizedDescription)")
-            return nil
-        }
+        storage.loadChatGPTCredentials()
     }
-    
+
     public static func deleteCredentials() {
-        try? FileManager.default.removeItem(at: credentialsURL)
+        storage.deleteChatGPTCredentials()
         Logger.auth.info("Credentials deleted")
     }
     

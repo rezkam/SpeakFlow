@@ -75,13 +75,13 @@ struct HotkeyListenerCleanupRegressionTests {
 @Suite("Enter key handling during processing-final — source regression")
 struct EnterKeyProcessingFinalSourceTests {
 
-    @Test func testStopRecordingDoesNotStopKeyListener() throws {
+    @Test func testStopRecordingDoesNotStopKeyInterceptorSynchronously() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
         let body = extractFunctionBody(named: "stopRecording", from: source)
         #expect(body != nil, "stopRecording function must exist")
         if let body = body {
-            // The key listener must stay active during processing-final so Escape/Enter work.
-            // stopKeyListener() may appear inside Task blocks (deferred cleanup after processing),
+            // The key interceptor must stay active during processing-final so Escape/Enter work.
+            // keyInterceptor.stop() may appear inside Task blocks (deferred cleanup after processing),
             // but must NOT be called synchronously before the first Task block.
             let lines = body.components(separatedBy: "\n")
             var reachedTask = false
@@ -89,148 +89,145 @@ struct EnterKeyProcessingFinalSourceTests {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty || trimmed.hasPrefix("//") { continue }
                 if trimmed.contains("Task {") || trimmed.contains("Task(") { reachedTask = true }
-                if !reachedTask && trimmed.contains("stopKeyListener()") {
-                    Issue.record("stopRecording calls stopKeyListener() synchronously before Task — key listener must stay active during processing-final")
+                if !reachedTask && trimmed.contains("keyInterceptor.stop()") {
+                    Issue.record("stopRecording calls keyInterceptor.stop() synchronously before Task — key interceptor must stay active during processing-final")
                 }
             }
         }
     }
 
-    @Test func testKeyHandlerHandlesBothPhases() throws {
+    @Test func testEnterCallbackHandlesBothPhases() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
-        // The key event handler must check both isRecording and isProcessingFinal
-        let handler = extractFunctionBody(named: "handleRecordingKeyEvent", from: source)
-        #expect(handler != nil, "handleRecordingKeyEvent must exist")
-        if let handler = handler {
-            #expect(handler.contains("self.isRecording"), "Handler must check isRecording")
-            #expect(handler.contains("self.isProcessingFinal"), "Handler must check isProcessingFinal")
-            #expect(handler.contains("shouldPressEnterOnComplete = true"),
-                    "Handler must flag Enter for post-completion during processing-final")
-        }
+        // The onEnterPressed callback must check both isRecording and isProcessingFinal
+        #expect(source.contains("onEnterPressed"),
+                "RecordingController must set up onEnterPressed callback on KeyInterceptor")
+        #expect(source.contains("self.isRecording") && source.contains("self.stopRecordingAndSubmit()"),
+                "Enter callback must call stopRecordingAndSubmit when recording")
+        #expect(source.contains("self.isProcessingFinal") && source.contains("self.shouldPressEnterOnComplete = true"),
+                "Enter callback must flag Enter for post-completion during processing-final")
     }
 
-    @Test func testFinishIfDoneStopsKeyListener() throws {
+    @Test func testFinishIfDoneStopsKeyInterceptor() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
         let body = extractFunctionBody(named: "finishIfDone", from: source)
         #expect(body != nil, "finishIfDone must exist")
         if let body = body {
-            // stopKeyListener must be called in finishIfDone (at least once for normal path)
-            let count = countOccurrences(of: "stopKeyListener()", in: body)
+            let count = countOccurrences(of: "keyInterceptor.stop()", in: body)
             #expect(count >= 2,
-                    "finishIfDone must call stopKeyListener in both timeout and success paths (found \(count))")
+                    "finishIfDone must call keyInterceptor.stop() in both timeout and success paths (found \(count))")
         }
     }
 
-    @Test func testCancelRecordingStopsKeyListener() throws {
+    @Test func testCancelRecordingStopsKeyInterceptor() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
         let body = extractFunctionBody(named: "cancelRecording", from: source)
         #expect(body != nil, "cancelRecording must exist")
         if let body = body {
-            #expect(body.contains("stopKeyListener()"),
-                    "cancelRecording must stop key listener")
+            #expect(body.contains("keyInterceptor.stop()"),
+                    "cancelRecording must stop key interceptor")
         }
     }
 
-    @Test func testEnterKeyConsumedDuringProcessingFinal() throws {
+    @Test func testEnterKeyConsumedByInterceptor() throws {
         // The CGEvent tap handler returns nil for Enter (keyCode 36) = consumed
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
-        let handler = extractFunctionBody(named: "handleRecordingKeyEvent", from: source)
-        #expect(handler != nil)
+        let source = try readProjectSource("Sources/App/KeyInterceptor.swift")
+        let handler = extractFunctionBody(named: "handleKeyEvent", from: source)
+        #expect(handler != nil, "handleKeyEvent must exist in KeyInterceptor")
         if let handler = handler {
-            // Enter case must return nil to consume the event
             #expect(handler.contains("case 36:"))
             #expect(handler.contains("return nil"))
         }
     }
 
-    @Test func testFallbackMonitorAlsoHandlesProcessingFinal() throws {
+    @Test func testBothEscapeAndEnterCallbacksConfigured() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
-        // The NSEvent fallback monitor must also handle isProcessingFinal
-        #expect(source.contains("self.isProcessingFinal"),
-                "Fallback NSEvent monitor must handle isProcessingFinal phase")
+        #expect(source.contains("onEscapePressed"),
+                "RecordingController must configure onEscapePressed on KeyInterceptor")
+        #expect(source.contains("onEnterPressed"),
+                "RecordingController must configure onEnterPressed on KeyInterceptor")
     }
 }
 
-// MARK: - Key Listener Safety Tests
+// MARK: - Key Interceptor Safety Tests
 
 @Suite("P1 — Enter/Escape not consumed when recording inactive")
-struct KeyListenerSafetyTests {
+struct KeyInterceptorSafetyTests {
 
     @Test func testKeyListenerActiveAtomicFlagExists() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        let source = try readProjectSource("Sources/App/KeyInterceptor.swift")
         #expect(source.contains("keyListenerActive"),
-                "RecordingController must have a thread-safe keyListenerActive flag")
+                "KeyInterceptor must have a thread-safe keyListenerActive flag")
         #expect(source.contains("OSAllocatedUnfairLock"),
                 "keyListenerActive must use OSAllocatedUnfairLock for thread safety")
     }
 
-    @Test func testHandleRecordingKeyEventChecksFlag() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+    @Test func testHandleKeyEventChecksFlag() throws {
+        let source = try readProjectSource("Sources/App/KeyInterceptor.swift")
 
-        let body = extractFunctionBody(named: "handleRecordingKeyEvent", from: source)
-        #expect(body != nil, "handleRecordingKeyEvent must exist")
+        let body = extractFunctionBody(named: "handleKeyEvent", from: source)
+        #expect(body != nil, "handleKeyEvent must exist in KeyInterceptor")
         guard let body else { return }
 
         // Must check keyListenerActive BEFORE examining keyCode
         #expect(body.contains("keyListenerActive"),
-                "handleRecordingKeyEvent must check keyListenerActive flag")
+                "handleKeyEvent must check keyListenerActive flag")
 
         // The guard must return the event (pass-through), not nil (consume)
         #expect(body.contains("Unmanaged.passRetained(event)"),
                 "When flag is false, event must pass through (not consumed)")
     }
 
-    @Test func testStartKeyListenerSetsFlag() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+    @Test func testStartSetsFlag() throws {
+        let source = try readProjectSource("Sources/App/KeyInterceptor.swift")
 
-        let body = extractFunctionBody(named: "startKeyListener", from: source)
-        #expect(body != nil, "startKeyListener must exist")
+        let body = extractFunctionBody(named: "start", from: source)
+        #expect(body != nil, "start must exist in KeyInterceptor")
         guard let body else { return }
 
         #expect(body.contains("keyListenerActive"),
-                "startKeyListener must set keyListenerActive to true")
+                "start must set keyListenerActive to true")
     }
 
-    @Test func testStopKeyListenerClearsFlag() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+    @Test func testStopClearsFlag() throws {
+        let source = try readProjectSource("Sources/App/KeyInterceptor.swift")
 
-        let body = extractFunctionBody(named: "stopKeyListener", from: source)
-        #expect(body != nil, "stopKeyListener must exist")
+        let body = extractFunctionBody(named: "stop", from: source)
+        #expect(body != nil, "stop must exist in KeyInterceptor")
         guard let body else { return }
 
         #expect(body.contains("keyListenerActive"),
-                "stopKeyListener must set keyListenerActive to false")
+                "stop must set keyListenerActive to false")
     }
 
-    @Test func testRecorderStartFailureCleansUpKeyListener() throws {
+    @Test func testRecorderStartFailureCleansUpKeyInterceptor() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
 
-        let body = extractFunctionBody(named: "startGPTRecording", from: source)
-        #expect(body != nil, "startGPTRecording must exist")
+        let body = extractFunctionBody(named: "startBatchRecording", from: source)
+        #expect(body != nil, "startBatchRecording must exist")
         guard let body else { return }
 
-        // Key listener must start eagerly so Escape works immediately
-        #expect(body.contains("startKeyListener()"),
-                "startGPTRecording must call startKeyListener()")
+        // Key interceptor must start eagerly so Escape works immediately
+        #expect(body.contains("keyInterceptor.start()"),
+                "startBatchRecording must call keyInterceptor.start()")
 
-        // The failure branch must call stopKeyListener
-        #expect(body.contains("stopKeyListener()"),
-                "Recorder start failure must call stopKeyListener() to clean up")
+        // The failure branch must stop the interceptor
+        #expect(body.contains("keyInterceptor.stop()"),
+                "Recorder start failure must call keyInterceptor.stop() to clean up")
 
-        // startKeyListener must appear before "recorder?.start()" (the async start)
-        if let keyListenerIdx = body.range(of: "startKeyListener()")?.lowerBound,
+        // keyInterceptor.start() must appear before "recorder?.start()" (the async start)
+        if let keyIdx = body.range(of: "keyInterceptor.start()")?.lowerBound,
            let recorderStartIdx = body.range(of: "recorder?.start()")?.lowerBound {
-            #expect(keyListenerIdx < recorderStartIdx,
-                    "startKeyListener() must be called before recorder?.start()")
+            #expect(keyIdx < recorderStartIdx,
+                    "keyInterceptor.start() must be called before recorder?.start()")
         }
     }
 
     @Test func testFlagClearedBeforeTapDisabled() throws {
-        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        let source = try readProjectSource("Sources/App/KeyInterceptor.swift")
 
-        let body = extractFunctionBody(named: "stopKeyListener", from: source)
+        let body = extractFunctionBody(named: "stop", from: source)
         guard let body else {
-            Issue.record("stopKeyListener not found")
+            Issue.record("stop not found in KeyInterceptor")
             return
         }
 
@@ -238,7 +235,7 @@ struct KeyListenerSafetyTests {
         // so any in-flight callback sees the flag as false immediately.
         guard let flagPos = body.range(of: "keyListenerActive")?.lowerBound,
               let tapPos = body.range(of: "CGEvent.tapEnable")?.lowerBound else {
-            Issue.record("Required code not found in stopKeyListener")
+            Issue.record("Required code not found in KeyInterceptor.stop")
             return
         }
         #expect(flagPos < tapPos,
@@ -246,74 +243,72 @@ struct KeyListenerSafetyTests {
     }
 }
 
-// MARK: - Key Listener Start Order Tests
+// MARK: - Key Interceptor Start Order Tests
 
-@Suite("Issue #7 Regression — Key Listener Immediate Start for Escape")
-struct KeyListenerStartOrderTests {
+@Suite("Issue #7 Regression — Key Interceptor Immediate Start for Escape")
+struct KeyInterceptorStartOrderTests {
 
-    /// Key listener must start BEFORE the async Task so Escape works immediately.
-    /// Previously it was inside the success branch, meaning Escape was dead
-    /// during the 1-2s audio engine / WebSocket startup.
-    @Test func testKeyListenerStartsBeforeAsyncWork() throws {
+    /// Key interceptor must start BEFORE the async Task so Escape works immediately.
+    @Test func testKeyInterceptorStartsBeforeAsyncWork() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
 
-        // Check GPT mode: startKeyListener before recorder?.start()
-        let gptBody = extractFunctionBody(named: "startGPTRecording", from: source)
-        #expect(gptBody != nil, "startGPTRecording must exist")
-        guard let gptBody else { return }
+        // Check batch mode: keyInterceptor.start() before recorder?.start()
+        let batchBody = extractFunctionBody(named: "startBatchRecording", from: source)
+        #expect(batchBody != nil, "startBatchRecording must exist")
+        guard let batchBody else { return }
 
-        #expect(gptBody.contains("startKeyListener()"),
-                "startGPTRecording must call startKeyListener()")
+        #expect(batchBody.contains("keyInterceptor.start()"),
+                "startBatchRecording must call keyInterceptor.start()")
 
-        if let klIdx = gptBody.range(of: "startKeyListener()")?.lowerBound,
-           let startIdx = gptBody.range(of: "recorder?.start()")?.lowerBound {
+        if let klIdx = batchBody.range(of: "keyInterceptor.start()")?.lowerBound,
+           let startIdx = batchBody.range(of: "recorder?.start()")?.lowerBound {
             #expect(klIdx < startIdx,
-                    "startKeyListener() must be called BEFORE recorder?.start() for immediate Escape")
+                    "keyInterceptor.start() must be called BEFORE recorder?.start() for immediate Escape")
         }
 
-        // Check Deepgram mode: startKeyListener before controller.start()
-        let dgBody = extractFunctionBody(named: "startDeepgramRecording", from: source)
-        #expect(dgBody != nil, "startDeepgramRecording must exist")
-        guard let dgBody else { return }
+        // Check streaming mode: keyInterceptor.start() before controller.start()
+        let streamBody = extractFunctionBody(named: "startStreamingRecording", from: source)
+        #expect(streamBody != nil, "startStreamingRecording must exist")
+        guard let streamBody else { return }
 
-        #expect(dgBody.contains("startKeyListener()"),
-                "startDeepgramRecording must call startKeyListener()")
+        #expect(streamBody.contains("keyInterceptor.start()"),
+                "startStreamingRecording must call keyInterceptor.start()")
 
-        if let klIdx = dgBody.range(of: "startKeyListener()")?.lowerBound,
-           let startIdx = dgBody.range(of: "controller.start(")?.lowerBound {
+        if let klIdx = streamBody.range(of: "keyInterceptor.start()")?.lowerBound,
+           let startIdx = streamBody.range(of: "controller.start(")?.lowerBound {
             #expect(klIdx < startIdx,
-                    "startKeyListener() must be called BEFORE controller.start() for immediate Escape")
+                    "keyInterceptor.start() must be called BEFORE controller.start() for immediate Escape")
         }
     }
 
-    /// Exactly one call to startKeyListener per recording function.
-    @Test func testExactlyOneStartKeyListenerCall() throws {
+    /// Exactly one call to keyInterceptor.start() per recording function.
+    @Test func testExactlyOneStartCall() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
 
-        for funcName in ["startGPTRecording", "startDeepgramRecording"] {
+        for funcName in ["startBatchRecording", "startStreamingRecording"] {
             let body = extractFunctionBody(named: funcName, from: source)
             guard let body else {
                 Issue.record("\(funcName) not found")
                 continue
             }
-            let count = body.components(separatedBy: "startKeyListener()").count - 1
+            let count = body.components(separatedBy: "keyInterceptor.start()").count - 1
             #expect(count == 1,
-                    "Must call startKeyListener() exactly once in \(funcName), found \(count)")
+                    "Must call keyInterceptor.start() exactly once in \(funcName), found \(count)")
         }
     }
 
-    /// The failure branch must call stopKeyListener to clean up the eagerly-started listener.
-    @Test func testFailureBranchCallsStopKeyListener() throws {
+    /// The failure branch must call keyInterceptor.stop() to clean up.
+    @Test func testFailureBranchStopsKeyInterceptor() throws {
         let source = try readProjectSource("Sources/App/RecordingController.swift")
 
-        for funcName in ["startGPTRecording", "startDeepgramRecording"] {
+        for funcName in ["startBatchRecording", "startStreamingRecording"] {
             let body = extractFunctionBody(named: funcName, from: source)
             guard let body else {
                 Issue.record("\(funcName) not found")
                 continue
             }
-            #expect(body.contains("stopKeyListener()"),
-                    "\(funcName) failure branch must call stopKeyListener() to clean up")
+            #expect(body.contains("keyInterceptor.stop()"),
+                    "\(funcName) failure branch must call keyInterceptor.stop() to clean up")
         }
     }
 }
