@@ -2159,9 +2159,10 @@ struct LiveStreamingSourceTests {
         let providerSource = try readProjectSource("Sources/SpeakFlowCore/Providers/TranscriptionProvider.swift")
         #expect(providerSource.contains("case batch"), "ProviderMode must define batch case")
         #expect(providerSource.contains("case streaming"), "ProviderMode must define streaming case")
-        // Provider picker must be data-driven via the registry
+        // Provider picker must be data-driven via the registry (only configured providers)
         let pickerSource = try readProjectSource("Sources/App/TranscriptionSettingsView.swift")
-        #expect(pickerSource.contains("ProviderRegistry.shared.allProviders"), "Provider picker must use ProviderRegistry")
+        #expect(pickerSource.contains("ProviderRegistry.shared.configuredProviders"),
+                "Provider picker must show only configured providers from ProviderRegistry")
     }
 
     @Test func testAudioSubsystemPreWarmed() throws {

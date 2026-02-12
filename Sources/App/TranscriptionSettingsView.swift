@@ -9,36 +9,59 @@ struct TranscriptionSettingsView: View {
     private let state = AppState.shared
 
     var body: some View {
+        // Read refreshVersion so the view re-evaluates when provider configuration changes
+        let _ = state.refreshVersion
+        let configured = ProviderRegistry.shared.configuredProviders
+
         Form {
-            // MARK: - Provider Selection
+            // MARK: - Provider Selection (only shown when multiple providers are configured)
 
-            Section {
-                Picker("Transcription Provider", selection: providerBinding) {
-                    ForEach(ProviderRegistry.shared.allProviders, id: \.id) { provider in
-                        Text(provider.providerDisplayName).tag(provider.id)
+            if configured.count > 1 {
+                Section {
+                    Picker("Transcription Provider", selection: providerBinding) {
+                        ForEach(configured, id: \.id) { provider in
+                            Text(provider.providerDisplayName).tag(provider.id)
+                        }
                     }
+                    .pickerStyle(.radioGroup)
+                } header: {
+                    Text("Provider")
+                } footer: {
+                    Text("Batch providers record audio and transcribe after each chunk. Streaming providers transcribe in real-time as you speak.")
                 }
-                .pickerStyle(.radioGroup)
-
-                if !state.isProviderConfigured(state.activeProviderId) {
-                    providerWarning
+            } else if configured.isEmpty {
+                Section {
+                    Label(
+                        "Set up a provider in the Accounts tab to configure transcription settings.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+                } header: {
+                    Text("Provider")
                 }
-            } header: {
-                Text("Provider")
-            } footer: {
-                Text("Batch providers record audio and transcribe after each chunk. Streaming providers transcribe in real-time as you speak.")
             }
 
-            // MARK: - Provider-Specific Settings
+            // MARK: - Provider-Specific Settings (only when active provider is configured)
 
-            if state.isStreamingProvider {
-                streamingSettings
-            } else {
-                batchSettings
+            if !configured.isEmpty {
+                if state.isStreamingProvider {
+                    streamingSettings
+                } else {
+                    batchSettings
+                }
             }
         }
         .formStyle(.grouped)
         .navigationTitle("Transcription")
+        .onAppear {
+            // Auto-select the only configured provider when current selection is unconfigured
+            let configured = ProviderRegistry.shared.configuredProviders
+            if !configured.isEmpty, !configured.contains(where: { $0.id == state.activeProviderId }) {
+                ProviderSettings.shared.activeProviderId = configured[0].id
+                state.refresh()
+            }
+        }
     }
 
     // MARK: - Provider
@@ -51,25 +74,6 @@ struct TranscriptionSettingsView: View {
                 state.refresh()
             }
         )
-    }
-
-    @ViewBuilder
-    private var providerWarning: some View {
-        let provider = ProviderRegistry.shared.provider(for: state.activeProviderId)
-        let message: String = {
-            switch provider?.authRequirement {
-            case .oauth:
-                return "Log in to \(provider?.displayName ?? "this provider") in the Accounts tab to use this provider."
-            case .apiKey:
-                return "Set an API key in the Accounts tab to use \(provider?.displayName ?? "this provider")."
-            default:
-                return "Configure this provider in the Accounts tab."
-            }
-        }()
-
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.orange)
-            .font(.callout)
     }
 
     // MARK: - Streaming Settings (Deepgram)

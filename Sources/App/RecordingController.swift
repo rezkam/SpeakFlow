@@ -127,16 +127,26 @@ final class RecordingController {
             }
         }
 
+        let providerId = ProviderSettings.shared.activeProviderId
+        let provider = ProviderRegistry.shared.provider(for: providerId)
+        guard let provider, provider.isConfigured else {
+            NSSound(named: "Basso")?.play()
+            AppState.shared.showBanner(
+                "Set up a transcription provider in Accounts to start dictating",
+                style: .error
+            )
+            return
+        }
+
         isRecording = true; isProcessingFinal = false; hasPlayedCompletionSound = false
         shouldPressEnterOnComplete = false; fullTranscript = ""
 
         textInserter.captureTarget()
         NSSound(named: "Blow")?.play()
 
-        let providerId = ProviderSettings.shared.activeProviderId
-        if let streaming = ProviderRegistry.shared.streamingProvider(for: providerId) {
+        if let streaming = provider as? any StreamingTranscriptionProvider {
             startStreamingRecording(provider: streaming)
-        } else if ProviderRegistry.shared.batchProvider(for: providerId) != nil {
+        } else if provider is any BatchTranscriptionProvider {
             startBatchRecording()
         }
         onStateChanged?()
@@ -169,10 +179,6 @@ final class RecordingController {
     // MARK: - Streaming Recording
 
     private func startStreamingRecording(provider: any StreamingTranscriptionProvider) {
-        guard provider.isConfigured else {
-            isRecording = false; NSSound(named: "Basso")?.play(); return
-        }
-
         let config = provider.buildSessionConfig()
 
         let controller = LiveStreamingController()
