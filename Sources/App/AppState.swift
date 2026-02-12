@@ -22,11 +22,18 @@ final class AppState {
     // MARK: - Provider
     var activeProviderId: String = ProviderId.chatGPT
 
+    /// Monotonic counter incremented on every `refresh()` call.
+    /// Views that depend on external state (e.g. provider configuration from ProviderRegistry)
+    /// should read this property in their body to trigger re-evaluation when configuration changes.
+    private(set) var refreshVersion = 0
+
     var isStreamingProvider: Bool {
         ProviderRegistry.shared.provider(for: activeProviderId)?.mode == .streaming
     }
 
     /// Whether a specific provider is configured and ready to use.
+    /// Note: Views must read `refreshVersion` in their body to observe changes,
+    /// since this delegates to ProviderRegistry which isn't @Observable.
     func isProviderConfigured(_ id: String) -> Bool {
         ProviderRegistry.shared.isProviderConfigured(id)
     }
@@ -100,6 +107,7 @@ final class AppState {
     // MARK: - Refresh
 
     func refresh() {
+        refreshVersion += 1
         accessibilityGranted = AXIsProcessTrusted()
         microphoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         activeProviderId = ProviderSettings.shared.activeProviderId

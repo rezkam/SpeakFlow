@@ -935,3 +935,65 @@ struct ProviderIdRegressionTests {
                 "binding helper must use ReferenceWritableKeyPath for class singleton access")
     }
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - Provider Configuration Gate
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@Suite("Provider Configuration Gate — Recording requires configured provider")
+struct ProviderConfigurationGateTests {
+
+    /// REGRESSION: startRecording must check provider.isConfigured before setting isRecording = true.
+    /// The UI test mock path also sets isRecording = true early, so we skip past it by
+    /// looking at the code after permission checks (the real recording path).
+    @Test func testStartRecordingChecksProviderConfiguredBeforeRecordingState() throws {
+        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        guard let funcStart = source.range(of: "func startRecording()") else {
+            Issue.record("startRecording not found"); return
+        }
+        let funcBody = String(source[funcStart.lowerBound...].prefix(2000))
+
+        // Find the provider lookup + isConfigured check
+        guard let providerLookup = funcBody.range(of: "provider.isConfigured") ?? funcBody.range(of: "isConfigured") else {
+            Issue.record("No isConfigured check found in startRecording"); return
+        }
+
+        // The real recording state change happens AFTER the provider check,
+        // preceded by captureTarget and the start sound. Look for this specific pattern.
+        let afterConfigCheck = String(funcBody[providerLookup.lowerBound...])
+        #expect(afterConfigCheck.contains("isRecording = true"),
+                "isRecording = true must appear after provider isConfigured check")
+
+        // Also verify the showBanner call exists in the guard-else block
+        let beforeRecordingStart = String(funcBody[funcBody.startIndex..<providerLookup.upperBound])
+        let afterRecordingStart = String(funcBody[providerLookup.lowerBound...].prefix(500))
+        #expect(afterRecordingStart.contains("showBanner") || beforeRecordingStart.contains("showBanner"),
+                "startRecording must show a banner near the isConfigured check")
+    }
+
+    /// REGRESSION: startRecording must show a banner when no provider is configured.
+    @Test func testStartRecordingShowsBannerOnUnconfiguredProvider() throws {
+        let source = try readProjectSource("Sources/App/RecordingController.swift")
+        guard let funcStart = source.range(of: "func startRecording()") else {
+            Issue.record("startRecording not found"); return
+        }
+        let funcBody = String(source[funcStart.lowerBound...].prefix(1500))
+        #expect(funcBody.contains("showBanner"),
+                "startRecording must show a banner when provider is not configured")
+    }
+
+    /// Menu bar Start Dictation button must be disabled when no provider is configured.
+    @Test func testMenuBarDisabledWhenNoProviderConfigured() throws {
+        let source = try readProjectSource("Sources/App/SpeakFlowApp.swift")
+        #expect(source.contains("configuredProviders.isEmpty"),
+                "Menu bar dictation button must check for configured providers")
+    }
+
+    /// REGRESSION: AccountsSettingsView must read refreshVersion for reactive updates
+    /// after login/logout changes provider configuration status.
+    @Test func testAccountsSettingsViewReadsRefreshVersion() throws {
+        let source = try readProjectSource("Sources/App/AccountsSettingsView.swift")
+        #expect(source.contains("refreshVersion"),
+                "AccountsSettingsView must read state.refreshVersion to trigger re-evaluation on config changes")
+    }
+}

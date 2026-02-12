@@ -61,6 +61,7 @@ struct MenuBarView: View {
         Button(dictationLabel) {
             RecordingController.shared.toggle()
         }
+        .disabled(ProviderRegistry.shared.configuredProviders.isEmpty && !state.isRecording)
 
         // Show provider switcher when more than one provider is configured
         let configured = ProviderRegistry.shared.configuredProviders

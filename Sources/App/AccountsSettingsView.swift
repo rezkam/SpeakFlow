@@ -19,6 +19,10 @@ struct AccountsSettingsView: View {
     }
 
     var body: some View {
+        // Read refreshVersion to trigger re-evaluation when provider configuration changes
+        // (e.g. after OAuth login or API key save calls AppState.shared.refresh())
+        let _ = state.refreshVersion
+
         Form {
             Section {
                 HStack {
