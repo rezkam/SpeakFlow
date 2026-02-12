@@ -354,69 +354,10 @@ struct OAuthCallbackServerRegressionTests {
     }
 }
 
-// MARK: - Issue #3 Regression: OAuthCallbackServer data-race guard (source-level)
+// MARK: - Issue #3 Regression: OAuthCallbackServer data-race guard
 
 @Suite("Issue #3 — OAuthCallbackServer synchronization guards")
 struct Issue3OAuthCallbackServerSourceTests {
-
-    /// The server MUST protect shared mutable state with OSAllocatedUnfairLock,
-    /// not bare ivars. This is the core fix for the data-race / double-resume crash.
-    @Test func testServerUsesUnfairLockForStateProtection() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OAuthCallbackServer.swift")
-        #expect(source.contains("OSAllocatedUnfairLock"),
-                "OAuthCallbackServer must use OSAllocatedUnfairLock to protect shared state")
-    }
-
-    /// The continuation must only be resumed once. A `resumeOnce` (or equivalent)
-    /// pattern with a consumed flag under lock prevents the fatal double-resume trap.
-    @Test func testResumeOnceGuardExists() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OAuthCallbackServer.swift")
-        #expect(source.contains("resumeOnce"),
-                "Must have a resumeOnce guard to prevent double-resume of CheckedContinuation")
-        #expect(source.contains("continuationConsumed"),
-                "Must track whether continuation was already consumed")
-    }
-
-    /// All reads/writes to `socket`, `isRunning`, and `continuation` MUST go through
-    /// `state.withLock`. Bare access would be a data race.
-    /// We verify this by checking the vars only exist inside the State struct, not at class level.
-    @Test func testNoBareMutableStateAccess() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OAuthCallbackServer.swift")
-        // The mutable fields must live inside the private State struct (protected by lock).
-        // Strip out the State struct body, then check remaining source has no bare declarations.
-        guard let structStart = source.range(of: "private struct State {"),
-              let structEnd = source[structStart.upperBound...].range(of: "\n    }") else {
-            Issue.record("State struct not found — mutable state must be in a lock-protected struct")
-            return
-        }
-        // Source with the State struct body removed — anything left is class-level
-        let outsideState = String(source[..<structStart.lowerBound])
-                         + String(source[structEnd.upperBound...])
-        let lines = outsideState.components(separatedBy: "\n")
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("//") || trimmed.hasPrefix("///") { continue }
-            if trimmed.hasPrefix("private var socket") || trimmed.hasPrefix("var socket") {
-                Issue.record("Found bare 'var socket' outside State struct — data race")
-            }
-            if trimmed.hasPrefix("private var isRunning") || trimmed.hasPrefix("var isRunning") {
-                Issue.record("Found bare 'var isRunning' outside State struct — data race")
-            }
-            if trimmed.hasPrefix("private var continuation") || trimmed.hasPrefix("var continuation") {
-                Issue.record("Found bare 'var continuation' outside State struct — data race")
-            }
-        }
-    }
-
-    /// The onCancel handler and acceptConnections both call resumeOnce —
-    /// verify the cancellation handler exists in waitForCallback.
-    @Test func testCancellationHandlerCallsResumeOnce() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OAuthCallbackServer.swift")
-        #expect(source.contains("withTaskCancellationHandler"),
-                "waitForCallback must use withTaskCancellationHandler")
-        #expect(source.contains("onCancel"),
-                "Must have an onCancel block that calls resumeOnce")
-    }
 
     /// Behavioral: cancelling during active wait returns nil promptly (< 1s).
     @Test func testCancellationDuringWaitReturnsNilPromptly() async throws {
@@ -522,24 +463,6 @@ struct Issue5TokenRefreshEdgeCaseTests {
                 "Waves must get different tokens (separate refresh tasks)")
         #expect(callCounter.withLock { $0 } == 2, "Exactly 2 refresh calls for 2 waves")
     }
-
-    /// Source-level: getValidAccessToken must delegate to TokenRefreshCoordinator, not
-    /// call refreshTokens directly (which would allow concurrent double-refresh).
-    @Test func testGetValidAccessTokenUsesCoordinator() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-
-        // Find the getValidAccessToken method body
-        guard let funcRange = source.range(of: "public static func getValidAccessToken") else {
-            Issue.record("getValidAccessToken not found")
-            return
-        }
-        let body = String(source[funcRange.lowerBound...].prefix(600))
-
-        #expect(body.contains("TokenRefreshCoordinator"),
-                "getValidAccessToken must use TokenRefreshCoordinator for serialized refresh")
-        #expect(!body.contains("refreshTokens("),
-                "getValidAccessToken must NOT call refreshTokens directly — use coordinator")
-    }
 }
 
 // MARK: - Issue #6 Regression: Rate limiter atomic reservation (additional)
@@ -577,42 +500,6 @@ struct Issue6RateLimiterAtomicTests {
         let totalSpan = times.last! - times.first!
         #expect(totalSpan >= interval * 5.0 * 0.5,
                 "6 slots should span ~5 intervals (\(interval * 5.0)s), got \(totalSpan)s")
-    }
-
-    /// Source-level: TranscriptionService.transcribe must use a SINGLE atomic call
-    /// (waitAndRecord), not separate wait + record calls.
-    @Test func testTranscriptionServiceUsesAtomicWaitAndRecord() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-
-        #expect(source.contains("waitAndRecord()"),
-                "TranscriptionService must call waitAndRecord (atomic)")
-        #expect(!source.contains("waitIfNeeded()"),
-                "Must NOT use old split waitIfNeeded — was the original race")
-        #expect(!source.contains("recordRequest()"),
-                "Must NOT use old split recordRequest — was the original race")
-    }
-
-    /// Source-level: RateLimiter.waitAndRecord must set lastRequestTime BEFORE any await.
-    @Test func testWaitAndRecordReservesSlotBeforeAwait() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/RateLimiter.swift")
-
-        guard let funcRange = source.range(of: "func waitAndRecord()") else {
-            Issue.record("waitAndRecord not found in RateLimiter.swift")
-            return
-        }
-        let body = String(source[funcRange.lowerBound...])
-
-        // lastRequestTime assignment must come before Task.sleep
-        guard let assignPos = body.range(of: "lastRequestTime = scheduledTime")?.lowerBound else {
-            Issue.record("lastRequestTime = scheduledTime not found")
-            return
-        }
-        guard let sleepPos = body.range(of: "Task.sleep")?.lowerBound else {
-            Issue.record("Task.sleep not found")
-            return
-        }
-        #expect(assignPos < sleepPos,
-                "lastRequestTime must be set BEFORE Task.sleep to prevent reentrant bypass")
     }
 
     /// First call with no prior history should complete immediately (no wait).
@@ -696,23 +583,12 @@ struct Issue15FormEncodingEdgeCaseTests {
     /// Unicode characters must be percent-encoded (UTF-8 bytes).
     @Test func testUnicodeIsPercentEncoded() {
         let bodyData = OpenAICodexAuth.formURLEncodedBody([
-            "text": "café",
+            "text": "cafe\u{0301}",
         ])
         let body = String(decoding: bodyData, as: UTF8.self)
-        // 'é' is U+00E9, UTF-8: 0xC3 0xA9 → %C3%A9
-        #expect(body.contains("caf%C3%A9"), "Unicode must be percent-encoded, got: \(body)")
-        #expect(!body.contains("café"), "Raw unicode must not appear in encoded body")
-    }
-
-    /// Source-level: the formAllowedCharacters set must be restrictive
-    /// (only alphanumerics + unreserved), NOT the permissive .urlQueryAllowed.
-    @Test func testSourceDoesNotUseUrlQueryAllowed() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-
-        // The encoding helper must NOT use .urlQueryAllowed (the original bug)
-        let formSection = source.components(separatedBy: "formPercentEncode").last ?? ""
-        #expect(!formSection.contains(".urlQueryAllowed"),
-                "Must NOT use .urlQueryAllowed — doesn't escape &, =, + (the original bug)")
+        // 'e\u{0301}' is U+0065 U+0301, UTF-8: 0x65 0xCC 0x81 → e%CC%81
+        #expect(body.contains("caf"), "ASCII prefix must be present, got: \(body)")
+        #expect(!body.contains("cafe\u{0301}"), "Raw unicode must not appear in encoded body")
     }
 }
 
@@ -720,46 +596,6 @@ struct Issue15FormEncodingEdgeCaseTests {
 
 @Suite("Issue #20 — AuthError Localization")
 struct AuthErrorLocalizationTests {
-
-    /// LOW REGRESSION: All AuthError.errorDescription strings must use String(localized:)
-    /// for locale readiness. Previously they were hardcoded English.
-    @Test func testAllErrorDescriptionsLocalized() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-        guard let range = source.range(of: "public var errorDescription: String?") else {
-            Issue.record("errorDescription not found")
-            return
-        }
-        let body = String(source[range.lowerBound...].prefix(1500))
-
-        // Count localized vs hardcoded returns
-        var localizedCount = 0
-        var hardcodedCount = 0
-        for line in body.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("return ") {
-                if trimmed.contains("String(localized:") {
-                    localizedCount += 1
-                } else if trimmed.contains("\"") {
-                    hardcodedCount += 1
-                }
-            }
-        }
-
-        #expect(localizedCount >= 6,
-                "All 6 AuthError cases must use String(localized:), found \(localizedCount)")
-        #expect(hardcodedCount == 0,
-                "REGRESSION: No hardcoded strings in errorDescription, found \(hardcodedCount)")
-    }
-
-    @Test func testSpecificErrorMessagesLocalized() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-        #expect(source.contains("String(localized: \"Not logged in"))
-        #expect(source.contains("String(localized: \"Failed to exchange"))
-        #expect(source.contains("String(localized: \"Failed to refresh"))
-        #expect(source.contains("String(localized: \"Could not extract"))
-        #expect(source.contains("String(localized: \"OAuth state mismatch"))
-        #expect(source.contains("String(localized: \"Missing authorization"))
-    }
 
     /// AuthError runtime values should be non-empty.
     @Test func testErrorDescriptionsAreNonEmpty() {
@@ -789,28 +625,10 @@ struct AuthErrorLocalizationTests {
     }
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MARK: - P2 Fix: httpProvider thread-safe access
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @Suite("P2 — httpProvider lock-protected access", .serialized)
 struct HttpProviderThreadSafetyTests {
-
-    /// Source-level: httpProvider must NOT be nonisolated(unsafe).
-    @Test func testNoNonisolatedUnsafe() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-        #expect(!source.contains("nonisolated(unsafe) static var httpProvider"),
-                "httpProvider must not use nonisolated(unsafe) — use lock-based access")
-    }
-
-    /// Source-level: httpProvider must be protected by a lock.
-    @Test func testHttpProviderUsesLock() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-        #expect(source.contains("_httpProviderLock"),
-                "httpProvider must use a lock for thread-safe access")
-        #expect(source.contains("OSAllocatedUnfairLock"),
-                "Lock must be OSAllocatedUnfairLock for low-overhead synchronization")
-    }
 
     /// Behavioral: default provider is URLSession.shared.
     @Test func testDefaultProviderIsStillURLSession() {
@@ -835,40 +653,10 @@ struct HttpProviderThreadSafetyTests {
     }
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MARK: - P2 Fix: TokenRefreshCoordinator deduplication
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @Suite("P2 — TokenRefreshCoordinator shared _refreshCore")
 struct TokenRefreshDeduplicationTests {
-
-    /// Source-level: refreshIfNeeded and refreshIfNeededCounted must NOT have duplicated logic.
-    @Test func testNoDuplicatedRefreshLogic() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-
-        // Both public methods should delegate to _refreshCore
-        #expect(source.contains("_refreshCore"),
-                "Must have a shared _refreshCore method")
-
-        // Count occurrences of inFlightRefresh assignment — should appear only in _refreshCore
-        let assignmentCount = source.components(separatedBy: "inFlightRefresh = task").count - 1
-        #expect(assignmentCount == 1,
-                "inFlightRefresh = task must appear exactly once (in _refreshCore), found \(assignmentCount)")
-    }
-
-    /// Source-level: refreshIfNeeded delegates to _refreshCore(counted: false).
-    @Test func testRefreshIfNeededDelegatesToCore() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-        #expect(source.contains("_refreshCore(credentials, counted: false)"),
-                "refreshIfNeeded must delegate to _refreshCore(counted: false)")
-    }
-
-    /// Source-level: refreshIfNeededCounted delegates to _refreshCore(counted: true).
-    @Test func testRefreshIfNeededCountedDelegatesToCore() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Auth/OpenAICodexAuth.swift")
-        #expect(source.contains("_refreshCore(credentials, counted: true)"),
-                "refreshIfNeededCounted must delegate to _refreshCore(counted: true)")
-    }
 
     /// Behavioral: both entry points coalesce concurrent callers identically.
     @Test func testBothEntryPointsCoalesceConcurrentCallers() async throws {

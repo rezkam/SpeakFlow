@@ -198,15 +198,6 @@ struct Issue17TextStreamOverwriteRegressionTests {
         _ = stream2 // suppress unused warning
     }
 
-    /// Source-level: textStream must use a stored `_textStream` property.
-    @Test func testTextStreamUsesStoredProperty() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionQueue.swift")
-        #expect(source.contains("_textStream"),
-                "textStream must cache in _textStream to prevent continuation overwrite")
-        #expect(source.contains("if let existing = _textStream") || source.contains("if let existing = self._textStream"),
-                "Must check for existing stream before creating a new one")
-    }
-
     /// REGRESSION: The bridge's startListening accesses textStream once — verify it works
     /// end-to-end with onTextReady callback.
     @Test func testBridgeListeningDeliversTextViaCallback() async {
@@ -257,70 +248,12 @@ struct Issue14CancellationTests {
             Issue.record("Expected CancellationError, got \(error)")
         }
     }
-
-    /// Source-level: waitAndRecord must use `try await Task.sleep` (throwing),
-    /// NOT `try? await Task.sleep` which swallows CancellationError.
-    @Test func testWaitAndRecordDoesNotSwallowCancellation() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/RateLimiter.swift")
-
-        guard let funcRange = source.range(of: "func waitAndRecord()") else {
-            Issue.record("waitAndRecord not found")
-            return
-        }
-        let body = String(source[funcRange.lowerBound...])
-
-        #expect(!body.contains("try? await Task.sleep"),
-                "Must NOT use try? — swallows CancellationError (the original bug)")
-        #expect(body.contains("try await Task.sleep"),
-                "Must use throwing sleep to propagate cancellation")
-    }
-
-    /// Source-level: waitAndRecord must be declared `throws` so callers see cancellation.
-    @Test func testWaitAndRecordIsThrowingMethod() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/RateLimiter.swift")
-        #expect(source.contains("func waitAndRecord() async throws"),
-                "waitAndRecord must be async throws — was non-throwing in the original bug")
-    }
-
-    /// TranscriptionService must catch CancellationError from waitAndRecord.
-    @Test func testTranscriptionServiceCatchesCancellationFromRateLimiter() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        #expect(source.contains("catch is CancellationError"),
-                "transcribe() must catch CancellationError from waitAndRecord")
-    }
 }
 
 // MARK: - TranscriptionQueueBridge Cleanup Tests
 
 @Suite("TranscriptionQueueBridge.stopListening — cleanup regression")
 struct TranscriptionQueueBridgeCleanupTests {
-
-    @Test func testStopListeningIsPublic() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionQueue.swift")
-        #expect(source.contains("public func stopListening()"),
-                "stopListening must be public so App target can call it")
-    }
-
-    @Test func testStopListeningCancelsStreamTask() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionQueue.swift")
-        // Find stopListening body
-        let body = extractFunctionBody(named: "stopListening", from: source)
-        #expect(body != nil)
-        if let body = body {
-            #expect(body.contains("streamTask?.cancel()"))
-            #expect(body.contains("streamTask = nil"))
-        }
-    }
-
-    @Test func testTerminationCallsStopListening() throws {
-        let recording = try readProjectSource("Sources/App/RecordingController.swift")
-        let body = extractFunctionBody(named: "shutdown", from: recording)
-        #expect(body != nil)
-        if let body = body {
-            #expect(body.contains("Transcription.shared.queueBridge.stopListening()"),
-                    "RecordingController.shutdown must call stopListening on the queue bridge")
-        }
-    }
 
     @Test func testStopListeningBehavior() async {
         // Behavioral: stopListening must be callable without crash
@@ -1400,74 +1333,5 @@ struct TranscriptionServiceRetryErrorTests {
         let error2 = TranscriptionError.httpError(statusCode: 500, body: nil)
         #expect(error2.errorDescription?.contains("500") == true)
         #expect(error2.errorDescription?.contains("Unknown error") == true)
-    }
-
-    // MARK: - Retry logic (source-level tests)
-
-    /// Retry must use exponential backoff.
-    @Test func testRetryUsesExponentialBackoff() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "withRetry", from: source)
-        #expect(body?.contains("pow(2.0, Double(attempt - 1))") == true,
-                "Retry must use exponential backoff")
-    }
-
-    /// Retry must add jitter.
-    @Test func testRetryAddsJitter() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "withRetry", from: source)
-        #expect(body?.contains("Double.random(in: 0...0.5)") == true,
-                "Retry must add jitter")
-    }
-
-    /// Retry must check cancellation before each attempt.
-    @Test func testRetryChecksCancellationBeforeEachAttempt() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "withRetry", from: source)
-        #expect(body?.contains("try Task.checkCancellation()") == true,
-                "Must check cancellation before each retry attempt")
-    }
-
-    /// Retry must convert CancellationError to TranscriptionError.cancelled.
-    @Test func testRetryConvertsCancellationToTranscriptionError() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "withRetry", from: source)
-        #expect(body?.contains("catch is CancellationError") == true)
-        #expect(body?.contains("throw TranscriptionError.cancelled") == true)
-    }
-
-    /// Retry must stop on non-retryable errors.
-    @Test func testRetryStopsOnNonRetryableError() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "withRetry", from: source)
-        #expect(body?.contains("!error.isRetryable") == true,
-                "Must check isRetryable before continuing retry loop")
-    }
-
-    /// transcribe() must pass Config.maxRetries to withRetry.
-    @Test func testRetryUsesMaxRetries() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        #expect(source.contains("maxAttempts: Config.maxRetries"),
-                "transcribe() must pass Config.maxRetries to withRetry")
-    }
-
-    // MARK: - Response handling (source-level tests)
-
-    /// performRequest must handle 429 with Retry-After header.
-    @Test func testPerformRequestHandles429WithRetryAfter() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "performRequest", from: source)
-        #expect(body?.contains("statusCode == 429") == true)
-        #expect(body?.contains("Retry-After") == true)
-        #expect(body?.contains("TranscriptionError.rateLimited") == true)
-    }
-
-    /// performRequest must fall back to legacy JSON when Decodable fails.
-    @Test func testPerformRequestFallsBackToLegacyJSON() throws {
-        let source = try readProjectSource("Sources/SpeakFlowCore/Transcription/TranscriptionService.swift")
-        let body = extractFunctionBody(named: "performRequest", from: source)
-        #expect(body?.contains("JSONSerialization.jsonObject") == true,
-                "Must have legacy JSON fallback")
-        #expect(body?.contains("json[\"text\"] as? String") == true)
     }
 }

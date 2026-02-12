@@ -51,23 +51,6 @@ func hitOAuthCallback(port: UInt16, query: String) async throws -> Int {
     return (response as? HTTPURLResponse)?.statusCode ?? -1
 }
 
-// MARK: - Source-Level Regression Tests
-
-func projectRootURL() -> URL {
-    URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent() // Tests/
-        .deletingLastPathComponent() // project root
-}
-
-func readProjectSource(_ relativePath: String) throws -> String {
-    let url = projectRootURL().appendingPathComponent(relativePath)
-    return try String(contentsOf: url, encoding: .utf8)
-}
-
-func countOccurrences(of needle: String, in haystack: String) -> Int {
-    haystack.components(separatedBy: needle).count - 1
-}
-
 /// Thread-safe box for collecting chunks across actor boundaries.
 final class ChunkBox: @unchecked Sendable {
     private var chunks: [AudioChunk] = []
@@ -84,31 +67,6 @@ final class ChunkBox: @unchecked Sendable {
         defer { lock.unlock() }
         return chunks
     }
-}
-
-// MARK: - Helpers
-
-/// Extract the body of a function by name (simple brace-matching heuristic).
-func extractFunctionBody(named name: String, from source: String) -> String? {
-    guard let range = source.range(of: "func \(name)") else { return nil }
-    let after = source[range.lowerBound...]
-    guard let braceStart = after.firstIndex(of: "{") else { return nil }
-
-    var depth = 0
-    var idx = braceStart
-    while idx < after.endIndex {
-        let ch = after[idx]
-        if ch == "{" { depth += 1 }
-        else if ch == "}" { depth -= 1; if depth == 0 { break } }
-        idx = after.index(after: idx)
-    }
-    guard depth == 0 else { return nil }
-    return String(after[braceStart...idx])
-}
-
-/// Extract applicationWillTerminate body specifically.
-func extractTerminationBody(from source: String) -> String? {
-    extractFunctionBody(named: "applicationWillTerminate", from: source)
 }
 
 /// Helper to collect onTextUpdate calls from LiveStreamingController.

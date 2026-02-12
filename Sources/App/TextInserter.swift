@@ -8,7 +8,7 @@ import SpeakFlowCore
 /// (target capture, character typing, deletion, Enter key) into a single-
 /// responsibility component.
 @MainActor
-final class TextInserter {
+final class TextInserter: TextInserting {
     static let shared = TextInserter()
 
     private(set) var targetElement: AXUIElement?

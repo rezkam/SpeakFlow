@@ -9,7 +9,7 @@ import os
 /// RecordingController can wire up the appropriate actions without the
 /// interceptor knowing about recording state.
 @MainActor
-final class KeyInterceptor {
+final class KeyInterceptor: KeyIntercepting {
     static let shared = KeyInterceptor()
 
     /// Called when Escape is pressed. Should cancel recording.
