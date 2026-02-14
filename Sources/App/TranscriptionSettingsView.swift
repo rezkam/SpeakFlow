@@ -1,12 +1,10 @@
-import AppKit
-import AVFoundation
 import SwiftUI
 import SpeakFlowCore
 
 /// Unified transcription settings: provider selection on top, provider-specific
 /// audio/API settings below. Streaming and batch modes show different sections.
 struct TranscriptionSettingsView: View {
-    private let state = AppState.shared
+    @Environment(\.appState) private var state
 
     var body: some View {
         // Read refreshVersion so the view re-evaluates when provider configuration changes
@@ -90,31 +88,22 @@ struct TranscriptionSettingsView: View {
         }
 
         Section {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Endpointing")
-                    Spacer()
-                    Text("\(state.deepgramEndpointingMs) ms")
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(
-                    value: deepgramEndpointingBinding,
-                    in: 100...3000,
-                    step: 100
-                )
-                HStack {
-                    Text("100 ms — fast response")
-                    Spacer()
-                    Text("3000 ms — waits for pauses")
-                }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            }
+            SettingSlider(
+                title: "Endpointing",
+                displayValue: "\(state.deepgramEndpointingMs) ms",
+                value: deepgramEndpointingBinding,
+                range: 100...3000, step: 100,
+                lowLabel: "100 ms — fast response",
+                highLabel: "3000 ms — waits for pauses"
+            )
         } header: {
             Text("Utterance Detection")
         } footer: {
-            Text("Controls how quickly Deepgram detects the end of an utterance. Lower values give faster responses but may split mid-sentence. Higher values wait longer for natural pauses. Default: 300 ms.")
+            Text("""
+            Controls how quickly Deepgram detects the end of an utterance. \
+            Lower values give faster responses but may split mid-sentence. \
+            Higher values wait longer for natural pauses. Default: 300 ms.
+            """)
         }
 
         Section {
@@ -146,28 +135,23 @@ struct TranscriptionSettingsView: View {
             Toggle("Auto-End on Silence", isOn: state.binding(for: \.streamingAutoEndEnabled))
 
             if state.streamingAutoEndEnabled {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Silence Duration")
-                        Spacer()
-                        Text(String(format: "%.0fs", state.autoEndSilenceDuration))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Slider(value: state.binding(for: \.autoEndSilenceDuration), in: 3...30, step: 1)
-                    HStack {
-                        Text("3s — quick stop")
-                        Spacer()
-                        Text("30s — tolerates long pauses")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                }
+                SettingSlider(
+                    title: "Silence Duration",
+                    displayValue: String(format: "%.0fs", state.autoEndSilenceDuration),
+                    value: state.binding(for: \.autoEndSilenceDuration),
+                    range: 3...30, step: 1,
+                    lowLabel: "3s — quick stop",
+                    highLabel: "30s — tolerates long pauses"
+                )
             }
         } header: {
             Text("Auto-End")
         } footer: {
-            Text("Disabled by default for streaming. When enabled, recording stops after the specified silence period. In streaming mode, text is already inserted in real-time, so you can simply press the hotkey to stop when finished.")
+            Text("""
+            Disabled by default for streaming. When enabled, recording stops \
+            after the specified silence period. In streaming mode, text is already \
+            inserted in real-time, so you can simply press the hotkey to stop when finished.
+            """)
         }
     }
 
@@ -194,23 +178,14 @@ struct TranscriptionSettingsView: View {
             Toggle("Enable Voice Activity Detection", isOn: state.binding(for: \.vadEnabled))
 
             if state.vadEnabled {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("VAD Sensitivity")
-                        Spacer()
-                        Text(String(format: "%.0f%%", state.vadThreshold * 100))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Slider(value: state.binding(for: \.vadThreshold), in: 0.05...0.50, step: 0.05)
-                    HStack {
-                        Text("More sensitive")
-                        Spacer()
-                        Text("Stricter filtering")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                }
+                SettingSlider(
+                    title: "VAD Sensitivity",
+                    displayValue: String(format: "%.0f%%", state.vadThreshold * 100),
+                    value: floatBinding(for: \.vadThreshold),
+                    range: 0.05...0.50, step: 0.05,
+                    lowLabel: "More sensitive",
+                    highLabel: "Stricter filtering"
+                )
             }
         } header: {
             Text("Voice Activity Detection")
@@ -222,23 +197,14 @@ struct TranscriptionSettingsView: View {
             Toggle("Auto-End Recording on Silence", isOn: state.binding(for: \.autoEndEnabled))
 
             if state.autoEndEnabled {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Silence Duration")
-                        Spacer()
-                        Text(String(format: "%.0fs", state.autoEndSilenceDuration))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Slider(value: state.binding(for: \.autoEndSilenceDuration), in: 3...30, step: 1)
-                    HStack {
-                        Text("3s — quick stop")
-                        Spacer()
-                        Text("30s — tolerates long pauses")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                }
+                SettingSlider(
+                    title: "Silence Duration",
+                    displayValue: String(format: "%.0fs", state.autoEndSilenceDuration),
+                    value: state.binding(for: \.autoEndSilenceDuration),
+                    range: 3...30, step: 1,
+                    lowLabel: "3s — quick stop",
+                    highLabel: "30s — tolerates long pauses"
+                )
             }
         } header: {
             Text("Auto-End")
@@ -247,23 +213,14 @@ struct TranscriptionSettingsView: View {
         }
 
         Section {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Minimum Speech Ratio")
-                    Spacer()
-                    Text(String(format: "%.0f%%", state.minSpeechRatio * 100))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(value: state.binding(for: \.minSpeechRatio), in: 0.01...0.10, step: 0.01)
-                HStack {
-                    Text("1% — very sensitive")
-                    Spacer()
-                    Text("10% — requires more speech")
-                }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            }
+            SettingSlider(
+                title: "Minimum Speech Ratio",
+                displayValue: String(format: "%.0f%%", state.minSpeechRatio * 100),
+                value: floatBinding(for: \.minSpeechRatio),
+                range: 0.01...0.10, step: 0.01,
+                lowLabel: "1% — very sensitive",
+                highLabel: "10% — requires more speech"
+            )
         } header: {
             Text("Speech Detection")
         } footer: {
@@ -282,5 +239,48 @@ struct TranscriptionSettingsView: View {
                 state.refresh()
             }
         )
+    }
+
+    /// Bridges a `Float` setting to the `Double` binding that `SettingSlider` expects.
+    private func floatBinding(
+        for keyPath: ReferenceWritableKeyPath<SpeakFlowCore.Settings, Float>
+    ) -> Binding<Double> {
+        Binding(
+            get: { Double(SpeakFlowCore.Settings.shared[keyPath: keyPath]) },
+            set: { SpeakFlowCore.Settings.shared[keyPath: keyPath] = Float($0); state.refresh() }
+        )
+    }
+}
+
+// MARK: - Reusable Slider Component
+
+/// A labeled slider with title, formatted value display, and range hint labels.
+private struct SettingSlider: View {
+    let title: String
+    let displayValue: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let lowLabel: String
+    let highLabel: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(displayValue)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: $value, in: range, step: step)
+            HStack {
+                Text(lowLabel)
+                Spacer()
+                Text(highLabel)
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
     }
 }

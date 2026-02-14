@@ -229,24 +229,38 @@ public struct WordInfo: Sendable {
 /// Stores API keys and settings for transcription providers.
 /// Keys are stored in the unified `~/.speakflow/auth.json` via `UnifiedAuthStorage`.
 /// Environment variables (e.g. DEEPGRAM_API_KEY) are checked as fallback for CI/testing.
+///
+/// In test runs, uses an isolated UserDefaults suite for `activeProviderId`
+/// and delegates key storage to `UnifiedAuthStorage` (which self-isolates in tests).
 @MainActor
 public final class ProviderSettings {
     public static let shared = ProviderSettings()
 
     private let storage = UnifiedAuthStorage.shared
+    private let defaults: UserDefaults
 
     private enum Keys {
         static let activeProvider = "provider.active"
     }
 
-    private init() {}
+    private init() {
+        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
+            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
+        if isTestRun {
+            let suiteName = "app.monodo.speakflow.provider.tests.\(ProcessInfo.processInfo.processIdentifier)"
+            defaults = UserDefaults(suiteName: suiteName) ?? .standard
+            defaults.removePersistentDomain(forName: suiteName)
+        } else {
+            defaults = .standard
+        }
+    }
 
     // MARK: - Active Provider
 
     /// The currently active provider ID.
     public var activeProviderId: String {
-        get { UserDefaults.standard.string(forKey: Keys.activeProvider) ?? ProviderId.chatGPT }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.activeProvider) }
+        get { defaults.string(forKey: Keys.activeProvider) ?? ProviderId.chatGPT }
+        set { defaults.set(newValue, forKey: Keys.activeProvider) }
     }
 
     // MARK: - API Key Storage (delegated to UnifiedAuthStorage)
@@ -284,3 +298,5 @@ public final class ProviderSettings {
     }
 
 }
+
+extension ProviderSettings: ProviderSettingsProviding {}

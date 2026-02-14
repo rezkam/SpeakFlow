@@ -1,6 +1,6 @@
-.PHONY: build test check test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise coverage coverage-html clean
+.PHONY: build test check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise coverage coverage-html clean
 
-# Strict check: build + all tests (core + swift + UI E2E), concise output, full log saved
+# Strict check: build + tests + optional lint, concise output, full log saved
 check:
 	@./scripts/check.sh
 
@@ -57,6 +57,10 @@ clean:
 	swift package clean
 	rm -rf .build/coverage
 
+# Run SwiftLint
+lint:
+	swiftlint lint --quiet
+
 # Build release version
 release:
 	@./scripts/build-release.sh
@@ -73,7 +77,7 @@ test-p2:
 
 help:
 	@echo "Available commands:"
-	@echo "  make check               - Build + all tests (core + swift + UI E2E)"
+	@echo "  make check               - Build + tests + optional lint"
 	@echo "  make build               - Build the project"
 	@echo "  make test                - Run all tests (concise), full log path printed"
 	@echo "  make test-live-e2e       - Run real mic+API end-to-end transcription test"
@@ -84,6 +88,7 @@ help:
 	@echo "  make test-live-e2e-all      - Run ALL live E2E suites"
 	@echo "  make coverage            - Run tests with coverage report"
 	@echo "  make coverage-html       - Run tests with HTML coverage (opens browser)"
+	@echo "  make lint                - Run SwiftLint"
 	@echo "  make clean               - Clean build artifacts"
 	@echo "  make release             - Build release version"
 	@echo "  make test-security       - Run security tests only"

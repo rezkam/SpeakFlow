@@ -332,3 +332,5 @@ public final class Settings {
         chunkDuration.minDuration
     }
 }
+
+extension Settings: SettingsProviding {}

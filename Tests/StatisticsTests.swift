@@ -108,7 +108,7 @@ struct StatisticsFormatterIsolationTests {
             defer { stats.reset() }
 
             // Duration formatting — zero case
-            #expect(stats.formattedDuration.count > 0, "formattedDuration must produce output")
+            #expect(!stats.formattedDuration.isEmpty, "formattedDuration must produce output")
 
             // Duration formatting — non-zero case
             stats.recordTranscription(text: "test", audioDurationSeconds: 60.0)

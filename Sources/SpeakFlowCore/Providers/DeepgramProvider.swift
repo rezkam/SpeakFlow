@@ -16,22 +16,31 @@ public final class DeepgramProvider: StreamingTranscriptionProvider, @unchecked 
     }
 
     private let logger = Logger(subsystem: "SpeakFlow", category: "Deepgram")
+    private let settings: any StreamingSettingsProviding
+    private let providerSettings: any ProviderSettingsProviding
 
-    public init() {}
+    @MainActor
+    public init(
+        settings: any StreamingSettingsProviding = Settings.shared,
+        providerSettings: any ProviderSettingsProviding = ProviderSettings.shared
+    ) {
+        self.settings = settings
+        self.providerSettings = providerSettings
+    }
 
     @MainActor
     public func buildSessionConfig() -> StreamingSessionConfig {
         StreamingSessionConfig(
-            language: Settings.shared.deepgramLanguage,
-            interimResults: Settings.shared.deepgramInterimResults,
-            smartFormat: Settings.shared.deepgramSmartFormat,
-            endpointingMs: Settings.shared.deepgramEndpointingMs,
-            model: Settings.shared.deepgramModel
+            language: settings.deepgramLanguage,
+            interimResults: settings.deepgramInterimResults,
+            smartFormat: settings.deepgramSmartFormat,
+            endpointingMs: settings.deepgramEndpointingMs,
+            model: settings.deepgramModel
         )
     }
 
     public func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
-        let apiKey = await ProviderSettings.shared.apiKey(for: id)
+        let apiKey = await providerSettings.apiKey(for: id)
         guard let apiKey, !apiKey.isEmpty else {
             throw DeepgramError.missingApiKey
         }
@@ -185,7 +194,7 @@ public actor DeepgramStreamingSession: StreamingSession {
 
     // MARK: - Private
 
-    private func buildURL() -> URL {
+    func buildURL() -> URL {
         var components = URLComponents()
         components.scheme = "wss"
         components.host = "api.deepgram.com"
@@ -236,7 +245,7 @@ public actor DeepgramStreamingSession: StreamingSession {
         eventContinuation?.finish()
     }
 
-    private func parseMessage(_ json: String) {
+    func parseMessage(_ json: String) {
         guard let data = json.data(using: .utf8) else { return }
 
         do {
@@ -248,7 +257,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                       let alt = channel.alternatives.first else { return }
 
                 let words = alt.words?.map { w in
-                    WordInfo(word: w.punctuated_word ?? w.word, start: w.start, end: w.end, confidence: w.confidence)
+                    WordInfo(word: w.punctuatedWord ?? w.word, start: w.start, end: w.end, confidence: w.confidence)
                 } ?? []
 
                 let result = TranscriptionResult(
@@ -257,11 +266,11 @@ public actor DeepgramStreamingSession: StreamingSession {
                     start: msg.start ?? 0,
                     duration: msg.duration ?? 0,
                     words: words,
-                    isFinal: msg.is_final ?? false,
-                    speechFinal: msg.speech_final ?? false
+                    isFinal: msg.isFinal ?? false,
+                    speechFinal: msg.speechFinal ?? false
                 )
 
-                if msg.is_final == true {
+                if msg.isFinal == true {
                     eventContinuation?.yield(.finalResult(result))
                     if !alt.transcript.isEmpty {
                         logger.info("FINAL: \(alt.transcript, privacy: .public)")
@@ -274,7 +283,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                 }
 
             case "UtteranceEnd":
-                let lastWordEnd = msg.last_word_end ?? 0
+                let lastWordEnd = msg.lastWordEnd ?? 0
                 eventContinuation?.yield(.utteranceEnd(lastWordEnd: lastWordEnd))
                 logger.info("UtteranceEnd at \(String(format: "%.2f", lastWordEnd))s")
 
@@ -284,7 +293,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                 logger.debug("SpeechStarted at \(String(format: "%.2f", timestamp))s")
 
             case "Metadata":
-                let requestId = msg.request_id ?? "unknown"
+                let requestId = msg.requestId ?? "unknown"
                 eventContinuation?.yield(.metadata(requestId: requestId))
                 logger.info("Session metadata: requestId=\(requestId, privacy: .public)")
 
@@ -303,18 +312,28 @@ private struct DeepgramMessage: Decodable {
     let type: String
     // Results fields
     let channel: DeepgramChannel?
-    let is_final: Bool?
-    let speech_final: Bool?
+    let isFinal: Bool?
+    let speechFinal: Bool?
     let start: Double?
     let duration: Double?
-    let from_finalize: Bool?
+    let fromFinalize: Bool?
     // Metadata fields
-    let request_id: String?
-    let transaction_key: String?
+    let requestId: String?
+    let transactionKey: String?
     // UtteranceEnd fields
-    let last_word_end: Double?
+    let lastWordEnd: Double?
     // SpeechStarted fields
     let timestamp: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case type, channel, start, duration, timestamp
+        case isFinal = "is_final"
+        case speechFinal = "speech_final"
+        case fromFinalize = "from_finalize"
+        case requestId = "request_id"
+        case transactionKey = "transaction_key"
+        case lastWordEnd = "last_word_end"
+    }
 }
 
 private struct DeepgramChannel: Decodable {
@@ -332,5 +351,10 @@ private struct DeepgramWord: Decodable {
     let start: Double
     let end: Double
     let confidence: Double
-    let punctuated_word: String?
+    let punctuatedWord: String?
+
+    enum CodingKeys: String, CodingKey {
+        case word, start, end, confidence
+        case punctuatedWord = "punctuated_word"
+    }
 }

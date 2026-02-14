@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import OSLog
 
@@ -9,10 +8,17 @@ public final class Transcription {
 
     public let queueBridge = TranscriptionQueueBridge()
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
+    private let statistics: any StatisticsProviding
+    private let service: any TranscriptionServiceProviding
 
     var queue: TranscriptionQueueBridge { queueBridge }
 
-    private init() {
+    public init(
+        statistics: any StatisticsProviding = Statistics.shared,
+        service: any TranscriptionServiceProviding = TranscriptionService.shared
+    ) {
+        self.statistics = statistics
+        self.service = service
         queueBridge.startListening()
     }
 
@@ -28,17 +34,20 @@ public final class Transcription {
             }
 
             let effectiveTimeout = TranscriptionService.timeout(forDataSize: chunk.wavData.count)
-            Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) duration=\(String(format: "%.1f", chunk.durationSeconds))s size=\(chunk.wavData.count)B (timeout: \(String(format: "%.1f", effectiveTimeout))s)")
+            let duration = String(format: "%.1f", chunk.durationSeconds)
+            let timeout = String(format: "%.1f", effectiveTimeout)
+            // swiftlint:disable:next line_length
+            Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) duration=\(duration)s size=\(chunk.wavData.count)B (timeout: \(timeout)s)")
 
             // Track API call attempt
-            Statistics.shared.recordApiCall()
+            await self?.statistics.recordApiCall()
 
             do {
-                let text = try await TranscriptionService.shared.transcribe(audio: chunk.wavData)
+                let text = try await self?.service.transcribe(audio: chunk.wavData) ?? ""
                 Logger.transcription.info("Chunk #\(ticket.seq) success: \(text, privacy: .private)")
 
                 // Track successful transcription statistics
-                Statistics.shared.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
+                await self?.statistics.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
 
                 await self?.queueBridge.submitResult(ticket: ticket, text: text)
             } catch {
@@ -46,9 +55,7 @@ public final class Transcription {
                 await self?.queueBridge.markFailed(ticket: ticket)
                 
                 // Play error sound to notify user that transcription failed
-                _ = await MainActor.run {
-                    NSSound(named: "Basso")?.play()
-                }
+                await SoundEffect.error.play()
             }
 
             await self?.queueBridge.checkCompletion()
@@ -66,3 +73,5 @@ public final class Transcription {
         // will be cancelled via cooperative Task cancellation.
     }
 }
+
+extension Transcription: TranscriptionCoordinating {}

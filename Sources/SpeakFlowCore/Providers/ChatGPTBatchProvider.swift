@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Wraps `TranscriptionService` (which handles the ChatGPT backend API, rate limiting,
 /// and retry logic) behind the `BatchTranscriptionProvider` protocol.
-public final class ChatGPTBatchProvider: BatchTranscriptionProvider, @unchecked Sendable {
+public final class ChatGPTBatchProvider: BatchTranscriptionProvider, Sendable {
     public let id = ProviderId.chatGPT
     public let displayName = "ChatGPT"
     public let mode: ProviderMode = .batch
@@ -12,9 +12,13 @@ public final class ChatGPTBatchProvider: BatchTranscriptionProvider, @unchecked 
 
     public var isConfigured: Bool { OpenAICodexAuth.isLoggedIn }
 
-    public init() {}
+    private let service: any TranscriptionServiceProviding
+
+    public init(service: any TranscriptionServiceProviding = TranscriptionService.shared) {
+        self.service = service
+    }
 
     public func transcribe(audio: Data) async throws -> String {
-        try await TranscriptionService.shared.transcribe(audio: audio)
+        try await service.transcribe(audio: audio)
     }
 }

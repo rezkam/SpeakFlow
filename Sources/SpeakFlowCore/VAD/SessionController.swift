@@ -36,7 +36,12 @@ public actor SessionController {
         hasSpeechOccurredInSession = false
         isUserSpeaking = false
         lastSpeechEndTime = nil
-        logger.info("📋 SESSION START: autoEnd=\(self.autoEndConfig.enabled, privacy: .public), silenceDuration=\(String(format: "%.1f", self.autoEndConfig.silenceDuration), privacy: .public)s (effective/clamped), minSession=\(String(format: "%.1f", self.autoEndConfig.minSessionDuration), privacy: .public)s, requireSpeechFirst=\(self.autoEndConfig.requireSpeechFirst, privacy: .public), noSpeechTimeout=\(String(format: "%.1f", self.autoEndConfig.noSpeechTimeout), privacy: .public)s, maxChunk=\(String(format: "%.1f", self.maxChunkDuration), privacy: .public)s")
+        let silence = String(format: "%.1f", autoEndConfig.silenceDuration)
+        let minSess = String(format: "%.1f", autoEndConfig.minSessionDuration)
+        let noSpeech = String(format: "%.1f", autoEndConfig.noSpeechTimeout)
+        let maxChunk = String(format: "%.1f", maxChunkDuration)
+        // swiftlint:disable:next line_length
+        logger.info("SESSION START: autoEnd=\(self.autoEndConfig.enabled, privacy: .public) silence=\(silence, privacy: .public)s minSession=\(minSess, privacy: .public)s requireSpeech=\(self.autoEndConfig.requireSpeechFirst, privacy: .public) noSpeechTimeout=\(noSpeech, privacy: .public)s maxChunk=\(maxChunk, privacy: .public)s")
     }
 
     public func onSpeechEvent(_ event: SpeechEvent) {
@@ -129,7 +134,10 @@ public actor SessionController {
             let sessionDuration = now.timeIntervalSince(start)
             let requiredDuration = autoEndConfig.silenceDuration + autoEndConfig.minSessionDuration
             if sessionDuration >= requiredDuration {
-                logger.warning("🛑 AUTO-END FALLBACK: sessionDur=\(String(format: "%.1f", sessionDuration), privacy: .public)s >= required=\(String(format: "%.1f", requiredDuration), privacy: .public)s, lastSpeechEnd=nil, hasSpeech=\(self.hasSpeechOccurredInSession, privacy: .public), speaking=\(self.isUserSpeaking, privacy: .public)")
+                let dur = String(format: "%.1f", sessionDuration)
+                let req = String(format: "%.1f", requiredDuration)
+                // swiftlint:disable:next line_length
+                logger.warning("AUTO-END FALLBACK: sessionDur=\(dur, privacy: .public)s >= required=\(req, privacy: .public)s hasSpeech=\(self.hasSpeechOccurredInSession, privacy: .public) speaking=\(self.isUserSpeaking, privacy: .public)")
                 return true
             }
         }
@@ -168,16 +176,19 @@ public actor SessionController {
 #if DEBUG
 extension SessionController {
     /// Test helper: Set chunk start time to simulate elapsed duration
+    // swiftlint:disable:next identifier_name
     public func _testSetChunkStartTime(_ date: Date?) {
         chunkStartTime = date
     }
     
     /// Test helper: Check if lastSpeechEndTime is nil (VAD never fired)
+    // swiftlint:disable:next identifier_name
     public var _testLastSpeechEndTimeIsNil: Bool {
         lastSpeechEndTime == nil
     }
     
     /// Test helper: Get maxChunkDuration for verification
+    // swiftlint:disable:next identifier_name
     public var _testMaxChunkDuration: TimeInterval {
         maxChunkDuration
     }

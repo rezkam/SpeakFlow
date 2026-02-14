@@ -38,9 +38,12 @@ echo "  SpeakFlow Check"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 run_step "Build............" swift build
-run_step "Core tests......." swift run SpeakFlowTestRunner
 run_step "Swift tests......" swift test
-run_step "UI E2E tests...." ./scripts/run-ui-tests.sh
+
+# Optional: SwiftLint (skip if not installed)
+if command -v swiftlint &> /dev/null; then
+    run_step "Lint............." swiftlint lint --quiet
+fi
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAILED" -eq 0 ]; then

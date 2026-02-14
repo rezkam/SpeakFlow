@@ -3,7 +3,7 @@ import SwiftUI
 /// Main settings window with sidebar navigation and inline status banner.
 struct MainSettingsView: View {
     @State private var selectedTab: SettingsTab = .general
-    private let state = AppState.shared
+    @Environment(\.appState) private var state
 
     var body: some View {
         NavigationSplitView {

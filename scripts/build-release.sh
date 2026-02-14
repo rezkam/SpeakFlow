@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 # SpeakFlow Release Build Script
 # Creates a signed .app bundle and optional DMG installer

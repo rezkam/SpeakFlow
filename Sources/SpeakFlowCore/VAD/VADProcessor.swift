@@ -220,6 +220,7 @@ public actor VADProcessor {
 
 #if DEBUG
 extension VADProcessor {
+    // swiftlint:disable:next identifier_name
     public func _testSeedAverageSpeechProbability(_ value: Float, chunks: Int = 1) {
         processedChunks = max(chunks, 0)
         cumulativeSpeechProbability = max(chunks, 0) > 0 ? value * Float(chunks) : 0

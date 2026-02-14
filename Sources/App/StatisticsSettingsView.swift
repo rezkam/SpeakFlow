@@ -4,7 +4,7 @@ import SpeakFlowCore
 /// Transcription usage statistics displayed as visual metric cards.
 struct StatisticsSettingsView: View {
     @State private var showResetConfirm = false
-    private let stats = Statistics.shared
+    @Environment(\.statistics) private var stats
 
     var body: some View {
         ScrollView {

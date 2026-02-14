@@ -1,8 +1,4 @@
-import AppKit
-import ApplicationServices
-import AVFoundation
 import OSLog
-import os
 import SpeakFlowCore
 
 /// Manages the recording lifecycle, provider dispatch, and hotkey setup.
@@ -35,10 +31,20 @@ final class RecordingController {
     let textInserter: any TextInserting
     let keyInterceptor: any KeyIntercepting
     let appState: any BannerPresenting
+    let hotkeySettings: any HotkeySettingsProviding
+    let providerSettings: any ProviderSettingsProviding
+    let providerRegistry: any ProviderRegistryProviding
+    let settings: any SettingsProviding
+    let transcription: any TranscriptionCoordinating
+
+    /// Test mode controls how the controller behaves outside production.
+    /// - `off`: Normal production behavior with real permissions and recording.
+    /// - `live`: Skips permission checks but uses real provider dispatch.
+    /// - `mock`: Skips permissions and fakes recording start/stop for UI tests.
+    enum TestMode { case off, live, mock }
 
     // UI test support (configured externally by AppDelegate)
-    var isUITestMode = false
-    var useMockRecordingInUITests = false
+    var testMode: TestMode = .off
     var uiTestToggleCount = 0
     /// Called after recording state changes (used by UI test harness).
     var onStateChanged: (() -> Void)?
@@ -48,11 +54,21 @@ final class RecordingController {
     init(
         keyInterceptor: any KeyIntercepting = KeyInterceptor.shared,
         textInserter: any TextInserting = TextInserter.shared,
-        appState: any BannerPresenting = AppState.shared
+        appState: any BannerPresenting = AppState.shared,
+        hotkeySettings: any HotkeySettingsProviding = HotkeySettings.shared,
+        providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
+        providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared,
+        settings: any SettingsProviding = SpeakFlowCore.Settings.shared,
+        transcription: any TranscriptionCoordinating = Transcription.shared
     ) {
         self.keyInterceptor = keyInterceptor
         self.textInserter = textInserter
         self.appState = appState
+        self.hotkeySettings = hotkeySettings
+        self.providerSettings = providerSettings
+        self.providerRegistry = providerRegistry
+        self.settings = settings
+        self.transcription = transcription
         self.keyInterceptor.onEscapePressed = { [weak self] in self?.cancelRecording() }
         self.keyInterceptor.onEnterPressed = { [weak self] in
             guard let self else { return }
@@ -64,13 +80,13 @@ final class RecordingController {
     // MARK: - Hotkey
 
     func setupHotkey() {
-        if isUITestMode {
+        if testMode != .off {
             hotkeyListener?.stop()
             hotkeyListener = nil
             Logger.hotkey.info("UI test mode: skipping global hotkey listener")
             return
         }
-        let type = HotkeySettings.shared.currentHotkey
+        let type = hotkeySettings.currentHotkey
         if hotkeyListener == nil {
             hotkeyListener = HotkeyListener()
             hotkeyListener?.onActivate = { [weak self] in self?.toggle() }
@@ -82,7 +98,7 @@ final class RecordingController {
     // MARK: - Transcription Callbacks
 
     func setupTranscriptionCallbacks() {
-        Transcription.shared.queueBridge.onTextReady = { [weak self] text in
+        transcription.queueBridge.onTextReady = { [weak self] text in
             guard let self else { return }
             if !self.fullTranscript.isEmpty { self.fullTranscript += " " }
             self.fullTranscript += text
@@ -90,7 +106,7 @@ final class RecordingController {
                 self.textInserter.insertText(text + " ")
             }
         }
-        Transcription.shared.queueBridge.onAllComplete = { [weak self] in
+        transcription.queueBridge.onAllComplete = { [weak self] in
             self?.finishIfDone()
         }
     }
@@ -98,7 +114,7 @@ final class RecordingController {
     // MARK: - Toggle
 
     @objc func toggle() {
-        if isUITestMode { uiTestToggleCount += 1 }
+        if testMode != .off { uiTestToggleCount += 1 }
         if isRecording { stopRecording(reason: .hotkey) } else { startRecording() }
         onStateChanged?()
     }
@@ -108,37 +124,23 @@ final class RecordingController {
     func startRecording() {
         guard !isRecording else { return }
         if isProcessingFinal {
-            NSSound(named: "Basso")?.play()
+            SoundEffect.error.play()
             return
         }
-        if isUITestMode && useMockRecordingInUITests {
+        if testMode == .mock {
             isRecording = true; isProcessingFinal = false; hasPlayedCompletionSound = false
             shouldPressEnterOnComplete = false; fullTranscript = ""
             onStateChanged?(); return
         }
-        if !isUITestMode {
-            if !AXIsProcessTrusted() {
-                NSSound(named: "Basso")?.play()
-                _ = PermissionController.shared.ensureAccessibility()
-                return
-            }
-            switch AVCaptureDevice.authorizationStatus(for: .audio) {
-            case .authorized: break
-            case .notDetermined:
-                AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                    Task { @MainActor in if granted { self?.startRecording() } }
-                }
-                return
-            case .denied, .restricted:
-                NSSound(named: "Basso")?.play(); return
-            @unknown default: return
-            }
+        if testMode == .off {
+            if !PermissionController.shared.isAccessibilityReady() { return }
+            if !PermissionController.shared.isMicrophoneReady(onGranted: { [weak self] in self?.startRecording() }) { return }
         }
 
-        let providerId = ProviderSettings.shared.activeProviderId
-        let provider = ProviderRegistry.shared.provider(for: providerId)
+        let providerId = providerSettings.activeProviderId
+        let provider = providerRegistry.provider(for: providerId)
         guard let provider, provider.isConfigured else {
-            NSSound(named: "Basso")?.play()
+            SoundEffect.error.play()
             appState.showBanner(
                 "Set up a transcription provider in Accounts to start dictating",
                 style: .error
@@ -150,7 +152,7 @@ final class RecordingController {
         shouldPressEnterOnComplete = false; fullTranscript = ""
 
         textInserter.captureTarget()
-        NSSound(named: "Blow")?.play()
+        SoundEffect.start.play()
 
         if let streaming = provider as? any StreamingTranscriptionProvider {
             startStreamingRecording(provider: streaming)
@@ -166,8 +168,8 @@ final class RecordingController {
         recorder = StreamingRecorder()
         recorder?.onChunkReady = { chunk in
             Task { @MainActor in
-                let ticket = await Transcription.shared.queueBridge.nextSequence()
-                Transcription.shared.transcribe(ticket: ticket, chunk: chunk)
+                let ticket = await self.transcription.queueBridge.nextSequence()
+                self.transcription.transcribe(ticket: ticket, chunk: chunk)
             }
         }
         recorder?.onAutoEnd = { [weak self] in
@@ -175,18 +177,18 @@ final class RecordingController {
         }
         keyInterceptor.start()
         Task { @MainActor in
-            await Transcription.shared.queueBridge.reset()
+            await self.transcription.queueBridge.reset()
             let started = await recorder?.start() ?? false
             if !started {
                 isRecording = false; isProcessingFinal = false; recorder = nil
-                self.keyInterceptor.stop(); NSSound(named: "Basso")?.play()
+                self.keyInterceptor.stop(); SoundEffect.error.play()
             }
         }
     }
 
     // MARK: - Streaming Recording
 
-    private func startStreamingRecording(provider: any StreamingTranscriptionProvider) {
+    func startStreamingRecording(provider: any StreamingTranscriptionProvider) {
         let config = provider.buildSessionConfig()
 
         let controller = LiveStreamingController()
@@ -207,8 +209,8 @@ final class RecordingController {
         }
 
         // Auto-end: disabled by default for streaming (user must opt in)
-        if Settings.shared.streamingAutoEndEnabled {
-            controller.autoEndSilenceDuration = Settings.shared.autoEndSilenceDuration
+        if settings.streamingAutoEndEnabled {
+            controller.autoEndSilenceDuration = settings.autoEndSilenceDuration
         } else {
             controller.autoEndSilenceDuration = 0
         }
@@ -231,7 +233,7 @@ final class RecordingController {
             if !started {
                 isRecording = false; isProcessingFinal = false
                 liveStreamingController = nil; self.keyInterceptor.stop()
-                NSSound(named: "Basso")?.play()
+                SoundEffect.error.play()
             }
         }
     }
@@ -247,7 +249,7 @@ final class RecordingController {
         guard isRecording else { return }
         Logger.audio.error("🔴 STOP reason=\(reason.rawValue)")
 
-        if isUITestMode && useMockRecordingInUITests {
+        if testMode == .mock {
             isRecording = false; isProcessingFinal = false; onStateChanged?(); return
         }
         isRecording = false
@@ -255,7 +257,7 @@ final class RecordingController {
         if liveStreamingController != nil {
             // Streaming: respond quickly but wait for any pending text insertions.
             isProcessingFinal = true
-            NSSound(named: "Pop")?.play()
+            SoundEffect.stop.play()
             hasPlayedCompletionSound = true
             let pendingInsertion = textInserter.pendingTask
             let controller = liveStreamingController
@@ -273,7 +275,7 @@ final class RecordingController {
                 if enterRequested { self.textInserter.pressEnterKey() }
             }
         } else {
-            isProcessingFinal = true; NSSound(named: "Pop")?.play()
+            isProcessingFinal = true; SoundEffect.stop.play()
             recorder?.stop(); recorder = nil
             Task { try? await Task.sleep(for: .seconds(1)); await MainActor.run { self.finishIfDone() } }
         }
@@ -288,9 +290,9 @@ final class RecordingController {
         if liveStreamingController != nil {
             Task { await liveStreamingController?.cancel(); await MainActor.run { self.liveStreamingController = nil } }
         } else {
-            recorder?.cancel(); recorder = nil; Transcription.shared.cancelAll()
+            recorder?.cancel(); recorder = nil; transcription.cancelAll()
         }
-        onStateChanged?(); NSSound(named: "Glass")?.play()
+        onStateChanged?(); SoundEffect.complete.play()
     }
 
     func stopRecordingAndSubmit() {
@@ -304,12 +306,12 @@ final class RecordingController {
     func finishIfDone(attempt: Int = 0) {
         guard !isRecording else { return }
         guard attempt < Self.maxFinishRetries else {
-            Task { await Transcription.shared.queueBridge.checkCompletion() }
+            Task { await self.transcription.queueBridge.checkCompletion() }
             keyInterceptor.stop(); isProcessingFinal = false
             textInserter.reset(); return
         }
         Task {
-            let pending = await Transcription.shared.queueBridge.getPendingCount()
+            let pending = await self.transcription.queueBridge.getPendingCount()
             if pending > 0 {
                 try? await Task.sleep(for: .seconds(2))
                 await MainActor.run { self.finishIfDone(attempt: attempt + 1) }
@@ -321,7 +323,7 @@ final class RecordingController {
                 self.textInserter.reset()
                 guard !self.fullTranscript.isEmpty, !self.hasPlayedCompletionSound else { return }
                 self.hasPlayedCompletionSound = true
-                NSSound(named: "Glass")?.play()
+                SoundEffect.complete.play()
                 if self.shouldPressEnterOnComplete {
                     self.shouldPressEnterOnComplete = false; self.textInserter.pressEnterKey()
                 }
@@ -338,8 +340,8 @@ final class RecordingController {
             recorder?.cancel(); recorder = nil
             isRecording = false; isProcessingFinal = false
         }
-        Transcription.shared.cancelAll()
-        Transcription.shared.queueBridge.stopListening()
+        transcription.cancelAll()
+        transcription.queueBridge.stopListening()
         textInserter.cancelAndReset()
     }
 }

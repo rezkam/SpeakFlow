@@ -15,8 +15,47 @@ final class PermissionController: AccessibilityPermissionDelegate {
     let permissionManager = AccessibilityPermissionManager()
     private var micPermissionTask: Task<Void, Never>?
 
-    private init() {
+    let appState: any BannerPresenting
+    let hotkeySettings: any HotkeySettingsProviding
+    /// Injected closure to avoid circular dependency with RecordingController.
+    let setupHotkeyAction: () -> Void
+
+    init(
+        appState: any BannerPresenting = SpeakFlow.AppState.shared,
+        hotkeySettings: any HotkeySettingsProviding = SpeakFlowCore.HotkeySettings.shared,
+        setupHotkeyAction: @escaping () -> Void = { RecordingController.shared.setupHotkey() }
+    ) {
+        self.appState = appState
+        self.hotkeySettings = hotkeySettings
+        self.setupHotkeyAction = setupHotkeyAction
         permissionManager.delegate = self
+    }
+
+    // MARK: - Permission Readiness (called from RecordingController)
+
+    /// Returns `true` when accessibility is granted, triggering a request flow if not.
+    func isAccessibilityReady() -> Bool {
+        if AXIsProcessTrusted() { return true }
+        SoundEffect.error.play()
+        _ = ensureAccessibility()
+        return false
+    }
+
+    /// Returns `true` when microphone is authorized. Requests access if undetermined,
+    /// calling `onGranted` on the main actor when the user approves.
+    func isMicrophoneReady(onGranted: @escaping @MainActor () -> Void) -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                Task { @MainActor in if granted { onGranted() } }
+            }
+            return false
+        case .denied, .restricted:
+            SoundEffect.error.play()
+            return false
+        @unknown default: return false
+        }
     }
 
     // MARK: - Public Actions (called from views)
@@ -24,16 +63,16 @@ final class PermissionController: AccessibilityPermissionDelegate {
     func checkAccessibility() {
         let trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
         if trusted {
-            AppState.shared.showBanner("Accessibility permission is active", style: .success)
+            appState.showBanner("Accessibility permission is active", style: .success)
         }
-        AppState.shared.refresh()
+        appState.refresh()
     }
 
     func checkMicrophoneAction() {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
         case .authorized:
-            AppState.shared.showBanner("Microphone permission is active", style: .success)
+            appState.showBanner("Microphone permission is active", style: .success)
         case .notDetermined:
             checkMicrophonePermission()
         case .denied, .restricted:
@@ -41,11 +80,11 @@ final class PermissionController: AccessibilityPermissionDelegate {
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
                 NSWorkspace.shared.open(url)
             }
-            AppState.shared.showBanner("Opening System Settings — toggle SpeakFlow under Microphone", style: .info)
+            appState.showBanner("Opening System Settings — toggle SpeakFlow under Microphone", style: .info)
         @unknown default:
             break
         }
-        AppState.shared.refresh()
+        appState.refresh()
     }
 
     /// Silently check permissions on app startup — only reads current status, never triggers OS dialogs.
@@ -55,7 +94,7 @@ final class PermissionController: AccessibilityPermissionDelegate {
         Logger.permissions.debug("AXIsProcessTrusted: \(trusted)")
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         Logger.permissions.debug("Microphone status: \(String(describing: micStatus))")
-        AppState.shared.refresh()
+        appState.refresh()
     }
 
     /// Returns whether accessibility is currently granted, triggering a request if not.
@@ -72,24 +111,24 @@ final class PermissionController: AccessibilityPermissionDelegate {
     // MARK: - AccessibilityPermissionDelegate
 
     func updateStatusIcon() {
-        AppState.shared.refresh()
+        appState.refresh()
     }
 
     func setupHotkey() {
-        RecordingController.shared.setupHotkey()
+        setupHotkeyAction()
     }
 
     func showAccessibilityPermissionAlert() async -> PermissionAlertResponse {
         // Always open Settings directly — the user already chose to grant access
         // by clicking "Grant Access" in the General tab. No intermediate alert needed.
-        AppState.shared.showBanner("Accessibility permission required — opening System Settings…", style: .info)
+        appState.showBanner("Accessibility permission required — opening System Settings…", style: .info)
         return .openSettings
     }
 
     func showAccessibilityGrantedAlert() {
-        AppState.shared.refresh()
-        AppState.shared.showBanner(
-            "Accessibility granted — ready to dictate with \(HotkeySettings.shared.currentHotkey.displayName)",
+        appState.refresh()
+        appState.showBanner(
+            "Accessibility granted — ready to dictate with \(hotkeySettings.currentHotkey.displayName)",
             style: .success
         )
     }
@@ -100,14 +139,14 @@ final class PermissionController: AccessibilityPermissionDelegate {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             micPermissionTask?.cancel(); micPermissionTask = nil
-            AppState.shared.refresh()
+            appState.refresh()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { _ in
-                Task { @MainActor in AppState.shared.refresh() }
+                Task { @MainActor in self.appState.refresh() }
             }
         case .denied, .restricted:
             Logger.permissions.warning("Microphone permission denied/restricted")
-            AppState.shared.showBanner("Microphone access required — open System Settings → Privacy & Security → Microphone", style: .error)
+            appState.showBanner("Microphone access required — open System Settings → Privacy & Security → Microphone", style: .error)
         @unknown default: break
         }
     }

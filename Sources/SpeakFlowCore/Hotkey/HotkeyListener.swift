@@ -25,7 +25,12 @@ public final class HotkeyListener {
     public var onActivate: (() -> Void)?
 
     #if DEBUG
+    // swiftlint:disable:next identifier_name
     static var _testStopHook: (() -> Void)?
+    /// Synchronous hook fired immediately when a double-tap is detected,
+    /// before the async Task dispatch. Enables deterministic testing.
+    // swiftlint:disable:next identifier_name
+    var _testDoubleTapDetected: (() -> Void)?
     #endif
 
     public init() {}
@@ -110,7 +115,7 @@ public final class HotkeyListener {
         Logger.hotkey.info("Double-tap Control listener started")
     }
 
-    private func handleFlagsChanged(event: CGEvent) {
+    func handleFlagsChanged(event: CGEvent) {
         let flags = event.flags
         let controlDown = flags.contains(.maskControl)
 
@@ -126,6 +131,9 @@ public final class HotkeyListener {
                now.timeIntervalSince(lastRelease) < doubleTapInterval {
                 // Double-tap detected!
                 lastControlReleaseTime = nil
+                #if DEBUG
+                _testDoubleTapDetected?()
+                #endif
                 Task { @MainActor [weak self] in
                     self?.onActivate?()
                 }

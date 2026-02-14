@@ -17,10 +17,16 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
 
     private let lock = NSLock()
 
-    private static var speakflowDir: URL {
+    private static let speakflowDir: URL = {
+        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
+            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
+        if isTestRun {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakflow-test-\(ProcessInfo.processInfo.processIdentifier)")
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".speakflow")
-    }
+    }()
 
     static var fileURL: URL {
         let dir = speakflowDir
@@ -34,13 +40,25 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
 
     struct ChatGPTSection: Codable {
         var tokens: Tokens
-        var last_refresh: String
+        var lastRefresh: String
+
+        enum CodingKeys: String, CodingKey {
+            case tokens
+            case lastRefresh = "last_refresh"
+        }
 
         struct Tokens: Codable {
-            var id_token: String?
-            var access_token: String
-            var refresh_token: String
-            var account_id: String
+            var idToken: String?
+            var accessToken: String
+            var refreshToken: String
+            var accountId: String
+
+            enum CodingKeys: String, CodingKey {
+                case idToken = "id_token"
+                case accessToken = "access_token"
+                case refreshToken = "refresh_token"
+                case accountId = "account_id"
+            }
         }
     }
 
@@ -50,12 +68,12 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
 
         let section = ChatGPTSection(
             tokens: .init(
-                id_token: credentials.idToken,
-                access_token: credentials.accessToken,
-                refresh_token: credentials.refreshToken,
-                account_id: credentials.accountId
+                idToken: credentials.idToken,
+                accessToken: credentials.accessToken,
+                refreshToken: credentials.refreshToken,
+                accountId: credentials.accountId
             ),
-            last_refresh: iso8601.string(from: credentials.lastRefresh)
+            lastRefresh: iso8601.string(from: credentials.lastRefresh)
         )
 
         let sectionData = try JSONEncoder().encode(section)
@@ -87,13 +105,13 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
 
         let iso8601 = ISO8601DateFormatter()
         iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let lastRefresh = iso8601.date(from: chatgpt.last_refresh) ?? Date.distantPast
+        let lastRefresh = iso8601.date(from: chatgpt.lastRefresh) ?? Date.distantPast
 
         return OAuthCredentials(
-            accessToken: chatgpt.tokens.access_token,
-            refreshToken: chatgpt.tokens.refresh_token,
-            idToken: chatgpt.tokens.id_token,
-            accountId: chatgpt.tokens.account_id,
+            accessToken: chatgpt.tokens.accessToken,
+            refreshToken: chatgpt.tokens.refreshToken,
+            idToken: chatgpt.tokens.idToken,
+            accountId: chatgpt.tokens.accountId,
             lastRefresh: lastRefresh
         )
     }
