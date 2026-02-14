@@ -89,10 +89,23 @@ public final class OpenAICodexAuth {
     // OAuth constants (same as Codex Desktop)
     private static let clientId = "app_EMoamEEZ73f0CkXaXp7hrann"
     private static let authorizeURL = "https://auth.openai.com/oauth/authorize"
-    private static let tokenURL = "https://auth.openai.com/oauth/token"
     private static let redirectURI = "http://localhost:1455/auth/callback"
     private static let scope = "openid profile email offline_access"
     private static let jwtClaimPath = "https://api.openai.com/auth"
+
+    private static let authorizeComponents: URLComponents = {
+        guard let c = URLComponents(string: authorizeURL) else {
+            preconditionFailure("Invalid OAuth authorize URL constant: \(authorizeURL)")
+        }
+        return c
+    }()
+
+    private static let tokenEndpoint: URL = {
+        guard let url = URL(string: "https://auth.openai.com/oauth/token") else {
+            preconditionFailure("Invalid OAuth token URL constant")
+        }
+        return url
+    }()
 
     /// HTTP data provider — defaults to `URLSession.shared`.
     /// Override in tests to inject a mock (e.g. one returning canned responses).
@@ -154,8 +167,8 @@ public final class OpenAICodexAuth {
     public static func createAuthorizationFlow() -> AuthorizationFlow {
         let pkce = generatePKCE()
         let state = generateState()
-        
-        var components = URLComponents(string: authorizeURL)!
+
+        var components = authorizeComponents
         components.queryItems = [
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "client_id", value: clientId),
@@ -168,9 +181,13 @@ public final class OpenAICodexAuth {
             URLQueryItem(name: "codex_cli_simplified_flow", value: "true"),
             URLQueryItem(name: "originator", value: "codex"),
         ]
-        
+
+        guard let url = components.url else {
+            preconditionFailure("Failed to construct OAuth authorization URL from valid components")
+        }
+
         return AuthorizationFlow(
-            url: components.url!,
+            url: url,
             verifier: pkce.verifier,
             state: state
         )
@@ -205,7 +222,7 @@ public final class OpenAICodexAuth {
     // MARK: - Token Exchange
     
     public static func exchangeCodeForTokens(code: String, flow: AuthorizationFlow) async throws -> OAuthCredentials {
-        var request = URLRequest(url: URL(string: tokenURL)!)
+        var request = URLRequest(url: tokenEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         
@@ -265,7 +282,7 @@ public final class OpenAICodexAuth {
     // MARK: - Token Refresh
     
     public static func refreshTokens(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
-        var request = URLRequest(url: URL(string: tokenURL)!)
+        var request = URLRequest(url: tokenEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         

@@ -47,7 +47,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             permissions.checkInitialPermissions()
 
             if VADProcessor.isAvailable && Settings.shared.vadEnabled {
-                Task { await VADModelCache.shared.warmUp(threshold: Settings.shared.vadThreshold) }
+                Task {
+                    let timedOut = await withTaskGroup(of: Bool.self) { group in
+                        group.addTask {
+                            await VADModelCache.shared.warmUp(threshold: Settings.shared.vadThreshold)
+                            return false
+                        }
+                        group.addTask {
+                            try? await Task.sleep(for: .seconds(15))
+                            return true
+                        }
+                        let result = await group.next() ?? false
+                        group.cancelAll()
+                        return result
+                    }
+                    if timedOut {
+                        Logger.audio.warning("VAD model warm-up timed out after 15s")
+                    }
+                }
             }
             // Only pre-warm audio if microphone is already granted — accessing
             // AVAudioEngine.inputNode triggers the OS microphone permission dialog.

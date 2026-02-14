@@ -1,4 +1,5 @@
 import Foundation
+import os
 import OSLog
 
 /// Centralized storage for all provider credentials in `~/.speakflow/auth.json`.
@@ -15,7 +16,7 @@ import OSLog
 public final class UnifiedAuthStorage: @unchecked Sendable {
     public static let shared = UnifiedAuthStorage()
 
-    private let lock = NSLock()
+    private let lock = OSAllocatedUnfairLock(initialState: ())
 
     private static let speakflowDir: URL = {
         let isTestRun = Bundle.main.bundlePath.contains(".xctest")
@@ -81,17 +82,15 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
             throw AuthError.tokenExchangeFailed("Failed to encode credentials")
         }
 
-        lock.lock()
-        defer { lock.unlock() }
-        var content = readFileUnlocked()
-        content["chatgpt"] = sectionDict
-        try writeFileUnlocked(content)
+        try lock.withLockUnchecked { _ in
+            var content = readFileUnlocked()
+            content["chatgpt"] = sectionDict
+            try writeFileUnlocked(content)
+        }
     }
 
     public func loadChatGPTCredentials() -> OAuthCredentials? {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadChatGPTUnlocked()
+        lock.withLockUnchecked { _ in loadChatGPTUnlocked() }
     }
 
     private func loadChatGPTUnlocked() -> OAuthCredentials? {
@@ -117,45 +116,45 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
     }
 
     public func deleteChatGPTCredentials() {
-        lock.lock()
-        defer { lock.unlock() }
-        var content = readFileUnlocked()
-        content.removeValue(forKey: "chatgpt")
-        if content.isEmpty {
-            try? FileManager.default.removeItem(at: Self.fileURL)
-        } else {
-            try? writeFileUnlocked(content)
+        lock.withLockUnchecked { _ in
+            var content = readFileUnlocked()
+            content.removeValue(forKey: "chatgpt")
+            if content.isEmpty {
+                try? FileManager.default.removeItem(at: Self.fileURL)
+            } else {
+                try? writeFileUnlocked(content)
+            }
         }
     }
 
     // MARK: - Provider API Keys
 
     public func apiKey(for providerId: String) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        let content = readFileUnlocked()
-        guard let section = content[providerId] as? [String: Any] else { return nil }
-        return section["api_key"] as? String
+        lock.withLockUnchecked { _ in
+            let content = readFileUnlocked()
+            guard let section = content[providerId] as? [String: Any] else { return nil }
+            return section["api_key"] as? String
+        }
     }
 
     public func setApiKey(_ key: String?, for providerId: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        var content = readFileUnlocked()
-        if let key, !key.isEmpty {
-            content[providerId] = ["api_key": key]
-        } else {
-            content.removeValue(forKey: providerId)
+        lock.withLockUnchecked { _ in
+            var content = readFileUnlocked()
+            if let key, !key.isEmpty {
+                content[providerId] = ["api_key": key]
+            } else {
+                content.removeValue(forKey: providerId)
+            }
+            try? writeFileUnlocked(content)
         }
-        try? writeFileUnlocked(content)
     }
 
     public func removeApiKey(for providerId: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        var content = readFileUnlocked()
-        content.removeValue(forKey: providerId)
-        try? writeFileUnlocked(content)
+        lock.withLockUnchecked { _ in
+            var content = readFileUnlocked()
+            content.removeValue(forKey: providerId)
+            try? writeFileUnlocked(content)
+        }
     }
 
     // MARK: - Private File I/O

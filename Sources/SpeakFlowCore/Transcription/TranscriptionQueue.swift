@@ -14,6 +14,7 @@ public struct TranscriptionTicket: Sendable, Equatable {
 /// This actor handles the sequencing of transcription chunks, ensuring they are
 /// output in the order they were recorded, regardless of when API responses arrive.
 public actor TranscriptionQueue {
+    private static let maxPendingResults = 100
     private var pendingResults: [UInt64: String] = [:]
     private var nextSeqToOutput: UInt64 = 0
     private var currentSeq: UInt64 = 0
@@ -76,6 +77,9 @@ public actor TranscriptionQueue {
             Logger.transcription.warning("Discarding stale result for seq \(ticket.seq) from session \(ticket.session) (current: \(self.sessionGeneration))")
             return
         }
+        if pendingResults.count >= Self.maxPendingResults {
+            Logger.transcription.warning("Pending results overflow (\(self.pendingResults.count) items)")
+        }
         pendingResults[ticket.seq] = text
         flushReady()
     }
@@ -106,14 +110,28 @@ public actor TranscriptionQueue {
         }
     }
 
+    private static let completionTimeoutSeconds: UInt64 = 30
+
     func waitForCompletion() async {
-        // If already complete, return immediately
         if pendingResults.isEmpty && currentSeq == nextSeqToOutput && currentSeq > 0 {
             return
         }
+
+        // Schedule a timeout to prevent indefinite hang if flushReady() never fires
+        let timeoutTask = Task {
+            try await Task.sleep(for: .seconds(Self.completionTimeoutSeconds))
+            if self.completionContinuation != nil {
+                Logger.transcription.warning("waitForCompletion timed out after \(Self.completionTimeoutSeconds)s")
+                self.completionContinuation?.resume()
+                self.completionContinuation = nil
+            }
+        }
+
         await withCheckedContinuation { continuation in
             self.completionContinuation = continuation
         }
+
+        timeoutTask.cancel()
     }
 
     func finishStream() {

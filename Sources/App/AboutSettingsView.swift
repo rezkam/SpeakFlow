@@ -35,14 +35,14 @@ struct AboutSettingsView: View {
 
             // Links
             HStack(spacing: 16) {
-                Link(destination: URL(string: "https://github.com/rezkam/SpeakFlow")!) {
+                Link(destination: Self.githubURL) {
                     Label("GitHub", systemImage: "link")
                 }
 
                 Text("·")
                     .foregroundStyle(.quaternary)
 
-                Link(destination: URL(string: "https://github.com/rezkam/SpeakFlow/blob/main/LICENSE")!) {
+                Link(destination: Self.licenseURL) {
                     Label("Apache 2.0 License", systemImage: "doc.text")
                 }
             }
@@ -54,6 +54,22 @@ struct AboutSettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("About")
     }
+
+    // MARK: - Constants
+
+    private static let githubURL: URL = {
+        guard let url = URL(string: "https://github.com/rezkam/SpeakFlow") else {
+            preconditionFailure("Invalid GitHub URL constant")
+        }
+        return url
+    }()
+
+    private static let licenseURL: URL = {
+        guard let url = URL(string: "https://github.com/rezkam/SpeakFlow/blob/main/LICENSE") else {
+            preconditionFailure("Invalid license URL constant")
+        }
+        return url
+    }()
 
     // MARK: - Helpers
 

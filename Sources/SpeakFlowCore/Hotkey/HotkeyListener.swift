@@ -1,4 +1,5 @@
 import AppKit
+import os
 import OSLog
 
 // MARK: - Key Codes
@@ -10,16 +11,15 @@ private enum KeyCode {
 /// Listens for global hotkey events to activate dictation
 @MainActor
 public final class HotkeyListener {
-    // CGEvent tap for double-tap Control detection
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private struct DoubleTapState: @unchecked Sendable {
+        var lastControlReleaseTime: Date?
+        var controlWasDown = false
+        var eventTap: CFMachPort?
+        var runLoopSource: CFRunLoopSource?
+        var globalMonitor: Any?
+    }
 
-    // NSEvent monitor for key combos
-    private var globalMonitor: Any?
-
-    // Double-tap detection state - track RELEASE time (this was the working approach)
-    private var lastControlReleaseTime: Date?
-    private var controlWasDown = false
+    private let tapState = OSAllocatedUnfairLock(initialState: DoubleTapState())
     private let doubleTapInterval: TimeInterval = 0.4
 
     public var onActivate: (() -> Void)?
@@ -59,41 +59,36 @@ public final class HotkeyListener {
         Self._testStopHook?()
         #endif
 
-        // Stop CGEvent tap
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-        }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-        }
-        eventTap = nil
-        runLoopSource = nil
-
-        // Stop NSEvent monitor
-        if let monitor = globalMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalMonitor = nil
+        let (tap, source, monitor) = tapState.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?) in
+            let result = (s.eventTap, s.runLoopSource, s.globalMonitor)
+            s.eventTap = nil
+            s.runLoopSource = nil
+            s.globalMonitor = nil
+            s.lastControlReleaseTime = nil
+            s.controlWasDown = false
+            return result
         }
 
-        // Reset state
-        lastControlReleaseTime = nil
-        controlWasDown = false
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
+        if let monitor { NSEvent.removeMonitor(monitor) }
     }
 
     // MARK: - Double-tap Control Detection (using CGEvent tap)
 
     private func startDoubleTapDetection() {
-        guard eventTap == nil else { return }
+        let alreadyActive = tapState.withLockUnchecked { $0.eventTap != nil }
+        guard !alreadyActive else { return }
 
         let eventMask = (1 << CGEventType.flagsChanged.rawValue)
 
-        eventTap = CGEvent.tapCreate(
+        let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+            callback: { (_, _, event, refcon) -> Unmanaged<CGEvent>? in
+                guard let refcon else { return Unmanaged.passRetained(event) }
                 let listener = Unmanaged<HotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
                 listener.handleFlagsChanged(event: event)
                 return Unmanaged.passRetained(event)
@@ -101,16 +96,20 @@ public final class HotkeyListener {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
 
-        guard let eventTap = eventTap else {
+        guard let tap else {
             Logger.hotkey.error("Could not create event tap (need Accessibility permission)")
             return
         }
 
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-        guard let source = runLoopSource else { return }
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        guard let source else { return }
 
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        CGEvent.tapEnable(tap: eventTap, enable: true)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        tapState.withLockUnchecked {
+            $0.eventTap = tap
+            $0.runLoopSource = source
+        }
 
         Logger.hotkey.info("Double-tap Control listener started")
     }
@@ -119,40 +118,46 @@ public final class HotkeyListener {
         let flags = event.flags
         let controlDown = flags.contains(.maskControl)
 
-        // Only trigger on Control alone (no other modifiers)
         let hasOtherModifiers = flags.contains(.maskCommand) ||
                                 flags.contains(.maskAlternate) ||
                                 flags.contains(.maskShift)
 
-        // Detect Control key RELEASE (was down, now up) with no other modifiers
-        if controlWasDown && !controlDown && !hasOtherModifiers {
-            let now = Date()
-            if let lastRelease = lastControlReleaseTime,
-               now.timeIntervalSince(lastRelease) < doubleTapInterval {
-                // Double-tap detected!
-                lastControlReleaseTime = nil
-                #if DEBUG
-                _testDoubleTapDetected?()
-                #endif
-                Task { @MainActor [weak self] in
-                    self?.onActivate?()
+        let doubleTapDetected = tapState.withLockUnchecked { s -> Bool in
+            // Detect Control key RELEASE (was down, now up) with no other modifiers
+            if s.controlWasDown && !controlDown && !hasOtherModifiers {
+                let now = Date()
+                if let lastRelease = s.lastControlReleaseTime,
+                   now.timeIntervalSince(lastRelease) < doubleTapInterval {
+                    s.lastControlReleaseTime = nil
+                    s.controlWasDown = controlDown
+                    return true
+                } else {
+                    s.lastControlReleaseTime = now
                 }
-            } else {
-                lastControlReleaseTime = now
             }
+            s.controlWasDown = controlDown
+            return false
         }
 
-        controlWasDown = controlDown
+        if doubleTapDetected {
+            #if DEBUG
+            _testDoubleTapDetected?()
+            #endif
+            Task { @MainActor [weak self] in
+                self?.onActivate?()
+            }
+        }
     }
 
     // MARK: - Key Combo Detection (using NSEvent monitor)
 
     private func startKeyComboDetection(type: HotkeyType) {
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleKeyDown(event: event, type: type)
         }
+        tapState.withLockUnchecked { $0.globalMonitor = monitor }
 
-        if globalMonitor != nil {
+        if monitor != nil {
             Logger.hotkey.info("Key combo listener started for \(type.displayName)")
         } else {
             Logger.hotkey.error("Could not create key monitor (need Accessibility permission)")

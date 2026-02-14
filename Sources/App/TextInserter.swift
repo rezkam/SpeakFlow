@@ -29,6 +29,8 @@ final class TextInserter: TextInserting {
         var focusedElement: CFTypeRef?
         if AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
            let element = focusedElement, CFGetTypeID(element) == AXUIElementGetTypeID() {
+            // Safe: CFGetTypeID check above guarantees element is AXUIElement;
+            // Swift CF bridging always succeeds for this cast
             // swiftlint:disable:next force_cast
             targetElement = (element as! AXUIElement)
         } else {
@@ -116,6 +118,8 @@ final class TextInserter: TextInserting {
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
               let focused = focusedRef, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+        // Safe: CFGetTypeID check above guarantees focused is AXUIElement;
+        // Swift CF bridging always succeeds for this cast
         // swiftlint:disable:next force_cast
         return CFEqual(target, focused as! AXUIElement)
     }

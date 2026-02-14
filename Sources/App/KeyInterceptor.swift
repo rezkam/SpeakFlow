@@ -18,19 +18,25 @@ final class KeyInterceptor: KeyIntercepting {
     /// Called when Enter is pressed. Caller decides action based on recording state.
     var onEnterPressed: (() -> Void)?
 
-    private var keyMonitor: Any?
-    private let keyListenerActive = OSAllocatedUnfairLock(initialState: false)
-    private var recordingEventTap: CFMachPort?
-    private var recordingRunLoopSource: CFRunLoopSource?
+    private struct EventTapState: @unchecked Sendable {
+        var keyMonitor: Any?
+        var isActive: Bool = false
+        var recordingEventTap: CFMachPort?
+        var recordingRunLoopSource: CFRunLoopSource?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: EventTapState())
 
     private init() {}
 
     // MARK: - Start / Stop
 
     func start() {
-        guard recordingEventTap == nil else { return }
+        let alreadyActive = state.withLockUnchecked { $0.recordingEventTap != nil }
+        guard !alreadyActive else { return }
+
         let eventMask = (1 << CGEventType.keyDown.rawValue)
-        recordingEventTap = CGEvent.tapCreate(
+        let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
             options: .defaultTap, eventsOfInterest: CGEventMask(eventMask),
             callback: { (_, _, event, refcon) -> Unmanaged<CGEvent>? in
@@ -41,38 +47,51 @@ final class KeyInterceptor: KeyIntercepting {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
 
-        guard let tap = recordingEventTap else {
+        guard let tap else {
             Logger.audio.error("Could not create CGEvent tap. Falling back to passive monitor.")
-            keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 switch event.keyCode {
                 case 53: Task { @MainActor [weak self] in self?.onEscapePressed?() }
                 case 36: Task { @MainActor [weak self] in self?.onEnterPressed?() }
                 default: break
                 }
             }
+            state.withLockUnchecked { $0.keyMonitor = monitor }
             return
         }
 
-        recordingRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        guard let source = recordingRunLoopSource else { recordingEventTap = nil; return }
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        guard let source else {
+            state.withLockUnchecked { $0.recordingEventTap = nil }
+            return
+        }
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        keyListenerActive.withLock { $0 = true }
+        state.withLockUnchecked {
+            $0.recordingEventTap = tap
+            $0.recordingRunLoopSource = source
+            $0.isActive = true
+        }
     }
 
     func stop() {
-        keyListenerActive.withLock { $0 = false }
-        if let tap = recordingEventTap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if let source = recordingRunLoopSource { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
-        recordingEventTap = nil
-        recordingRunLoopSource = nil
-        if let monitor = keyMonitor { NSEvent.removeMonitor(monitor); keyMonitor = nil }
+        let (tap, source, monitor) = state.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?) in
+            let result = (s.recordingEventTap, s.recordingRunLoopSource, s.keyMonitor)
+            s.isActive = false
+            s.recordingEventTap = nil
+            s.recordingRunLoopSource = nil
+            s.keyMonitor = nil
+            return result
+        }
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
+        if let monitor { NSEvent.removeMonitor(monitor) }
     }
 
     // MARK: - Event Handler
 
     private nonisolated func handleKeyEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
-        guard keyListenerActive.withLock({ $0 }) else { return Unmanaged.passRetained(event) }
+        guard state.withLockUnchecked({ $0.isActive }) else { return Unmanaged.passRetained(event) }
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         switch keyCode {
         case 53:

@@ -9,7 +9,7 @@ public enum HotkeyType: String, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .doubleTapControl: return "⌃⌃ (double-tap)"
+        case .doubleTapControl: return "⌃⌃ Double-tap"
         case .controlOptionD: return "⌃⌥D"
         case .controlOptionSpace: return "⌃⌥Space"
         case .commandShiftD: return "⇧⌘D"

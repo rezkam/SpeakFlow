@@ -182,10 +182,7 @@ public final class LiveStreamingController {
             }
 
             // Activate streaming — audio tap will now send data to provider
-            self.isActive = true
-            self.audioSessionRef.set(session: streamSession, active: true)
-            self.lastInterimText = ""
-            self.lastInterimCharCount = 0
+            activateSession(streamSession)
 
             logger.info("Live streaming started: \(provider.displayName, privacy: .public), \(config.sampleRate)Hz, \(config.encoding.rawValue)")
             return true
@@ -213,13 +210,15 @@ public final class LiveStreamingController {
         audioEngine = nil
 
         // Flush any pending audio on the server
-        try? await session?.finalize()
+        do { try await session?.finalize() }
+        catch { logger.debug("Session finalize failed: \(error.localizedDescription)") }
 
         // Wait briefly for final results after finalize
         try? await Task.sleep(for: .seconds(2))
 
         // Close the WebSocket
-        try? await session?.close()
+        do { try await session?.close() }
+        catch { logger.debug("Session close failed: \(error.localizedDescription)") }
         session = nil
 
         eventTask?.cancel()
@@ -402,6 +401,16 @@ public final class LiveStreamingController {
         let suffixToType = String(newChars[commonLen...])
 
         return (charsToDelete, suffixToType)
+    }
+
+    /// Atomically transition to the active streaming state.
+    /// Groups all related property mutations to prevent inconsistent intermediate state
+    /// if `cancel()` is called from another Task during the transition.
+    private func activateSession(_ streamSession: StreamingSession) {
+        isActive = true
+        audioSessionRef.set(session: streamSession, active: true)
+        lastInterimText = ""
+        lastInterimCharCount = 0
     }
 
     private func cleanup() async {

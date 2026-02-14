@@ -57,17 +57,19 @@ struct MenuBarView: View {
     @Environment(\.recordingController) private var recordingController
 
     var body: some View {
+        // Read refreshVersion so SwiftUI re-evaluates when provider config changes
+        let _ = state.refreshVersion
+
         Button("Open SpeakFlow...") {
             showSettingsWindow()
         }
-        .keyboardShortcut(",", modifiers: .command)
 
         Divider()
 
         Button(dictationLabel) {
             recordingController.toggle()
         }
-        .disabled(ProviderRegistry.shared.configuredProviders.isEmpty && !state.isRecording)
+        .disabled(!state.isRecording && !state.canStartDictation)
 
         // Show provider switcher when more than one provider is configured
         let configured = ProviderRegistry.shared.configuredProviders
@@ -90,7 +92,6 @@ struct MenuBarView: View {
         Button("Quit SpeakFlow") {
             NSApp.terminate(nil)
         }
-        .keyboardShortcut("q")
     }
 
     private var dictationLabel: String {

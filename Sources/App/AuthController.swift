@@ -47,9 +47,10 @@ final class AuthController {
         let server = OAuthCallbackServer(expectedState: flow.state)
         oauthCallbackServer = server
         NSWorkspace.shared.open(flow.url)
-        Task {
+        Task { [weak self] in
             let code = await server.waitForCallback(timeout: 120)
             await MainActor.run {
+                guard let self else { return }
                 self.oauthCallbackServer = nil
                 if let code { self.exchangeCodeForTokens(code: code, flow: flow) }
             }

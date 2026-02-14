@@ -1,6 +1,50 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
+
+Architecture hardening release driven by a deep code review. Fixes thread-safety issues, potential retain cycles, and a menu bar bug where "Start Dictation" could be enabled without required permissions. Adds 21 new tests (359 total) including integration tests that verify the menu bar disabled state against all permission and provider combinations.
+
+### Bug Fixes
+
+* **Menu bar "Start Dictation" now correctly disabled** when accessibility or microphone permissions are missing — previously it only checked for configured providers, allowing users to attempt dictation that would fail at the system level.
+* **Menu bar reactivity fixed** — the menu now re-evaluates when provider configuration or permissions change, using the `refreshVersion` observation pattern already established in other views.
+* **Hotkey display name** cleaned up from `⌃⌃ (double-tap)` to `⌃⌃ Double-tap` for consistency.
+* **Removed non-functional keyboard shortcuts** from menu bar items — `MenuBarExtra` with `.menu` style has no window context for shortcuts.
+
+### Thread Safety & Concurrency
+
+* **KeyInterceptor**: consolidated four separate mutable fields into a single `OSAllocatedUnfairLock<EventTapState>`, eliminating a data-race window between the CGEvent tap callback thread and MainActor.
+* **HotkeyListener**: consolidated double-tap state into `OSAllocatedUnfairLock<DoubleTapState>` with atomic double-tap detection inside the lock.
+* **UnifiedAuthStorage**: replaced `NSLock` with `OSAllocatedUnfairLock` for consistency with the project's concurrency standard.
+* **RecordingController**: added explicit `@MainActor in` to four fire-and-forget Tasks that previously relied on implicit isolation.
+* **TranscriptionQueue**: added 30-second timeout to `waitForCompletion()` preventing indefinite hangs if flush never fires, plus overflow detection at 100 pending results.
+
+### Memory Safety
+
+* **RecordingController**: fixed retain cycle — `onChunkReady` callback now captures `[weak self]`.
+* **AuthController**: added `[weak self]` to OAuth callback Task preventing controller from being held alive by a pending server response.
+
+### Robustness
+
+* **URL force-unwrap elimination**: replaced `URL(string:)!` and `URLComponents(string:)!` with static `let` constants using `preconditionFailure` in `OpenAICodexAuth`, `DeepgramProvider`, and `AboutSettingsView`.
+* **Silent error logging**: replaced `try?` with `do/catch` + `Logger.debug` in `LiveStreamingController` shutdown so failures are observable.
+* **VAD warm-up timeout**: added 15-second `withTaskGroup` race so a stuck model load doesn't block app startup.
+* **Atomic session activation**: extracted `activateSession()` in `LiveStreamingController` to prevent partial state when activating a streaming session.
+
+### Architecture
+
+* **AppState DI**: `AppState` now accepts a `ProviderRegistryProviding` dependency via init, consistent with `RecordingController` and `AuthController`. Enables isolated testing without global singleton pollution.
+* **`canStartDictation`** computed property extracted from `MenuBarView` into `AppState` — testable, observable, and the single source of truth for the menu bar disabled state.
+* **`StubProvider`** test mock added for controllable `isConfigured` in provider-dependent tests.
+
+### Tests
+
+* 21 new tests across `AppStateTests` and `DictationReadinessTests`:
+  - 9 unit tests for `canStartDictation` covering every permission/provider combination.
+  - 12 integration tests wiring real `AppState` + `RecordingController` together, verifying UI guard and runtime guard alignment, progressive permission grants, provider config/deconfig transitions, and mid-recording stop availability.
+* Test suite: **359 tests in 84 suites, all passing.**
+
+## 0.3.0
 
 * Fixed recording silently proceeding without a configured provider on first launch — an early configuration gate now blocks recording and shows a banner directing users to Accounts setup.
 * Provider picker in transcription settings now only shows configured providers, preventing selection of unusable providers.

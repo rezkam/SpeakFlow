@@ -112,28 +112,136 @@ struct AppStateProviderTests {
 
     @MainActor @Test
     func isProviderConfigured_delegatesToRegistry() {
-        // Register real providers so the delegation path is tested
-        ProviderRegistry.shared.register(DeepgramProvider())
-        ProviderRegistry.shared.register(ChatGPTBatchProvider())
-        let state = AppState()
+        let registry = SpyProviderRegistry()
+        let configured = StubProvider(id: "test-cfg", isConfigured: true)
+        let unconfigured = StubProvider(id: "test-ucfg", isConfigured: false)
+        registry.register(configured)
+        registry.register(unconfigured)
+        let state = AppState(providerRegistry: registry)
 
-        // These delegate to ProviderRegistry — verify the path works
-        let _ = state.isProviderConfigured(ProviderId.chatGPT)
-        let _ = state.isProviderConfigured(ProviderId.deepgram)
+        #expect(state.isProviderConfigured("test-cfg"), "Configured provider should return true")
+        #expect(!state.isProviderConfigured("test-ucfg"), "Unconfigured provider should return false")
+        #expect(!state.isProviderConfigured("nonexistent"), "Unknown provider should return false")
     }
 
     @MainActor @Test
     func isStreamingProvider_reflectsActiveProvider() {
-        ProviderRegistry.shared.register(DeepgramProvider())
-        ProviderRegistry.shared.register(ChatGPTBatchProvider())
-        let state = AppState()
+        let registry = SpyProviderRegistry()
+        let streaming = StubProvider(id: "stream", mode: .streaming, isConfigured: true)
+        let batch = StubProvider(id: "batch", mode: .batch, isConfigured: true)
+        registry.register(streaming)
+        registry.register(batch)
+        let state = AppState(providerRegistry: registry)
 
-        // Deepgram is streaming
-        state.activeProviderId = ProviderId.deepgram
-        #expect(state.isStreamingProvider, "Deepgram should be a streaming provider")
+        state.activeProviderId = "stream"
+        #expect(state.isStreamingProvider, "Streaming provider should be detected")
 
-        // ChatGPT is batch
-        state.activeProviderId = ProviderId.chatGPT
-        #expect(!state.isStreamingProvider, "ChatGPT should not be streaming")
+        state.activeProviderId = "batch"
+        #expect(!state.isStreamingProvider, "Batch provider should not be streaming")
+    }
+}
+
+// MARK: - Dictation Readiness (Menu Bar)
+
+@Suite("AppState — canStartDictation")
+struct AppStateCanStartDictationTests {
+
+    /// Creates an AppState with an isolated SpyProviderRegistry for clean test state.
+    @MainActor
+    private func makeState(
+        providers: [StubProvider] = []
+    ) -> (AppState, SpyProviderRegistry) {
+        let registry = SpyProviderRegistry()
+        for p in providers { registry.register(p) }
+        let state = AppState(providerRegistry: registry)
+        return (state, registry)
+    }
+
+    @MainActor @Test
+    func disabledWhenAccessibilityNotGranted() {
+        let (state, _) = makeState(providers: [StubProvider(isConfigured: true)])
+        state.accessibilityGranted = false
+        state.microphoneGranted = true
+
+        #expect(!state.canStartDictation, "Must not start dictation without accessibility")
+    }
+
+    @MainActor @Test
+    func disabledWhenMicrophoneNotGranted() {
+        let (state, _) = makeState(providers: [StubProvider(isConfigured: true)])
+        state.accessibilityGranted = true
+        state.microphoneGranted = false
+
+        #expect(!state.canStartDictation, "Must not start dictation without microphone")
+    }
+
+    @MainActor @Test
+    func disabledWhenNoProviderConfigured() {
+        let (state, _) = makeState(providers: [StubProvider(isConfigured: false)])
+        state.accessibilityGranted = true
+        state.microphoneGranted = true
+
+        #expect(!state.canStartDictation, "Must not start dictation without configured provider")
+    }
+
+    @MainActor @Test
+    func disabledWhenNoProvidersRegistered() {
+        let (state, _) = makeState()
+        state.accessibilityGranted = true
+        state.microphoneGranted = true
+
+        #expect(!state.canStartDictation, "Must not start dictation without any providers")
+    }
+
+    @MainActor @Test
+    func disabledWhenBothPermissionsMissing() {
+        let (state, _) = makeState(providers: [StubProvider(isConfigured: true)])
+        state.accessibilityGranted = false
+        state.microphoneGranted = false
+
+        #expect(!state.canStartDictation, "Must not start dictation without any permissions")
+    }
+
+    @MainActor @Test
+    func enabledWhenAllPrerequisitesMet() {
+        let (state, _) = makeState(providers: [StubProvider(isConfigured: true)])
+        state.accessibilityGranted = true
+        state.microphoneGranted = true
+
+        #expect(state.canStartDictation, "Should allow dictation when all prerequisites are met")
+    }
+
+    @MainActor @Test
+    func reactsToPermissionChanges() {
+        let (state, _) = makeState(providers: [StubProvider(isConfigured: true)])
+        state.accessibilityGranted = false
+        state.microphoneGranted = true
+        #expect(!state.canStartDictation)
+
+        state.accessibilityGranted = true
+        #expect(state.canStartDictation, "Should become available after granting accessibility")
+    }
+
+    @MainActor @Test
+    func reactsToProviderConfigChange() {
+        let stub = StubProvider(isConfigured: false)
+        let (state, _) = makeState(providers: [stub])
+        state.accessibilityGranted = true
+        state.microphoneGranted = true
+        #expect(!state.canStartDictation)
+
+        stub.stubbedIsConfigured = true
+        #expect(state.canStartDictation, "Should become available after configuring provider")
+    }
+
+    @MainActor @Test
+    func enabledWithMultipleProvidersOneConfigured() {
+        let unconfigured = StubProvider(id: "a", isConfigured: false)
+        let configured = StubProvider(id: "b", isConfigured: true)
+        let (state, _) = makeState(providers: [unconfigured, configured])
+        state.accessibilityGranted = true
+        state.microphoneGranted = true
+
+        #expect(state.canStartDictation, "One configured provider should be sufficient")
     }
 }
