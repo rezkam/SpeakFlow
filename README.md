@@ -11,7 +11,7 @@
 <p align="center">
   A macOS menu bar app that turns your voice into text — anywhere.<br>
   Press a hotkey, speak naturally, and your words appear in whatever app you're using.<br><br>
-  <b>Real-time interim results</b> that refine as you speak &nbsp;·&nbsp; <b>On-device voice activity detection</b> powered by Apple Neural Engine &nbsp;·&nbsp; <b>9 languages</b> supported
+  <b>Real-time interim results</b> that refine as you speak &nbsp;·&nbsp; <b>On-device voice activity detection</b> powered by Apple Neural Engine
 </p>
 
 <p align="center">
@@ -109,7 +109,6 @@ Text is inserted into whichever app was focused when you started recording. In s
 All settings are in the **Transcription** tab:
 
 - **Interim results** (streaming) — partial text appears and refines as you speak. Each update only retypes the changed portion, so there's no flickering. Disable for final-only output.
-- **Language** (streaming) — select from English, Spanish, French, German, Portuguese, Japanese, Korean, or Chinese. Determines the language sent to Deepgram.
 - **Voice activity detection** (batch) — a neural network runs locally on Apple Silicon to detect speech in real-time. Silent and noise-only chunks are filtered out before transcription, saving API calls. Adjustable sensitivity threshold.
 - **Auto-end** — recording stops automatically after a configurable silence period (3–30s). In streaming mode this is off by default since text is already live; in batch mode it defaults to 5s.
 - **Smart formatting** (streaming) — automatic punctuation and capitalization.
