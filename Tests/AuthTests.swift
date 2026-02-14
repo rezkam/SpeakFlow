@@ -251,6 +251,21 @@ struct TokenRefreshCoordinatorTests {
         // Verify the default httpProvider is URLSession.shared
         #expect(OpenAICodexAuth.httpProvider is URLSession)
     }
+
+    /// Behavioral: mock provider round-trips through the lock.
+    @Test func testMockProviderRoundTrips() {
+        struct MockHTTP: HTTPDataProvider {
+            func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+                (Data(), URLResponse())
+            }
+        }
+        let saved = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = saved }
+
+        OpenAICodexAuth.httpProvider = MockHTTP()
+        #expect(OpenAICodexAuth.httpProvider is MockHTTP,
+                "Setting httpProvider must be readable back through the lock")
+    }
 }
 
 // MARK: - OAuth Form Encoding Tests
@@ -622,34 +637,6 @@ struct AuthErrorLocalizationTests {
         let refreshError = AuthError.tokenRefreshFailed("network timeout")
         #expect(refreshError.errorDescription?.contains("network timeout") == true,
                 "tokenRefreshFailed should include detail message")
-    }
-}
-
-// MARK: - P2 Fix: httpProvider thread-safe access
-
-@Suite("P2 — httpProvider lock-protected access", .serialized)
-struct HttpProviderThreadSafetyTests {
-
-    /// Behavioral: default provider is URLSession.shared.
-    @Test func testDefaultProviderIsStillURLSession() {
-        let provider = OpenAICodexAuth.httpProvider
-        #expect(provider is URLSession,
-                "Default httpProvider must be URLSession")
-    }
-
-    /// Behavioral: mock provider round-trips through the lock.
-    @Test func testMockProviderRoundTrips() {
-        struct MockHTTP: HTTPDataProvider {
-            func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-                (Data(), URLResponse())
-            }
-        }
-        let saved = OpenAICodexAuth.httpProvider
-        defer { OpenAICodexAuth.httpProvider = saved }
-
-        OpenAICodexAuth.httpProvider = MockHTTP()
-        #expect(OpenAICodexAuth.httpProvider is MockHTTP,
-                "Setting httpProvider must be readable back through the lock")
     }
 }
 

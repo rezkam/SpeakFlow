@@ -3,7 +3,8 @@ import SpeakFlowCore
 
 /// Account management: ChatGPT login/logout, Deepgram API key.
 struct AccountsSettingsView: View {
-    private let state = AppState.shared
+    @Environment(\.appState) private var state
+    @Environment(\.authController) private var authController
     @State private var deepgramApiKey = ""
     @State private var isValidatingKey = false
     @State private var keyValidationError: String?
@@ -42,12 +43,12 @@ struct AccountsSettingsView: View {
 
                     if isChatGPTConfigured {
                         Button("Log Out", role: .destructive) {
-                            AuthController.shared.handleLogout()
+                            authController.handleLogout()
                         }
                         .controlSize(.small)
                     } else {
                         Button("Log In...") {
-                            AuthController.shared.startLoginFlow()
+                            authController.startLoginFlow()
                         }
                         .controlSize(.small)
                     }
@@ -104,7 +105,7 @@ struct AccountsSettingsView: View {
         .navigationTitle("Accounts")
         .alert("Remove Deepgram API Key?", isPresented: $showRemoveKeyConfirm) {
             Button("Remove", role: .destructive) {
-                AuthController.shared.handleRemoveApiKey(for: ProviderId.deepgram)
+                authController.handleRemoveApiKey(for: ProviderId.deepgram)
                 deepgramApiKey = ""
                 keyValidationError = nil
                 isEditingKey = false

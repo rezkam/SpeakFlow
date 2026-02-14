@@ -228,26 +228,33 @@ public final class OpenAICodexAuth {
         }
         
         struct TokenResponse: Codable {
-            let access_token: String
-            let refresh_token: String
-            let id_token: String?
-            let expires_in: Int
+            let accessToken: String
+            let refreshToken: String
+            let idToken: String?
+            let expiresIn: Int
+
+            enum CodingKeys: String, CodingKey {
+                case accessToken = "access_token"
+                case refreshToken = "refresh_token"
+                case idToken = "id_token"
+                case expiresIn = "expires_in"
+            }
         }
-        
+
         let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
-        
-        guard let accountId = extractAccountId(from: tokenResponse.access_token) else {
+
+        guard let accountId = extractAccountId(from: tokenResponse.accessToken) else {
             throw AuthError.missingAccountId
         }
-        
+
         let credentials = OAuthCredentials(
-            accessToken: tokenResponse.access_token,
-            refreshToken: tokenResponse.refresh_token,
-            idToken: tokenResponse.id_token,
+            accessToken: tokenResponse.accessToken,
+            refreshToken: tokenResponse.refreshToken,
+            idToken: tokenResponse.idToken,
             accountId: accountId,
             lastRefresh: Date()
         )
-        
+
         // Save credentials in Codex format
         try saveCredentials(credentials)
         
@@ -279,26 +286,33 @@ public final class OpenAICodexAuth {
         }
         
         struct TokenResponse: Codable {
-            let access_token: String
-            let refresh_token: String
-            let id_token: String?
-            let expires_in: Int
+            let accessToken: String
+            let refreshToken: String
+            let idToken: String?
+            let expiresIn: Int
+
+            enum CodingKeys: String, CodingKey {
+                case accessToken = "access_token"
+                case refreshToken = "refresh_token"
+                case idToken = "id_token"
+                case expiresIn = "expires_in"
+            }
         }
-        
+
         let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
-        
-        guard let accountId = extractAccountId(from: tokenResponse.access_token) else {
+
+        guard let accountId = extractAccountId(from: tokenResponse.accessToken) else {
             throw AuthError.missingAccountId
         }
-        
+
         let newCredentials = OAuthCredentials(
-            accessToken: tokenResponse.access_token,
-            refreshToken: tokenResponse.refresh_token,
-            idToken: tokenResponse.id_token,
+            accessToken: tokenResponse.accessToken,
+            refreshToken: tokenResponse.refreshToken,
+            idToken: tokenResponse.idToken,
             accountId: accountId,
             lastRefresh: Date()
         )
-        
+
         // Save updated credentials
         try saveCredentials(newCredentials)
         

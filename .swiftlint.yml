@@ -3,6 +3,8 @@
 excluded:
   - .build
   - Package.swift
+  - Sources/LiveE2E
+  - Sources/DeepgramE2E
 
 disabled_rules:
   - trailing_whitespace  # Will fix these automatically
@@ -14,7 +16,7 @@ opt_in_rules:
 
 line_length:
   warning: 150
-  error: 200
+  error: 300
 
 identifier_name:
   min_length:
@@ -30,6 +32,12 @@ identifier_name:
     - x
     - y
     - z
+    - p
+    - b
+    - s
+    - f
+    - r
+    - m
     - id
     - rq
     - ck

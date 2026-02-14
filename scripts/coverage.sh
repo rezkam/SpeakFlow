@@ -9,8 +9,9 @@ cd "$(dirname "$0")/.."
 echo "Running tests with coverage..."
 swift test --enable-code-coverage
 
-PROFDATA=".build/arm64-apple-macosx/debug/codecov/default.profdata"
-BINARY=".build/arm64-apple-macosx/debug/SpeakFlowPackageTests.xctest/Contents/MacOS/SpeakFlowPackageTests"
+ARCH="$(uname -m)-apple-macosx"
+PROFDATA=".build/$ARCH/debug/codecov/default.profdata"
+BINARY=".build/$ARCH/debug/SpeakFlowPackageTests.xctest/Contents/MacOS/SpeakFlowPackageTests"
 
 if [ ! -f "$PROFDATA" ]; then
     echo "Error: Coverage data not found at $PROFDATA"
@@ -34,7 +35,7 @@ xcrun llvm-cov report "$BINARY" \
     -ignore-filename-regex='.build|Tests'
 
 # Optional: Generate HTML report
-if [ "$1" == "--html" ]; then
+if [ "${1:-}" == "--html" ]; then
     echo ""
     echo "Generating HTML coverage report..."
     

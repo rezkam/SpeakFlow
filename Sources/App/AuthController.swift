@@ -12,13 +12,25 @@ final class AuthController {
 
     private(set) var oauthCallbackServer: OAuthCallbackServer?
 
-    init() {}
+    let appState: any BannerPresenting
+    let providerSettings: any ProviderSettingsProviding
+    let providerRegistry: any ProviderRegistryProviding
+
+    init(
+        appState: any BannerPresenting = SpeakFlow.AppState.shared,
+        providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
+        providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared
+    ) {
+        self.appState = appState
+        self.providerSettings = providerSettings
+        self.providerRegistry = providerRegistry
+    }
 
     // MARK: - ChatGPT
 
     func handleLoginAction() {
         if OpenAICodexAuth.isLoggedIn {
-            AppState.shared.showBanner("Already logged in to ChatGPT")
+            appState.showBanner("Already logged in to ChatGPT")
         } else {
             startLoginFlow()
         }
@@ -26,8 +38,8 @@ final class AuthController {
 
     func handleLogout() {
         OpenAICodexAuth.deleteCredentials()
-        AppState.shared.refresh()
-        AppState.shared.showBanner("Logged out from ChatGPT", style: .success)
+        appState.refresh()
+        appState.showBanner("Logged out from ChatGPT", style: .success)
     }
 
     func startLoginFlow() {
@@ -47,14 +59,14 @@ final class AuthController {
     // MARK: - API Key Management
 
     func handleRemoveApiKey(for providerId: String) {
-        ProviderSettings.shared.removeApiKey(for: providerId)
-        if ProviderSettings.shared.activeProviderId == providerId {
+        providerSettings.removeApiKey(for: providerId)
+        if providerSettings.activeProviderId == providerId {
             // Fall back to the first remaining configured provider, or first registered
-            let fallback = ProviderRegistry.shared.configuredProviders.first
-                ?? ProviderRegistry.shared.allProviders.first
-            ProviderSettings.shared.activeProviderId = fallback?.id ?? ProviderId.chatGPT
+            let fallback = providerRegistry.configuredProviders.first
+                ?? providerRegistry.allProviders.first
+            providerSettings.activeProviderId = fallback?.id ?? ProviderId.chatGPT
         }
-        AppState.shared.refresh()
+        appState.refresh()
     }
 
     // MARK: - Cleanup
@@ -71,13 +83,13 @@ final class AuthController {
             do {
                 _ = try await OpenAICodexAuth.exchangeCodeForTokens(code: code, flow: flow)
                 await MainActor.run {
-                    AppState.shared.refresh()
-                    AppState.shared.showBanner("Login successful — ChatGPT transcription ready", style: .success)
+                    appState.refresh()
+                    appState.showBanner("Login successful — ChatGPT transcription ready", style: .success)
                 }
             } catch {
                 Logger.auth.error("OAuth token exchange failed: \(error)")
                 await MainActor.run {
-                    AppState.shared.showBanner("Login failed — please try again", style: .error)
+                    appState.showBanner("Login failed — please try again", style: .error)
                 }
             }
         }

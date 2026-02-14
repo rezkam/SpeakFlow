@@ -1,6 +1,30 @@
 import Foundation
 import Testing
+@testable import SpeakFlow
 @testable import SpeakFlowCore
+
+// MARK: - RecordingController Test Factory
+
+/// Creates a RecordingController with spy dependencies for isolated testing.
+/// Mutes system sounds and sets test mode so permission checks are skipped.
+@MainActor
+func makeTestRecordingController(
+    providerSettings: SpyProviderSettings = SpyProviderSettings(),
+    providerRegistry: SpyProviderRegistry = SpyProviderRegistry(),
+    settings: SpySettings = SpySettings()
+) -> (RecordingController, SpyKeyInterceptor, SpyTextInserter, SpyBannerPresenter) {
+    SoundEffect.isMuted = true
+    let ki = SpyKeyInterceptor()
+    let ti = SpyTextInserter()
+    let bp = SpyBannerPresenter()
+    let c = RecordingController(
+        keyInterceptor: ki, textInserter: ti, appState: bp,
+        providerSettings: providerSettings, providerRegistry: providerRegistry,
+        settings: settings
+    )
+    c.testMode = .live
+    return (c, ki, ti, bp)
+}
 
 // MARK: - Shared Test Helpers
 

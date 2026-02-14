@@ -1,6 +1,7 @@
 import AVFoundation
 import Accelerate
 import OSLog
+import os
 
 /// Audio chunk with metadata
 public struct AudioChunk: Sendable {
@@ -16,79 +17,70 @@ public struct AudioChunk: Sendable {
 }
 
 /// Thread-safe state container for audio callback
-private final class AudioRecordingState: @unchecked Sendable {
-    private var isRecording = false
-    private var vadActive = false
-    private var lastSoundTime: Date = Date()
+private final class AudioRecordingState: Sendable {
     let sampleRate: Double = 16000
 
-    // Lock for thread-safe access
-    private let lock = NSLock()
+    private struct State {
+        var isRecording = false
+        var vadActive = false
+        var lastSoundTime = Date()
+    }
+
+    private let lock = OSAllocatedUnfairLock(initialState: State())
 
     func setRecording(_ value: Bool) {
-        lock.lock()
-        isRecording = value
-        lock.unlock()
+        lock.withLock { $0.isRecording = value }
     }
 
     func getRecording() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return isRecording
+        lock.withLock { $0.isRecording }
     }
 
     func setVADActive(_ value: Bool) {
-        lock.lock()
-        vadActive = value
-        lock.unlock()
+        lock.withLock { $0.vadActive = value }
     }
 
     func getVADActive() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return vadActive
+        lock.withLock { $0.vadActive }
     }
 
     func updateLastSoundTime() {
-        lock.lock()
-        lastSoundTime = Date()
-        lock.unlock()
+        lock.withLock { $0.lastSoundTime = Date() }
     }
 
     func setLastSoundTime(_ value: Date) {
-        lock.lock()
-        lastSoundTime = value
-        lock.unlock()
+        lock.withLock { $0.lastSoundTime = value }
     }
 
     func getLastSoundTime() -> Date {
-        lock.lock()
-        defer { lock.unlock() }
-        return lastSoundTime
+        lock.withLock { $0.lastSoundTime }
     }
 }
 
 /// Thread-safe queue for passing audio samples from callback to main actor
 private final class AudioSampleQueue: @unchecked Sendable {
-    private var samples: [(frames: [Float], hasSpeech: Bool)] = []
-    private let lock = NSLock()
+    private struct QueueState {
+        var samples: [(frames: [Float], hasSpeech: Bool)] = []
+    }
+
+    private let lock = OSAllocatedUnfairLock(initialState: QueueState())
     private let maxQueueSize = 100
 
     func enqueue(frames: [Float], hasSpeech: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        if samples.count >= maxQueueSize {
-            samples.removeFirst()
+        lock.withLock { state in
+            if state.samples.count >= maxQueueSize {
+                state.samples.removeFirst()
+            }
+            state.samples.append((frames: frames, hasSpeech: hasSpeech))
         }
-        samples.append((frames: frames, hasSpeech: hasSpeech))
     }
 
     func dequeueAll() -> [(frames: [Float], hasSpeech: Bool)] {
-        lock.lock()
-        defer { lock.unlock() }
-        let result = samples
-        samples.removeAll()
-        return result
+        lock.withLockUnchecked { state in
+            let result = state.samples
+            state.samples.removeAll()
+            return result
+        }
     }
 }
 
@@ -195,7 +187,11 @@ public final class StreamingRecorder {
     /// Throttle for periodic diagnostic heartbeat (every ~2s)
     private var lastHeartbeatLog: Date = .distantPast
 
-    public init() {}
+    private let settings: any SettingsProviding
+
+    public init(settings: any SettingsProviding = Settings.shared) {
+        self.settings = settings
+    }
 
     /// Cancel recording without emitting final chunk
     public func cancel() {
@@ -267,7 +263,7 @@ public final class StreamingRecorder {
 
         do {
             try engine.start()
-            let settings = Settings.shared
+            let settings = self.settings
             let isFullRecording = settings.chunkDuration.isFullRecording
 
             if isFullRecording {
@@ -322,7 +318,7 @@ public final class StreamingRecorder {
     }
 
     private func initializeVAD() async {
-        let settings = Settings.shared
+        let settings = self.settings
 
         guard settings.vadEnabled && VADProcessor.isAvailable else {
             if !VADProcessor.isAvailable {
@@ -361,7 +357,8 @@ public final class StreamingRecorder {
 
             state.setVADActive(true)
             Logger.audio.info("VAD enabled on \(PlatformSupport.platformDescription)")
-            Logger.audio.warning("VAD CONFIG DUMP: vadThreshold=\(settings.vadThreshold, privacy: .public), minSilenceAfterSpeech=\(Config.vadMinSilenceAfterSpeech, privacy: .public), autoEndEnabled=\(settings.autoEndEnabled, privacy: .public), autoEndSilenceDuration=\(settings.autoEndSilenceDuration, privacy: .public), autoEndMinSession=\(Config.autoEndMinSessionDuration, privacy: .public), maxChunkDuration=\(settings.maxChunkDuration, privacy: .public), chunkDuration=\(settings.chunkDuration.rawValue, privacy: .public), skipSilentChunks=\(settings.skipSilentChunks, privacy: .public)")
+            // swiftlint:disable:next line_length
+            Logger.audio.warning("VAD CONFIG: vadThreshold=\(settings.vadThreshold, privacy: .public) minSilence=\(Config.vadMinSilenceAfterSpeech, privacy: .public) autoEnd=\(settings.autoEndEnabled, privacy: .public) silenceDur=\(settings.autoEndSilenceDuration, privacy: .public) minSession=\(Config.autoEndMinSessionDuration, privacy: .public) maxChunk=\(settings.maxChunkDuration, privacy: .public) chunkDur=\(settings.chunkDuration.rawValue, privacy: .public) skipSilent=\(settings.skipSilentChunks, privacy: .public)")
         } catch {
             Logger.audio.warning("VAD initialization failed: \(error.localizedDescription). Using fallback mode.")
             vadProcessor = nil
@@ -403,9 +400,8 @@ public final class StreamingRecorder {
     private func periodicCheck() async {
         guard state.getRecording(), let buffer = audioBuffer else { return }
 
-        let settings = Settings.shared
         let duration = await buffer.duration
-        let isFullRecording = settings.chunkDuration.isFullRecording
+        let isFullRecording = self.settings.chunkDuration.isFullRecording
 
         // Periodic diagnostic heartbeat (every ~2s) — traces VAD state between events
         if state.getVADActive(), let session = sessionController {
@@ -437,31 +433,35 @@ public final class StreamingRecorder {
 
             let shouldAutoEnd = await session.shouldAutoEndSession()
             if shouldAutoEnd {
-                Logger.audio.error("🛑 AUTO-END TRIGGERED: duration=\(String(format: "%.1f", duration), privacy: .public)s, sessionDur=\(String(format: "%.1f", sessionDur), privacy: .public)s, isSpeaking=\(isSpeaking, privacy: .public), silence=\(String(format: "%.1f", silenceDur ?? -1), privacy: .public)s, hasSpoken=\(hasSpoken, privacy: .public)")
+                let dur = String(format: "%.1f", duration)
+                let sess = String(format: "%.1f", sessionDur)
+                let sil = String(format: "%.1f", silenceDur ?? -1)
+                // swiftlint:disable:next line_length
+                Logger.audio.error("AUTO-END TRIGGERED: duration=\(dur, privacy: .public)s sessionDur=\(sess, privacy: .public)s isSpeaking=\(isSpeaking, privacy: .public) silence=\(sil, privacy: .public)s hasSpoken=\(hasSpoken, privacy: .public)")
                 onAutoEnd?()
                 return
             }
 
-            if duration >= settings.maxChunkDuration {
+            if duration >= self.settings.maxChunkDuration {
                 let isSpeaking = await vadProcessor?.isSpeaking ?? false
                 if !isSpeaking {
                     let sent = await sendChunkIfReady(reason: "max duration + silence")
                     if sent { await session.chunkSent() }
-                } else if duration >= settings.maxChunkDuration * Config.forceSendChunkMultiplier {
+                } else if duration >= self.settings.maxChunkDuration * Config.forceSendChunkMultiplier {
                     // Hard upper limit: force-send even during continuous speech to prevent
                     // unbounded buffer accumulation. Without this, a user speaking non-stop
                     // for minutes would get all audio in one huge chunk that may timeout
                     // on the API or produce poor transcription quality.
-                    Logger.audio.warning("⚠️ FORCE CHUNK: buffer=\(String(format: "%.1f", duration), privacy: .public)s exceeds \(String(format: "%.1f", settings.maxChunkDuration * Config.forceSendChunkMultiplier), privacy: .public)s hard limit (user still speaking)")
+                    Logger.audio.warning("⚠️ FORCE CHUNK: buffer=\(String(format: "%.1f", duration), privacy: .public)s exceeds \(String(format: "%.1f", self.settings.maxChunkDuration * Config.forceSendChunkMultiplier), privacy: .public)s hard limit (user still speaking)")
                     let sent = await sendChunkIfReady(reason: "forced: continuous speech exceeded \(String(format: "%.0f", Config.forceSendChunkMultiplier))× max duration")
                     if sent { await session.chunkSent() }
                 }
             }
         } else {
-            if duration >= settings.maxChunkDuration {
+            if duration >= self.settings.maxChunkDuration {
                 await sendChunkIfReady(reason: "max duration (fallback)")
             } else if !isFullRecording &&
-                      duration >= settings.minChunkDuration &&
+                      duration >= self.settings.minChunkDuration &&
                       Date().timeIntervalSince(state.getLastSoundTime()) >= Config.silenceDuration {
                 await sendChunkIfReady(reason: "silence (fallback)")
             }
@@ -473,8 +473,8 @@ public final class StreamingRecorder {
         guard let buffer = audioBuffer else { return false }
         // Capture all Settings values BEFORE any await suspension points
         // to prevent concurrent @MainActor tasks from changing them mid-execution.
-        let minDuration = Settings.shared.minChunkDuration
-        let skipSilentChunks = Settings.shared.skipSilentChunks
+        let minDuration = settings.minChunkDuration
+        let skipSilentChunks = settings.skipSilentChunks
         let currentDuration = await buffer.duration
 
         guard currentDuration >= minDuration else {
@@ -587,8 +587,8 @@ public final class StreamingRecorder {
             }
 
             let minDurationMs = Double(Config.minRecordingDurationMs) / 1000.0
-            let minDuration = Settings.shared.chunkDuration.isFullRecording ? minDurationMs : 1.0
-            let skipSilentChunks = Settings.shared.skipSilentChunks
+            let minDuration = self.settings.chunkDuration.isFullRecording ? minDurationMs : 1.0
+            let skipSilentChunks = self.settings.skipSilentChunks
 
             let speechProbability: Float
             if hadVADActive, let vad = self.vadProcessor {
@@ -714,6 +714,7 @@ public final class StreamingRecorder {
 }
 
 #if DEBUG
+// swiftlint:disable identifier_name
 @MainActor
 extension StreamingRecorder {
     func _testInjectAudioBuffer(_ buffer: AudioBuffer?) {
@@ -755,4 +756,5 @@ extension StreamingRecorder {
     var _testHasAudioBuffer: Bool { audioBuffer != nil }
     var _testIsRecording: Bool { state.getRecording() }
 }
+// swiftlint:enable identifier_name
 #endif

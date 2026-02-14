@@ -112,10 +112,12 @@ public final class Statistics {
     public var formattedApiCalls: String { formatCount(data.totalApiCalls) }
 
 #if DEBUG
+    // swiftlint:disable:next identifier_name
     static var _testFormatterIdentity: ObjectIdentifier {
         ObjectIdentifier(decimalFormatter)
     }
 
+    // swiftlint:disable:next identifier_name
     static func _testFormatCount(_ value: Int) -> String {
         decimalFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
@@ -132,3 +134,5 @@ public final class Statistics {
         }
     }
 }
+
+extension Statistics: StatisticsProviding {}

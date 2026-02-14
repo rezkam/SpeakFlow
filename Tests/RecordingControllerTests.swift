@@ -7,33 +7,16 @@ import Testing
 @Suite("RecordingController — Provider Configuration Gate")
 struct RecordingControllerProviderGateTests {
 
-    /// Helper to create a testable RecordingController with spy dependencies.
-    /// Sets isUITestMode = true so system permission checks (Accessibility, Mic) are skipped.
-    @MainActor
-    private func makeController() -> (RecordingController, SpyKeyInterceptor, SpyTextInserter, SpyBannerPresenter) {
-        let keyInterceptor = SpyKeyInterceptor()
-        let textInserter = SpyTextInserter()
-        let banner = SpyBannerPresenter()
-        let controller = RecordingController(
-            keyInterceptor: keyInterceptor,
-            textInserter: textInserter,
-            appState: banner
-        )
-        controller.isUITestMode = true
-        controller.useMockRecordingInUITests = false
-        return (controller, keyInterceptor, textInserter, banner)
-    }
-
     @MainActor @Test
     func startRecordingWithUnconfiguredProviderDoesNotRecord() {
-        let (controller, _, _, _) = makeController()
+        let (controller, _, _, _) = makeTestRecordingController()
         controller.startRecording()
         #expect(!controller.isRecording, "Should not start recording when no provider is configured")
     }
 
     @MainActor @Test
     func startRecordingWithUnconfiguredProviderShowsBanner() {
-        let (controller, _, _, banner) = makeController()
+        let (controller, _, _, banner) = makeTestRecordingController()
         controller.startRecording()
         #expect(banner.bannerMessages.count == 1, "Should show exactly one banner")
         #expect(banner.bannerMessages.first?.1 == .error, "Banner should be error style")
@@ -42,7 +25,7 @@ struct RecordingControllerProviderGateTests {
 
     @MainActor @Test
     func doubleStartIgnored() {
-        let (controller, _, _, _) = makeController()
+        let (controller, _, _, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.startRecording()
         // If double start wasn't ignored, state would reset
@@ -51,7 +34,7 @@ struct RecordingControllerProviderGateTests {
 
     @MainActor @Test
     func startDuringProcessingFinalBlocked() {
-        let (controller, _, _, _) = makeController()
+        let (controller, _, _, _) = makeTestRecordingController()
         controller.isProcessingFinal = true
         controller.startRecording()
         #expect(!controller.isRecording, "Should not start recording while processing final")
@@ -64,34 +47,19 @@ struct RecordingControllerCallbackTests {
 
     @MainActor @Test
     func escapeCallbackWired() {
-        let keyInterceptor = SpyKeyInterceptor()
-        _ = RecordingController(
-            keyInterceptor: keyInterceptor,
-            textInserter: SpyTextInserter(),
-            appState: SpyBannerPresenter()
-        )
+        let (_, keyInterceptor, _, _) = makeTestRecordingController()
         #expect(keyInterceptor.onEscapePressed != nil, "Escape callback must be wired on init")
     }
 
     @MainActor @Test
     func enterCallbackWired() {
-        let keyInterceptor = SpyKeyInterceptor()
-        _ = RecordingController(
-            keyInterceptor: keyInterceptor,
-            textInserter: SpyTextInserter(),
-            appState: SpyBannerPresenter()
-        )
+        let (_, keyInterceptor, _, _) = makeTestRecordingController()
         #expect(keyInterceptor.onEnterPressed != nil, "Enter callback must be wired on init")
     }
 
     @MainActor @Test
     func enterDuringProcessingFinalSetsEnterFlag() {
-        let keyInterceptor = SpyKeyInterceptor()
-        let controller = RecordingController(
-            keyInterceptor: keyInterceptor,
-            textInserter: SpyTextInserter(),
-            appState: SpyBannerPresenter()
-        )
+        let (controller, keyInterceptor, _, _) = makeTestRecordingController()
         controller.isProcessingFinal = true
         keyInterceptor.onEnterPressed?()
         #expect(controller.shouldPressEnterOnComplete, "Enter during processing-final should set flag")
@@ -103,12 +71,7 @@ struct RecordingControllerCleanupTests {
 
     @MainActor @Test
     func cancelRecordingStopsKeyInterceptor() {
-        let keyInterceptor = SpyKeyInterceptor()
-        let controller = RecordingController(
-            keyInterceptor: keyInterceptor,
-            textInserter: SpyTextInserter(),
-            appState: SpyBannerPresenter()
-        )
+        let (controller, keyInterceptor, _, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.cancelRecording()
         #expect(keyInterceptor.stopCallCount >= 1, "Cancel must stop key interceptor")
@@ -116,12 +79,7 @@ struct RecordingControllerCleanupTests {
 
     @MainActor @Test
     func cancelRecordingResetsTextInserter() {
-        let textInserter = SpyTextInserter()
-        let controller = RecordingController(
-            keyInterceptor: SpyKeyInterceptor(),
-            textInserter: textInserter,
-            appState: SpyBannerPresenter()
-        )
+        let (controller, _, textInserter, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.cancelRecording()
         #expect(textInserter.cancelCalled, "Cancel must reset text inserter")
@@ -129,11 +87,7 @@ struct RecordingControllerCleanupTests {
 
     @MainActor @Test
     func cancelRecordingResetsState() {
-        let controller = RecordingController(
-            keyInterceptor: SpyKeyInterceptor(),
-            textInserter: SpyTextInserter(),
-            appState: SpyBannerPresenter()
-        )
+        let (controller, _, _, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.cancelRecording()
         #expect(!controller.isRecording, "isRecording must be false after cancel")
@@ -142,13 +96,7 @@ struct RecordingControllerCleanupTests {
 
     @MainActor @Test
     func shutdownCleansUpAllResources() {
-        let keyInterceptor = SpyKeyInterceptor()
-        let textInserter = SpyTextInserter()
-        let controller = RecordingController(
-            keyInterceptor: keyInterceptor,
-            textInserter: textInserter,
-            appState: SpyBannerPresenter()
-        )
+        let (controller, keyInterceptor, textInserter, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.shutdown()
         #expect(keyInterceptor.stopCallCount >= 1, "Shutdown must stop key interceptor")
@@ -159,11 +107,7 @@ struct RecordingControllerCleanupTests {
 
     @MainActor @Test
     func shutdownIdempotent() {
-        let controller = RecordingController(
-            keyInterceptor: SpyKeyInterceptor(),
-            textInserter: SpyTextInserter(),
-            appState: SpyBannerPresenter()
-        )
+        let (controller, _, _, _) = makeTestRecordingController()
         // Shutdown when nothing is active should not crash
         controller.shutdown()
         controller.shutdown()
@@ -176,12 +120,7 @@ struct RecordingControllerStateSyncTests {
 
     @MainActor @Test
     func isRecordingSyncsToAppState() {
-        let banner = SpyBannerPresenter()
-        let controller = RecordingController(
-            keyInterceptor: SpyKeyInterceptor(),
-            textInserter: SpyTextInserter(),
-            appState: banner
-        )
+        let (controller, _, _, banner) = makeTestRecordingController()
         controller.isRecording = true
         #expect(banner.isRecording, "Setting isRecording should sync to appState")
         controller.isRecording = false
@@ -190,12 +129,7 @@ struct RecordingControllerStateSyncTests {
 
     @MainActor @Test
     func isProcessingFinalSyncsToAppState() {
-        let banner = SpyBannerPresenter()
-        let controller = RecordingController(
-            keyInterceptor: SpyKeyInterceptor(),
-            textInserter: SpyTextInserter(),
-            appState: banner
-        )
+        let (controller, _, _, banner) = makeTestRecordingController()
         controller.isProcessingFinal = true
         #expect(banner.isProcessingFinal, "Setting isProcessingFinal should sync to appState")
         controller.isProcessingFinal = false

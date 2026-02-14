@@ -6,7 +6,9 @@ import SpeakFlowCore
 
 /// General settings: permissions, hotkey, launch at login.
 struct GeneralSettingsView: View {
-    private let state = AppState.shared
+    @Environment(\.appState) private var state
+    @Environment(\.permissionController) private var permissionController
+    @Environment(\.recordingController) private var recordingController
 
     private var allPermissionsGranted: Bool {
         state.accessibilityGranted && state.microphoneGranted
@@ -20,7 +22,7 @@ struct GeneralSettingsView: View {
                     icon: "keyboard",
                     granted: state.accessibilityGranted,
                     explanation: "SpeakFlow needs accessibility permission to type transcribed text directly into any app — your text editor, browser, chat, or notes.",
-                    action: { PermissionController.shared.checkAccessibility() }
+                    action: { permissionController.checkAccessibility() }
                 )
 
                 PermissionCard(
@@ -28,7 +30,7 @@ struct GeneralSettingsView: View {
                     icon: "mic",
                     granted: state.microphoneGranted,
                     explanation: "SpeakFlow needs microphone access to hear your voice for transcription. Audio is processed in real-time and never stored on disk.",
-                    action: { PermissionController.shared.checkMicrophoneAction() }
+                    action: { permissionController.checkMicrophoneAction() }
                 )
             } header: {
                 Label("Permissions", systemImage: allPermissionsGranted ? "checkmark.shield.fill" : "shield.lefthalf.filled")
@@ -62,7 +64,7 @@ struct GeneralSettingsView: View {
             get: { state.currentHotkey },
             set: { newValue in
                 HotkeySettings.shared.currentHotkey = newValue
-                RecordingController.shared.setupHotkey()
+                recordingController.setupHotkey()
                 state.refresh()
             }
         )

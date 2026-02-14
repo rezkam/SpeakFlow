@@ -16,6 +16,11 @@ struct SpeakFlowApp: App {
     var body: some Scene {
         Window("SpeakFlow", id: "main") {
             MainSettingsView()
+                .environment(\.appState, AppState.shared)
+                .environment(\.recordingController, RecordingController.shared)
+                .environment(\.permissionController, PermissionController.shared)
+                .environment(\.authController, AuthController.shared)
+                .environment(\.statistics, Statistics.shared)
         }
         .defaultSize(width: 750, height: 650)
         .windowResizability(.contentMinSize)
@@ -48,7 +53,8 @@ struct SpeakFlowApp: App {
 /// Minimal menu bar menu: open settings, toggle dictation, quit.
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
-    private let state = AppState.shared
+    @Environment(\.appState) private var state
+    @Environment(\.recordingController) private var recordingController
 
     var body: some View {
         Button("Open SpeakFlow...") {
@@ -59,7 +65,7 @@ struct MenuBarView: View {
         Divider()
 
         Button(dictationLabel) {
-            RecordingController.shared.toggle()
+            recordingController.toggle()
         }
         .disabled(ProviderRegistry.shared.configuredProviders.isEmpty && !state.isRecording)
 

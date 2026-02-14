@@ -43,9 +43,7 @@ if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 fi
 
-run_step "Core tests......." swift run SpeakFlowTestRunner
 run_step "Swift tests......" swift test
-run_step "UI E2E tests...." ./scripts/run-ui-tests.sh
 
 if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

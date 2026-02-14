@@ -10,7 +10,7 @@ protocol BannerPresenting: AnyObject {
 }
 
 extension BannerPresenting {
-    func showBanner(_ message: String, style: AppState.BannerStyle) {
+    func showBanner(_ message: String, style: AppState.BannerStyle = .info) {
         showBanner(message, style: style, duration: 4)
     }
 }

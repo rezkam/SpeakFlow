@@ -28,6 +28,47 @@ struct TestIsolationTests {
                 "Settings must NOT write to UserDefaults.standard in test runs")
     }
 
+    /// Behavioral: HotkeySettings.shared in tests writes to an isolated suite, not .standard.
+    @Test @MainActor func testHotkeySettingsWritesAreIsolatedFromUserDefaults() {
+        let hotkey = HotkeySettings.shared
+        let orig = hotkey.currentHotkey
+        defer { hotkey.currentHotkey = orig }
+
+        // Write a non-default value
+        hotkey.currentHotkey = .controlOptionD
+        #expect(hotkey.currentHotkey == .controlOptionD, "Write must round-trip through HotkeySettings")
+
+        // Verify UserDefaults.standard does NOT contain the sentinel
+        let standardValue = UserDefaults.standard.string(forKey: "activationHotkey")
+        #expect(standardValue != HotkeyType.controlOptionD.rawValue,
+                "HotkeySettings must NOT write to UserDefaults.standard in test runs")
+    }
+
+    /// Behavioral: ProviderSettings.shared.activeProviderId writes to an isolated suite.
+    @Test @MainActor func testProviderSettingsWritesAreIsolatedFromUserDefaults() {
+        let providerSettings = ProviderSettings.shared
+        let orig = providerSettings.activeProviderId
+        defer { providerSettings.activeProviderId = orig }
+
+        let sentinel = "test-provider-\(ProcessInfo.processInfo.processIdentifier)"
+        providerSettings.activeProviderId = sentinel
+        #expect(providerSettings.activeProviderId == sentinel)
+
+        let standardValue = UserDefaults.standard.string(forKey: "provider.active")
+        #expect(standardValue != sentinel,
+                "ProviderSettings must NOT write to UserDefaults.standard in test runs")
+    }
+
+    /// Behavioral: UnifiedAuthStorage in tests writes to temp, not ~/.speakflow/.
+    @Test func testUnifiedAuthStorageUsesIsolatedPath() {
+        let url = UnifiedAuthStorage.fileURL
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        #expect(!url.path.hasPrefix("\(home)/.speakflow"),
+                "UnifiedAuthStorage must NOT write to ~/.speakflow/ in test runs, got: \(url.path)")
+        #expect(url.path.contains("speakflow-test-"),
+                "UnifiedAuthStorage must write to temp test directory, got: \(url.path)")
+    }
+
     /// Behavioral: Statistics.shared in tests writes to temp, not ~/.speakflow/.
     @Test @MainActor func testStatisticsDoesNotWriteToUserDir() {
         let stats = Statistics.shared

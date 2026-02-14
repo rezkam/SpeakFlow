@@ -42,8 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if isUITestMode {
             Logger.permissions.info("UI test mode enabled; skipping startup permission prompts")
-            recording.isUITestMode = true
-            recording.useMockRecordingInUITests = useMockRecordingInUITests
+            recording.testMode = useMockRecordingInUITests ? .mock : .live
         } else {
             permissions.checkInitialPermissions()
 
@@ -166,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         uiTestHarness?.updateState(
             isRecording: recording.isRecording,
             toggleCount: recording.uiTestToggleCount,
-            mode: useMockRecordingInUITests ? "mock" : "live",
+            mode: recording.testMode == .mock ? "mock" : "live",
             hotkeyDisplay: HotkeySettings.shared.currentHotkey.displayName,
             statsApiCalls: Statistics.shared.apiCallCount,
             statsWords: Statistics.shared.wordCount

@@ -35,7 +35,7 @@ run_test() {
         echo "❌ FAILED: Received $CHUNKS chunks (expected >= $expected_chunks)"
         echo "Output tail:"
         echo "$OUTPUT" | tail -n 10
-        return 1
+        exit 1
     fi
 }
 
@@ -61,7 +61,7 @@ if [ "$CHUNKS" -eq "1" ]; then
     echo "✅ PASSED: Received exactly 1 chunk (final)"
 else
     echo "❌ FAILED: Received $CHUNKS chunks (expected 1)"
-    return 1
+    exit 1
 fi
 
 echo "ALL CHUNK TESTS PASSED"

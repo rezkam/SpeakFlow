@@ -60,3 +60,5 @@ public final class ProviderRegistry {
         providers[id]?.isConfigured ?? false
     }
 }
+
+extension ProviderRegistry: ProviderRegistryProviding {}

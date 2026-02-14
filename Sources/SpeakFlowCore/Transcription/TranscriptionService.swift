@@ -200,6 +200,7 @@ public actor TranscriptionService {
 #if DEBUG
 extension TranscriptionService {
     /// Test seam for validating request construction behavior without real network calls.
+    // swiftlint:disable:next identifier_name
     func _testBuildRequest(
         audio: Data,
         credentials: AuthCredentials,
@@ -209,3 +210,5 @@ extension TranscriptionService {
     }
 }
 #endif
+
+extension TranscriptionService: TranscriptionServiceProviding {}
