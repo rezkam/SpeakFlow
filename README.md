@@ -80,6 +80,29 @@ SpeakFlow is self-signed (ad-hoc), so macOS ties the accessibility trust to the 
 
 This is required because macOS revokes accessibility trust when the binary changes for apps without an Apple Developer ID signature.
 
+## Usage
+
+### Hotkeys
+
+SpeakFlow activates with a global hotkey — press it to start dictation, press it again to stop. Choose your preferred hotkey in the **General** tab:
+
+| Hotkey | Description |
+|---|---|
+| **⌃⌃** (Double-tap Control) | Tap the Control key twice quickly |
+| **⌃⌥D** | Control + Option + D |
+| **⌃⌥Space** | Control + Option + Space |
+| **⇧⌘D** | Shift + Command + D |
+
+### During Recording
+
+| Key | Action |
+|---|---|
+| **Hotkey** | Stop recording and transcribe |
+| **Escape** | Cancel recording — discard audio, insert nothing |
+| **Enter** | Stop recording; after transcription completes, press Enter in the target app (useful for sending messages in chat apps) |
+
+Text is inserted into whichever app was focused when you started recording. In streaming mode, words appear in real-time as you speak. In batch mode, text appears after you stop.
+
 ## Features
 
 - **Real-time streaming transcription** — words appear as you speak with Deepgram Nova-3; interim results refine in-place using smart diff (only changed characters are retyped, no flickering)
