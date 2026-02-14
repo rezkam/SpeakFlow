@@ -10,7 +10,8 @@
 
 <p align="center">
   A macOS menu bar app that turns your voice into text — anywhere.<br>
-  Press a hotkey, speak naturally, and your words appear in whatever app you're using.
+  Press a hotkey, speak naturally, and your words appear in whatever app you're using.<br><br>
+  <b>Real-time interim results</b> that refine as you speak &nbsp;·&nbsp; <b>On-device voice activity detection</b> powered by Apple Neural Engine &nbsp;·&nbsp; <b>9 languages</b> supported
 </p>
 
 <p align="center">
