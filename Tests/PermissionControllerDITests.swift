@@ -58,8 +58,8 @@ struct PermissionControllerDITests {
 
         let lastMessage = spyBanner.bannerMessages.last
         #expect(lastMessage != nil)
-        // displayName for .doubleTapControl is "⌃⌃ (double-tap)"
-        #expect(lastMessage?.0.contains("double-tap") == true)
+        // displayName for .doubleTapControl is "⌃⌃ Double-tap"
+        #expect(lastMessage?.0.contains("Double-tap") == true)
         #expect(lastMessage?.1 == .success)
     }
 

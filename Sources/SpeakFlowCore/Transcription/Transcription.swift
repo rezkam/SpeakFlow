@@ -27,10 +27,7 @@ public final class Transcription {
         let taskId = UUID()
         let task = Task { [weak self] in
             defer {
-                // Clean up this task when complete
-                Task { @MainActor in
-                    self?.processingTasks.removeValue(forKey: taskId)
-                }
+                self?.processingTasks.removeValue(forKey: taskId)
             }
 
             let effectiveTimeout = TranscriptionService.timeout(forDataSize: chunk.wavData.count)

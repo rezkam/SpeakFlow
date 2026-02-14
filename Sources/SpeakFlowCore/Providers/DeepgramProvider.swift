@@ -56,8 +56,15 @@ public final class DeepgramProvider: StreamingTranscriptionProvider, @unchecked 
 extension DeepgramProvider: APIKeyValidatable {
     /// Validate a Deepgram API key by calling the /v1/projects endpoint (free, no cost).
     /// Returns nil on success, or a user-facing error message on failure.
+    private static let validationEndpoint: URL = {
+        guard let url = URL(string: "https://api.deepgram.com/v1/projects") else {
+            preconditionFailure("Invalid Deepgram validation URL constant")
+        }
+        return url
+    }()
+
     public nonisolated func validateAPIKey(_ key: String) async -> String? {
-        let url = URL(string: "https://api.deepgram.com/v1/projects")!
+        let url = Self.validationEndpoint
         var request = URLRequest(url: url)
         request.setValue("Token \(key)", forHTTPHeaderField: "Authorization")
         request.httpMethod = "GET"
@@ -212,7 +219,10 @@ public actor DeepgramStreamingSession: StreamingSession {
             URLQueryItem(name: "vad_events", value: "true"),
             URLQueryItem(name: "utterance_end_ms", value: "1500"),
         ]
-        return components.url!
+        guard let url = components.url else {
+            preconditionFailure("Failed to construct Deepgram WebSocket URL from valid components")
+        }
+        return url
     }
 
     private func receiveLoop() async {

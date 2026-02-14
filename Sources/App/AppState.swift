@@ -15,6 +15,10 @@ import SpeakFlowCore
 final class AppState: BannerPresenting {
     static let shared = AppState()
 
+    // Not observed — injected dependency, won't change after init
+    @ObservationIgnored
+    private var providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared
+
     // MARK: - Permissions
     var accessibilityGranted = false
     var microphoneGranted = false
@@ -28,14 +32,23 @@ final class AppState: BannerPresenting {
     private(set) var refreshVersion = 0
 
     var isStreamingProvider: Bool {
-        ProviderRegistry.shared.provider(for: activeProviderId)?.mode == .streaming
+        providerRegistry.provider(for: activeProviderId)?.mode == .streaming
+    }
+
+    /// Whether all prerequisites are met to start dictation:
+    /// accessibility granted, microphone granted, and at least one provider configured.
+    /// Views must read `refreshVersion` in their body to observe changes.
+    var canStartDictation: Bool {
+        accessibilityGranted
+            && microphoneGranted
+            && !providerRegistry.configuredProviders.isEmpty
     }
 
     /// Whether a specific provider is configured and ready to use.
     /// Note: Views must read `refreshVersion` in their body to observe changes,
     /// since this delegates to ProviderRegistry which isn't @Observable.
     func isProviderConfigured(_ id: String) -> Bool {
-        ProviderRegistry.shared.isProviderConfigured(id)
+        providerRegistry.isProviderConfigured(id)
     }
 
     // MARK: - Streaming Settings
@@ -128,7 +141,10 @@ final class AppState: BannerPresenting {
         streamingAutoEndEnabled = Settings.shared.streamingAutoEndEnabled
     }
 
-    init() { refresh() }
+    init(providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared) {
+        self.providerRegistry = providerRegistry
+        refresh()
+    }
 }
 
 import ServiceManagement

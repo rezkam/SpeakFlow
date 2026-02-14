@@ -166,8 +166,9 @@ final class RecordingController {
 
     private func startBatchRecording() {
         recorder = StreamingRecorder()
-        recorder?.onChunkReady = { chunk in
+        recorder?.onChunkReady = { [weak self] chunk in
             Task { @MainActor in
+                guard let self else { return }
                 let ticket = await self.transcription.queueBridge.nextSequence()
                 self.transcription.transcribe(ticket: ticket, chunk: chunk)
             }
@@ -262,7 +263,7 @@ final class RecordingController {
             let pendingInsertion = textInserter.pendingTask
             let controller = liveStreamingController
             liveStreamingController = nil
-            Task { await controller?.stop() }
+            Task { @MainActor in await controller?.stop() }
             // Wait for pending insertions, then release key interceptor and press Enter.
             Task { @MainActor in
                 await pendingInsertion?.value
@@ -277,7 +278,7 @@ final class RecordingController {
         } else {
             isProcessingFinal = true; SoundEffect.stop.play()
             recorder?.stop(); recorder = nil
-            Task { try? await Task.sleep(for: .seconds(1)); await MainActor.run { self.finishIfDone() } }
+            Task { @MainActor in try? await Task.sleep(for: .seconds(1)); self.finishIfDone() }
         }
         onStateChanged?()
     }
@@ -288,7 +289,7 @@ final class RecordingController {
         shouldPressEnterOnComplete = false; fullTranscript = ""
         textInserter.cancelAndReset()
         if liveStreamingController != nil {
-            Task { await liveStreamingController?.cancel(); await MainActor.run { self.liveStreamingController = nil } }
+            Task { @MainActor in await self.liveStreamingController?.cancel(); self.liveStreamingController = nil }
         } else {
             recorder?.cancel(); recorder = nil; transcription.cancelAll()
         }
@@ -306,7 +307,7 @@ final class RecordingController {
     func finishIfDone(attempt: Int = 0) {
         guard !isRecording else { return }
         guard attempt < Self.maxFinishRetries else {
-            Task { await self.transcription.queueBridge.checkCompletion() }
+            Task { @MainActor in await self.transcription.queueBridge.checkCompletion() }
             keyInterceptor.stop(); isProcessingFinal = false
             textInserter.reset(); return
         }
