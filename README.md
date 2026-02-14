@@ -103,6 +103,17 @@ SpeakFlow activates with a global hotkey — press it to start dictation, press 
 
 Text is inserted into whichever app was focused when you started recording. In streaming mode, words appear in real-time as you speak. In batch mode, text appears after you stop.
 
+### Configurable Settings
+
+All settings are in the **Transcription** tab:
+
+- **Interim results** (streaming) — partial text appears and refines as you speak. Each update only retypes the changed portion, so there's no flickering. Disable for final-only output.
+- **Language** (streaming) — select from English, Spanish, French, German, Portuguese, Japanese, Korean, or Chinese. Determines the language sent to Deepgram.
+- **Voice activity detection** (batch) — a neural network runs locally on Apple Silicon to detect speech in real-time. Silent and noise-only chunks are filtered out before transcription, saving API calls. Adjustable sensitivity threshold.
+- **Auto-end** — recording stops automatically after a configurable silence period (3–30s). In streaming mode this is off by default since text is already live; in batch mode it defaults to 5s.
+- **Smart formatting** (streaming) — automatic punctuation and capitalization.
+- **Endpointing** (streaming) — controls how quickly Deepgram detects the end of an utterance (100–3000ms).
+
 ## Features
 
 - **Real-time streaming transcription** — words appear as you speak with Deepgram Nova-3; interim results refine in-place using smart diff (only changed characters are retyped, no flickering)
