@@ -102,7 +102,7 @@ SpeakFlow activates with a global hotkey — press it to start dictation, press 
 | **Escape** | Cancel recording — discard audio, insert nothing |
 | **Enter** | Stop recording; after transcription completes, press Enter in the target app (useful for sending messages in chat apps) |
 
-Text is inserted into whichever app was focused when you started recording. In streaming mode, words appear in real-time as you speak. In batch mode, text appears after you stop.
+Text is inserted into whichever app was focused when you started recording. If you switch to a different app during transcription, typing pauses automatically and resumes when you return — text never goes to the wrong app. In streaming mode, words appear in real-time as you speak. In batch mode, text appears after you stop.
 
 ### Configurable Settings
 
@@ -122,7 +122,7 @@ All settings are in the **Transcription** tab:
 - **Automatic turn detection** — when you stop speaking, silence is detected and the session ends automatically (works in both modes — local VAD for batch, server-side for streaming)
 - **Smart chunking** — in batch mode, audio is split at natural sentence boundaries detected by silence analysis
 - **Noise filtering** — silent and noise-only chunks are filtered before transcription, saving API calls and improving accuracy
-- **Universal text insertion** — transcribed text is typed into the focused app via macOS Accessibility
+- **Universal text insertion** — transcribed text is typed into the focused app via macOS Accessibility, with per-keystroke focus tracking that pauses if you switch apps and resumes when you return
 - **Launch at login** — runs quietly in the menu bar
 
 ## Audio Pipeline

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+Fixes text insertion going to the wrong app when switching focus during transcription, and a race condition where the completion sound could play before all text was delivered. Adds PID-based app tracking that pauses typing when the user switches away and resumes when they return, with per-keystroke focus verification so even mid-stream app switches are handled correctly. Includes comprehensive race condition tests using swift-concurrency-extras and 13 new focus management tests.
+
+### Bug Fixes
+
+* **Text no longer types into the wrong app** — replaced unreliable AXUIElement CFEqual comparison with PID-based app identity tracking. The old approach silently failed because the same UI element can return different accessibility refs across queries.
+* **Mid-stream focus protection** — focus is now verified between every keystroke and every delete, not just at the start of each operation. Switching apps during active typing immediately pauses insertion.
+* **Wait-for-focus pattern** — instead of stealing focus back (which could trigger unintended actions in the wrong app), text insertion pauses and polls until the user voluntarily returns to the original app.
+* **Terminated app detection** — if the target app is quit while waiting, insertion stops immediately instead of polling forever.
+* **Completion sound race condition** — the "done" sound could fire after the first text chunk was delivered but before subsequent chunks arrived. Fixed by tracking yield/consume counts across the actor-AsyncStream boundary so completion only signals after all text has been processed by the consumer.
+
+### Test Suite
+
+* 13 new focus management tests covering PID capture, cross-app detection, polling/pause behavior, terminated app handling, and an opt-in AX integration test.
+* 3 new race condition tests using `withMainSerialExecutor` from swift-concurrency-extras for deterministic async ordering verification.
+* Replaced fixed-duration `Task.sleep` assertions with polling-based `waitUntil` helper to eliminate flaky timer tests under main-actor contention.
+* Test suite: **376 tests in 88 suites, all passing.**
+
 ## 0.3.1
 
 Architecture hardening release driven by a deep code review. Fixes thread-safety issues, potential retain cycles, and a menu bar bug where "Start Dictation" could be enabled without required permissions. Adds 21 new tests (359 total) including integration tests that verify the menu bar disabled state against all permission and provider combinations.
