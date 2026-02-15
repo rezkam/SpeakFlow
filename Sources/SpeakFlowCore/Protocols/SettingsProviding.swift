@@ -32,8 +32,16 @@ public protocol VADSettingsProviding: AnyObject {
     var minSpeechRatio: Float { get set }
 }
 
+/// Behavioral settings (focus timeout, hotkey restart).
+@MainActor
+public protocol BehaviorSettingsProviding: AnyObject {
+    var focusWaitTimeout: Double { get set }
+    var hotkeyRestartsRecording: Bool { get set }
+}
+
 // MARK: - Composite Protocol
 
 /// Full settings surface — existing consumers continue to use this unchanged.
 @MainActor
-public protocol SettingsProviding: BatchSettingsProviding, StreamingSettingsProviding, VADSettingsProviding {}
+public protocol SettingsProviding: BatchSettingsProviding, StreamingSettingsProviding,
+    VADSettingsProviding, BehaviorSettingsProviding {}
