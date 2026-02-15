@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+* Added configurable focus wait timeout — `ensureTargetFocused()` now times out after a configurable duration (default 60s) instead of polling indefinitely when the user switches apps, discarding pending text on expiry.
+* Added hotkey restart during processing — pressing the hotkey while transcription is still processing now cancels and starts a new recording immediately (enabled by default, configurable via Settings → General → Behavior).
+* Extracted `SettingSlider` into a shared component for reuse across settings views.
+* Added `BehaviorSettingsProviding` protocol following the existing ISP pattern for settings sub-protocols.
+* Test suite: **379 tests in 87 suites, all passing.**
+
 ## 0.4.0
 
 Fixes text insertion going to the wrong app when switching focus during transcription, and a race condition where the completion sound could play before all text was delivered. Adds PID-based app tracking that pauses typing when the user switches away and resumes when they return, with per-keystroke focus verification so even mid-stream app switches are handled correctly. Includes comprehensive race condition tests using swift-concurrency-extras and 13 new focus management tests.
