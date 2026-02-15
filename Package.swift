@@ -7,14 +7,15 @@ let package = Package(
         .macOS(.v15)
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9")
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.1"),
+        .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.3.0"),
     ],
     targets: [
         // Core library with testable business logic
         .target(
             name: "SpeakFlowCore",
             dependencies: [
-                .product(name: "FluidAudio", package: "FluidAudio")
+                "FluidAudio"
             ],
             path: "Sources/SpeakFlowCore"
         ),
@@ -37,19 +38,21 @@ let package = Package(
         .executableTarget(
             name: "DeepgramE2E",
             dependencies: ["SpeakFlowCore"],
-            path: "Sources/DeepgramE2E",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            path: "Sources/DeepgramE2E"
         ),
         // Real mic + Deepgram streaming test (requires mic permission + DEEPGRAM_API_KEY)
         .executableTarget(
             name: "DeepgramTest",
             dependencies: ["SpeakFlowCore"],
-            path: "Sources/DeepgramTest",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            path: "Sources/DeepgramTest"
         ),
         .testTarget(
             name: "SpeakFlowCoreTests",
-            dependencies: ["SpeakFlowCore", "SpeakFlow"],
+            dependencies: [
+                "SpeakFlowCore",
+                "SpeakFlow",
+                .product(name: "ConcurrencyExtras", package: "swift-concurrency-extras"),
+            ],
             path: "Tests"
         ),
     ]

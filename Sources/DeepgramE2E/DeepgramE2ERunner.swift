@@ -374,7 +374,7 @@ func looseMatch(expected: String, actual: String) -> Bool {
         // Metadata is sent immediately on connect, but we need the event
         // listener running before it arrives. Sending audio guarantees
         // at least a Results event.
-        var gotEvent = false
+        nonisolated(unsafe) var gotEvent = false
         let eventTask = Task {
             for await event in session.events {
                 switch event {
@@ -687,7 +687,7 @@ func looseMatch(expected: String, actual: String) -> Bool {
         let session = try await provider.startSession(config: .default)
         let tracker = InterimTracker()
 
-        var gotUtteranceEnd = false
+        nonisolated(unsafe) var gotUtteranceEnd = false
         let eventTask = Task {
             for await event in session.events {
                 switch event {
@@ -767,7 +767,7 @@ func looseMatch(expected: String, actual: String) -> Bool {
         let session = try await provider.startSession(config: .default)
         let tracker = InterimTracker()
 
-        var utteranceEndCount = 0
+        nonisolated(unsafe) var utteranceEndCount = 0
         let eventTask = Task {
             for await event in session.events {
                 switch event {
@@ -926,7 +926,7 @@ func looseMatch(expected: String, actual: String) -> Bool {
         let provider = DeepgramProvider()
         let session = try await provider.startSession(config: .default)
         let tracker = InterimTracker()
-        var gotUtteranceEnd = false
+        nonisolated(unsafe) var gotUtteranceEnd = false
 
         let eventTask = Task {
             for await event in session.events {
@@ -1194,7 +1194,7 @@ func looseMatch(expected: String, actual: String) -> Bool {
         let provider = DeepgramProvider()
         let session = try await provider.startSession(config: .default)
 
-        var finalWords: [WordInfo] = []
+        nonisolated(unsafe) var finalWords: [WordInfo] = []
         let tracker = InterimTracker()
 
         let eventTask = Task {

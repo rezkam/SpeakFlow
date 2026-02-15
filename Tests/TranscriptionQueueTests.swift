@@ -1,3 +1,4 @@
+import ConcurrencyExtras
 import Foundation
 import os
 import Testing
@@ -885,33 +886,37 @@ struct TranscriptionQueueTextStreamLifecycleTests {
 @Suite("TranscriptionQueueBridge — Session Lifecycle & Completion")
 struct TranscriptionQueueBridgeTests {
 
-    /// checkCompletion() must fire onAllComplete when pending count is 0.
-    @Test @MainActor func testCheckCompletionFiresOnAllComplete() async {
+    /// The stream consumer calls checkCompletion after each text delivery.
+    /// After submitting a result and letting the consumer process it,
+    /// onAllComplete must fire.
+    @Test @MainActor func testCheckCompletionFiresOnAllComplete() async throws {
         let bridge = TranscriptionQueueBridge()
         bridge.startListening()
         var completionCalled = false
         bridge.onAllComplete = { completionCalled = true }
 
-        // Get a ticket and complete it
         let ticket = await bridge.nextSequence()
         await bridge.submitResult(ticket: ticket, text: "done")
 
-        // Now check completion
-        await bridge.checkCompletion()
-        #expect(completionCalled == true, "onAllComplete must fire when pending=0")
+        // Let the stream consumer process and call checkCompletion
+        try await waitUntil { completionCalled }
+        #expect(completionCalled == true, "onAllComplete must fire when all text is delivered")
     }
 
-    /// checkCompletion() must only fire onAllComplete once per session
-    /// (hasSignaledCompletion guard).
-    @Test @MainActor func testCheckCompletionOnlyFiresOnce() async {
+    /// onAllComplete must only fire once per session, even when
+    /// the stream consumer calls checkCompletion after each text.
+    @Test @MainActor func testCheckCompletionOnlyFiresOnce() async throws {
         let bridge = TranscriptionQueueBridge()
+        bridge.startListening()
         var callCount = 0
         bridge.onAllComplete = { callCount += 1 }
 
         let ticket = await bridge.nextSequence()
         await bridge.submitResult(ticket: ticket, text: "done")
 
-        await bridge.checkCompletion()
+        try await waitUntil { callCount >= 1 }
+
+        // Additional manual calls must not increment
         await bridge.checkCompletion()
         await bridge.checkCompletion()
 
@@ -948,17 +953,18 @@ struct TranscriptionQueueBridgeTests {
                 "onAllComplete must not fire while results are pending")
     }
 
-    /// reset() must clear hasSignaledCompletion and sessionStarted,
+    /// reset() must clear hasSignaledCompletion, sessionStarted, and consumedCount,
     /// allowing checkCompletion() to fire again for a new session.
-    @Test @MainActor func testResetClearsCompletionAndSessionFlags() async {
+    @Test @MainActor func testResetClearsCompletionAndSessionFlags() async throws {
         let bridge = TranscriptionQueueBridge()
+        bridge.startListening()
         var callCount = 0
         bridge.onAllComplete = { callCount += 1 }
 
         // Session 1
         let t1 = await bridge.nextSequence()
         await bridge.submitResult(ticket: t1, text: "s1")
-        await bridge.checkCompletion()
+        try await waitUntil { callCount >= 1 }
         #expect(callCount == 1)
 
         // Reset
@@ -967,14 +973,17 @@ struct TranscriptionQueueBridgeTests {
         // Session 2
         let t2 = await bridge.nextSequence()
         await bridge.submitResult(ticket: t2, text: "s2")
-        await bridge.checkCompletion()
+        try await waitUntil { callCount >= 2 }
         #expect(callCount == 2,
                 "After reset, completion must be able to fire again for new session")
+
+        bridge.stopListening()
     }
 
     /// nextSequence() sets sessionStarted = true and hasSignaledCompletion = false on first call.
-    @Test @MainActor func testNextSequenceSetsSessionStarted() async {
+    @Test @MainActor func testNextSequenceSetsSessionStarted() async throws {
         let bridge = TranscriptionQueueBridge()
+        bridge.startListening()
         var completionCalled = false
         bridge.onAllComplete = { completionCalled = true }
 
@@ -985,8 +994,10 @@ struct TranscriptionQueueBridgeTests {
         // After nextSequence: session started
         let t = await bridge.nextSequence()
         await bridge.submitResult(ticket: t, text: "x")
-        await bridge.checkCompletion()
+        try await waitUntil { completionCalled }
         #expect(completionCalled == true)
+
+        bridge.stopListening()
     }
 
     /// getPendingCount() must delegate to the underlying queue.
@@ -1333,5 +1344,123 @@ struct TranscriptionServiceRetryErrorTests {
         let error2 = TranscriptionError.httpError(statusCode: 500, body: nil)
         #expect(error2.errorDescription?.contains("500") == true)
         #expect(error2.errorDescription?.contains("Unknown error") == true)
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - Race Condition: Completion Sound Ordering
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@Suite("TranscriptionQueueBridge — Completion Sound Ordering (Race Condition)")
+struct CompletionOrderingRaceTests {
+
+    /// The completion sound bug: `onAllComplete` could fire before `onTextReady`
+    /// delivered all text. This test verifies the invariant that text delivery
+    /// always precedes the completion signal.
+    ///
+    /// Uses `withMainSerialExecutor` from swift-concurrency-extras to make
+    /// async scheduling deterministic, eliminating timing-dependent flakiness.
+    @Test @MainActor
+    func textDeliveryAlwaysPrecedesCompletionSignal() async {
+        await withMainSerialExecutor {
+            let bridge = TranscriptionQueueBridge()
+            var events: [String] = []
+            bridge.onTextReady = { text in events.append("text:\(text)") }
+            bridge.onAllComplete = { events.append("complete") }
+            bridge.startListening()
+
+            let ticket = await bridge.nextSequence()
+            await bridge.submitResult(ticket: ticket, text: "hello")
+
+            // Allow the stream consumer to process
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(100))
+
+            #expect(events.contains("text:hello"),
+                    "onTextReady must fire for submitted text")
+
+            if let textIdx = events.firstIndex(of: "text:hello"),
+               let completeIdx = events.firstIndex(of: "complete") {
+                #expect(textIdx < completeIdx,
+                        "onTextReady must fire BEFORE onAllComplete, got: \(events)")
+            }
+
+            bridge.stopListening()
+        }
+    }
+
+    /// Stress test: submit multiple chunks rapidly and verify ordering
+    /// invariant holds for every chunk — text always arrives before completion.
+    @Test @MainActor
+    func multipleChunksTextBeforeCompletion() async {
+        await withMainSerialExecutor {
+            let bridge = TranscriptionQueueBridge()
+            var events: [String] = []
+            bridge.onTextReady = { text in events.append("text:\(text)") }
+            bridge.onAllComplete = { events.append("complete") }
+            bridge.startListening()
+
+            let t0 = await bridge.nextSequence()
+            let t1 = await bridge.nextSequence()
+            let t2 = await bridge.nextSequence()
+
+            // Submit out of order to stress the queue
+            await bridge.submitResult(ticket: t2, text: "C")
+            await bridge.submitResult(ticket: t0, text: "A")
+            await bridge.submitResult(ticket: t1, text: "B")
+
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(150))
+
+            // All text must appear before completion
+            let textEvents = events.filter { $0.hasPrefix("text:") }
+            let completeIndex = events.firstIndex(of: "complete")
+
+            #expect(textEvents.count == 3,
+                    "All 3 text events must be delivered, got: \(events)")
+
+            if let completeIdx = completeIndex {
+                for textEvent in textEvents {
+                    guard let textIdx = events.firstIndex(of: textEvent) else { continue }
+                    #expect(textIdx < completeIdx,
+                            "\(textEvent) must precede completion, got: \(events)")
+                }
+            }
+
+            // Verify correct ordering: A, B, C (queue sorts by sequence)
+            #expect(textEvents == ["text:A", "text:B", "text:C"],
+                    "Text must be delivered in sequence order")
+
+            bridge.stopListening()
+        }
+    }
+
+    /// Chaos test: run many iterations to surface ordering races that only
+    /// manifest under specific scheduling. Each iteration creates a fresh
+    /// bridge and verifies the invariant.
+    @Test @MainActor
+    func chaosTestCompletionOrdering() async {
+        for iteration in 0..<50 {
+            let bridge = TranscriptionQueueBridge()
+            var events: [String] = []
+            bridge.onTextReady = { _ in events.append("text") }
+            bridge.onAllComplete = { events.append("complete") }
+            bridge.startListening()
+
+            let ticket = await bridge.nextSequence()
+            await bridge.submitResult(ticket: ticket, text: "chunk-\(iteration)")
+
+            // Vary timing to explore different scheduling interleavings
+            try? await Task.sleep(for: .milliseconds(Int.random(in: 50...150)))
+
+            if let textIdx = events.firstIndex(of: "text"),
+               let completeIdx = events.firstIndex(of: "complete") {
+                #expect(textIdx < completeIdx,
+                        "Iteration \(iteration): text must precede completion, got: \(events)")
+            }
+
+            bridge.stopListening()
+            await bridge.reset()
+        }
     }
 }

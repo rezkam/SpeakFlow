@@ -138,3 +138,21 @@ final class TextUpdateCollector {
     var finals: [Entry] { entries.filter(\.isFinal) }
     var interims: [Entry] { entries.filter { !$0.isFinal } }
 }
+
+// MARK: - Polling Assertion
+
+/// Polls a condition until it becomes true, or times out.
+/// Use this instead of fixed `Task.sleep` for timer-based assertions
+/// where main-actor contention can delay Task continuations.
+@MainActor
+func waitUntil(
+    timeout: Duration = .seconds(3),
+    interval: Duration = .milliseconds(50),
+    condition: @MainActor () -> Bool
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if condition() { return }
+        try await Task.sleep(for: interval)
+    }
+}

@@ -1274,8 +1274,8 @@ struct SilenceAutoEndTests {
         c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Wait for auto-end to fire (generous margin for thread-pool scheduling jitter)
-        try await Task.sleep(for: .milliseconds(600))
+        // Poll until auto-end fires (tolerant of main-actor scheduling contention)
+        try await waitUntil { col.autoEndCount >= 1 }
         #expect(col.autoEndCount == 1, "Auto-end should fire after silence duration")
     }
 
@@ -1330,7 +1330,8 @@ struct SilenceAutoEndTests {
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hi.", confidence: 0.99, words: [])))
         c.handleEvent(.utteranceEnd(lastWordEnd: 0))
 
-        try await Task.sleep(for: .milliseconds(600))
+        // Poll until auto-end fires (tolerant of main-actor scheduling contention)
+        try await waitUntil { col.autoEndCount >= 1 }
         #expect(col.autoEndCount == 1, "utteranceEnd should also start the silence timer")
     }
 
@@ -1343,8 +1344,9 @@ struct SilenceAutoEndTests {
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Test.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Wait much longer than the timer (generous margin for scheduling jitter)
-        try await Task.sleep(for: .milliseconds(600))
+        // Poll until auto-end fires, then wait extra to verify it doesn't fire again
+        try await waitUntil { col.autoEndCount >= 1 }
+        try await Task.sleep(for: .milliseconds(300))
         #expect(col.autoEndCount == 1, "Should fire exactly once, not repeatedly")
     }
 
@@ -1366,8 +1368,8 @@ struct SilenceAutoEndTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(col.autoEndCount == 0, "Timer was reset by second utteranceEnd")
 
-        // At T=550ms: 400ms since last reset — should have fired (300ms timer)
-        try await Task.sleep(for: .milliseconds(300))
+        // Poll until timer fires after reset duration
+        try await waitUntil { col.autoEndCount >= 1 }
         #expect(col.autoEndCount == 1, "Timer fires after reset duration")
     }
 
