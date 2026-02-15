@@ -37,25 +37,30 @@ public final class Transcription {
             Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) duration=\(duration)s size=\(chunk.wavData.count)B (timeout: \(timeout)s)")
 
             // Track API call attempt
-            await self?.statistics.recordApiCall()
+            self?.statistics.recordApiCall()
 
             do {
                 let text = try await self?.service.transcribe(audio: chunk.wavData) ?? ""
                 Logger.transcription.info("Chunk #\(ticket.seq) success: \(text, privacy: .private)")
 
                 // Track successful transcription statistics
-                await self?.statistics.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
+                self?.statistics.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
 
                 await self?.queueBridge.submitResult(ticket: ticket, text: text)
+                // Note: checkCompletion is called from the stream consumer (startListening)
+                // AFTER onTextReady delivers the text, ensuring the completion sound
+                // only plays after all text has been queued for insertion.
             } catch {
                 Logger.transcription.error("Chunk #\(ticket.seq) failed: \(error.localizedDescription)")
                 await self?.queueBridge.markFailed(ticket: ticket)
-                
-                // Play error sound to notify user that transcription failed
-                await SoundEffect.error.play()
-            }
 
-            await self?.queueBridge.checkCompletion()
+                // Play error sound to notify user that transcription failed
+                SoundEffect.error.play()
+
+                // Failed chunks don't yield text to the stream, so check completion
+                // here — the stream consumer won't see this chunk.
+                await self?.queueBridge.checkCompletion()
+            }
         }
         processingTasks[taskId] = task
     }

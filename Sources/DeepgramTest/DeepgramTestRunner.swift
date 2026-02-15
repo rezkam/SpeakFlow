@@ -12,10 +12,11 @@ import AVFoundation
 // ============================================================================
 
 // Counters stored in enum to avoid top-level code (required for @main)
+@MainActor
 enum TestState {
-    nonisolated(unsafe) static var passed = 0
-    nonisolated(unsafe) static var failed = 0
-    nonisolated(unsafe) static var skipped = 0
+    static var passed = 0
+    static var failed = 0
+    static var skipped = 0
 }
 
 @MainActor

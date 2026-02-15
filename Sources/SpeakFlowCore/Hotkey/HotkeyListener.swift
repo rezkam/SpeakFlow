@@ -35,12 +35,9 @@ public final class HotkeyListener {
 
     public init() {}
 
-    // Isolated deinit requires Swift 6.2+; on 6.1 cleanup happens via explicit stop().
-    #if compiler(>=6.2)
     @MainActor deinit {
         stop()
     }
-    #endif
 
     public func start(type: HotkeyType) {
         stop()

@@ -318,6 +318,11 @@ final class RecordingController {
                 await MainActor.run { self.finishIfDone(attempt: attempt + 1) }
                 return
             }
+            // Brief pause to let the stream consumer deliver any remaining text
+            // that was just flushed from the queue actor. Without this, the stream
+            // consumer's onTextReady callback may not have fired yet, so
+            // waitForPendingInsertions would return before all text is queued.
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
             await self.textInserter.waitForPendingInsertions()
             await MainActor.run {
                 self.keyInterceptor.stop(); self.isProcessingFinal = false

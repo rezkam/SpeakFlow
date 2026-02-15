@@ -1,4 +1,4 @@
-.PHONY: build test check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise coverage coverage-html clean
+.PHONY: build test test-tsan check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise coverage coverage-html clean
 
 # Strict check: build + tests + optional lint, concise output, full log saved
 check:
@@ -11,6 +11,10 @@ build:
 # Run all tests
 test:
 	@./scripts/test.sh
+
+# Run tests with Thread Sanitizer (detects data races)
+test-tsan:
+	swift test --sanitize=thread
 
 # Run live end-to-end test (real microphone + real transcription API)
 test-live-e2e:
@@ -80,6 +84,7 @@ help:
 	@echo "  make check               - Build + tests + optional lint"
 	@echo "  make build               - Build the project"
 	@echo "  make test                - Run all tests (concise), full log path printed"
+	@echo "  make test-tsan           - Run tests with Thread Sanitizer (data races)"
 	@echo "  make test-live-e2e       - Run real mic+API end-to-end transcription test"
 	@echo "  make test-live-e2e-autoend  - Run auto-end timing live E2E suite"
 	@echo "  make test-live-e2e-chunks   - Run chunk duration verification E2E suite"

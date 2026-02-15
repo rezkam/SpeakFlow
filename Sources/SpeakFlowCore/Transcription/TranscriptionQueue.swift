@@ -20,6 +20,9 @@ public actor TranscriptionQueue {
     private var currentSeq: UInt64 = 0
     /// Monotonically increasing session generation. Incremented on every reset().
     private var sessionGeneration: UInt64 = 0
+    /// Number of non-empty texts yielded to the AsyncStream this session.
+    /// Used by the bridge to detect when all yielded items have been consumed.
+    private var yieldedCount: UInt64 = 0
     let rateLimiter = RateLimiter()
 
     // Continuations for async streaming
@@ -51,6 +54,7 @@ public actor TranscriptionQueue {
         pendingResults.removeAll()
         nextSeqToOutput = 0
         currentSeq = 0
+        yieldedCount = 0
         sessionGeneration &+= 1
     }
 
@@ -68,6 +72,16 @@ public actor TranscriptionQueue {
         // Safe subtraction - both are UInt64, result fits in Int for practical counts
         let count = currentSeq - nextSeqToOutput
         return count > Int.max ? Int.max : Int(count)
+    }
+
+    /// Check if all flushed items have been consumed by the stream consumer.
+    /// The bridge passes its consumed count; this returns true only when
+    /// the actor has flushed everything AND the consumer has processed all yields.
+    public func isFullyDelivered(consumedCount: UInt64) -> Bool {
+        pendingResults.isEmpty
+            && currentSeq == nextSeqToOutput
+            && currentSeq > 0
+            && consumedCount >= yieldedCount
     }
 
     /// Submit a transcription result. Silently discards if the ticket's session
@@ -100,6 +114,7 @@ public actor TranscriptionQueue {
             if !text.isEmpty {
                 Logger.transcription.info("Output: \(text, privacy: .private)")
                 textContinuation?.yield(text)
+                yieldedCount &+= 1
             }
             nextSeqToOutput &+= 1
         }
@@ -145,12 +160,8 @@ public actor TranscriptionQueue {
 
 // MARK: - Callback Bridge
 
-/// Bridge providing callback-based API for TranscriptionQueue
-///
-/// This bridge exists for backward compatibility with the existing AppDelegate
-/// callback pattern. New code should use the actor directly with async/await.
-/// Migration path: When fully migrating to async/await, this bridge can be removed
-/// and callers can use `for await text in queue.textStream` directly.
+/// Bridge adapting the actor-based `TranscriptionQueue` to a callback API
+/// for `RecordingController`, which dispatches text via `TextInserter` callbacks.
 @MainActor
 public final class TranscriptionQueueBridge {
     let queue = TranscriptionQueue()
@@ -159,9 +170,13 @@ public final class TranscriptionQueueBridge {
     /// Guard to prevent onAllComplete from firing multiple times per session.
     /// Reset to false when a new session starts (via reset() or first nextSequence()).
     private var hasSignaledCompletion = false
-    
+
     /// Track whether a session has started (at least one sequence requested)
     private var sessionStarted = false
+
+    /// Number of texts consumed from the stream this session.
+    /// Compared against the actor's yieldedCount to detect unconsumed buffered items.
+    private var consumedCount: UInt64 = 0
 
     public var onTextReady: ((String) -> Void)?
     public var onAllComplete: (() -> Void)?
@@ -171,7 +186,11 @@ public final class TranscriptionQueueBridge {
     func startListening() {
         streamTask = Task {
             for await text in await queue.textStream {
+                self.consumedCount &+= 1
                 onTextReady?(text)
+                // Check completion AFTER delivering text, ensuring onAllComplete
+                // fires only when all text has been passed to the inserter.
+                await checkCompletion()
             }
         }
     }
@@ -185,6 +204,7 @@ public final class TranscriptionQueueBridge {
         await queue.reset()
         hasSignaledCompletion = false
         sessionStarted = false
+        consumedCount = 0
     }
 
     public func nextSequence() async -> TranscriptionTicket {
@@ -212,9 +232,9 @@ public final class TranscriptionQueueBridge {
         // Guard: only fire completion once per session
         guard !hasSignaledCompletion else { return }
         guard sessionStarted else { return }
-        
-        let pending = await queue.getPendingCount()
-        if pending == 0 {
+
+        let delivered = await queue.isFullyDelivered(consumedCount: consumedCount)
+        if delivered {
             // Double-check after await (another task may have set it during suspension)
             guard !hasSignaledCompletion else { return }
             hasSignaledCompletion = true
