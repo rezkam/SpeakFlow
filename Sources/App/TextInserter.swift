@@ -12,9 +12,10 @@ import SpeakFlowCore
 /// - Synthesizing keystrokes character-by-character using CGEvent Unicode strings
 /// - Waiting for modifier keys to be released to prevent corruption
 ///
-/// **Focus Restoration:** If the user switches apps during transcription, each queued
-/// operation will activate the target app and refocus the captured element before
-/// sending keystrokes. This ensures text always appears in the original text field.
+/// **Focus Protection:** If the user switches apps during transcription, each queued
+/// operation pauses and waits for the user to return to the target app voluntarily
+/// (never steals focus). If the user doesn't return within the configured
+/// `focusWaitTimeout`, pending operations are discarded to avoid blocking forever.
 ///
 /// **Thread Safety:** All public methods are `@MainActor` and maintain a serial task queue.
 /// Each operation awaits the previous task before executing, ensuring text appears in order.
@@ -102,7 +103,7 @@ final class TextInserter: TextInserting {
     /// Call this immediately before starting recording to establish which
     /// app should receive transcribed text. Before each text operation,
     /// `ensureTargetFocused()` checks that the same app is still frontmost
-    /// and pauses if the user has switched away.
+    /// and waits (up to `focusWaitTimeout`) if the user has switched away.
     ///
     /// If no element has focus or accessibility permissions are denied, sets
     /// `targetElement` to `nil` (focus checks will be skipped).
@@ -224,7 +225,7 @@ final class TextInserter: TextInserting {
                 try? Task.checkCancellation()
 
                 // Re-check focus between deletions — if the user switched apps
-                // mid-stream, pause until they return
+                // mid-stream, wait for return or timeout
                 guard await self?.ensureTargetFocused() == true else { return }
 
                 // Create key-down and key-up events for the Delete key
@@ -347,10 +348,11 @@ final class TextInserter: TextInserting {
     /// Flow:
     /// 1. No target captured → return true (proceed without focus management)
     /// 2. Target app is frontmost → return true (fast path)
-    /// 3. Different app is frontmost → poll every 200ms until it changes back
+    /// 3. Different app is frontmost → poll every 200ms until focus returns or timeout
+    /// 4. Timeout expires (`focusWaitTimeout`) → return false (discard pending text)
     ///
-    /// - Returns: `true` if the target app is frontmost, `false` if the task was
-    ///   cancelled or the target app is no longer running.
+    /// - Returns: `true` if the target app is frontmost, `false` if the timeout
+    ///   expired, the task was cancelled, or the target app is no longer running.
     func ensureTargetFocused() async -> Bool {
         guard targetElement != nil, targetPid != 0 else { return true }
 
@@ -360,9 +362,12 @@ final class TextInserter: TextInserting {
         // Verify the target app is still running before waiting
         guard NSRunningApplication(processIdentifier: targetPid) != nil else { return false }
 
-        Logger.audio.info("Target app lost focus — pausing text insertion until user returns")
+        let timeout = Settings.shared.focusWaitTimeout
+        let startTime = ContinuousClock.now
 
-        // Poll until focus returns or the task is cancelled
+        Logger.audio.info("Target app lost focus — waiting up to \(timeout)s for user to return")
+
+        // Poll until focus returns, timeout expires, or the task is cancelled
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: Self.focusWaitInterval)
             if isTargetAppFrontmost() {
@@ -372,18 +377,45 @@ final class TextInserter: TextInserting {
 
             // If the target app was terminated while waiting, stop
             if NSRunningApplication(processIdentifier: targetPid) == nil { return false }
+
+            let elapsed = ContinuousClock.now - startTime
+            if elapsed > .seconds(timeout) {
+                Logger.audio.warning("Focus wait timed out after \(timeout)s — discarding pending text")
+                return false
+            }
         }
 
         return false
     }
 
-    /// Checks whether the target app is currently frontmost.
+    /// Checks whether keyboard focus is in the target app.
     ///
-    /// Compares the frontmost application's PID against the stored target PID.
-    /// This is more reliable than CFEqual on AXUIElements, which can fail
-    /// when the same element returns different refs across queries.
+    /// Queries the system-wide focused element's PID to determine where
+    /// keystrokes will actually go. This catches system overlays like
+    /// Spotlight, Notification Center, and password dialogs that steal
+    /// keyboard focus without changing the frontmost application.
+    /// Falls back to `NSWorkspace.frontmostApplication` if the AX query fails.
     func isTargetAppFrontmost() -> Bool {
         guard targetPid != 0 else { return true }
+
+        // Primary: check which process owns the actual keyboard focus
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedElement: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedElement
+        ) == .success,
+           let element = focusedElement,
+           CFGetTypeID(element) == AXUIElementGetTypeID() {
+            // swiftlint:disable:next force_cast
+            var focusedPid: pid_t = 0
+            if AXUIElementGetPid(element as! AXUIElement, &focusedPid) == .success {
+                return focusedPid == targetPid
+            }
+        }
+
+        // Fallback: frontmost app check (if AX query fails)
         guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
         return frontmost.processIdentifier == targetPid
     }
@@ -421,7 +453,7 @@ final class TextInserter: TextInserting {
             }
 
             // Re-check focus between characters — if the user switched apps
-            // mid-stream, pause until they return rather than typing into the wrong app
+            // mid-stream, wait for return or timeout rather than typing into the wrong app
             guard await self.ensureTargetFocused() else { return }
 
             // Re-check modifier keys before each character

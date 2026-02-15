@@ -128,6 +128,8 @@ public final class Settings {
         public static let autoEndEnabled = "settings.autoEndEnabled"
         public static let autoEndSilenceDuration = "settings.autoEndSilenceDuration"
         public static let minSpeechRatio = "settings.minSpeechRatio"
+        public static let focusWaitTimeout = "settings.focusWaitTimeout"
+        public static let hotkeyRestartsRecording = "settings.hotkeyRestartsRecording"
     }
 
     private let defaults: UserDefaults
@@ -250,6 +252,29 @@ public final class Settings {
         set {
             defaults.set(newValue, forKey: Keys.minSpeechRatio)
         }
+    }
+
+    // MARK: - Behavior Settings
+
+    /// Maximum seconds to wait for the user to return to the target app.
+    /// After this timeout, pending text operations are discarded.
+    /// Setter clamps to minimum 10s; getter trusts the stored value.
+    public var focusWaitTimeout: Double {
+        get {
+            let value = defaults.double(forKey: Keys.focusWaitTimeout)
+            return value > 0 ? value : 60.0
+        }
+        set { defaults.set(max(newValue, 10.0), forKey: Keys.focusWaitTimeout) }
+    }
+
+    /// When enabled, pressing the hotkey during processing cancels current
+    /// transcription and starts a new recording immediately.
+    public var hotkeyRestartsRecording: Bool {
+        get {
+            if defaults.object(forKey: Keys.hotkeyRestartsRecording) == nil { return true }
+            return defaults.bool(forKey: Keys.hotkeyRestartsRecording)
+        }
+        set { defaults.set(newValue, forKey: Keys.hotkeyRestartsRecording) }
     }
 
     // MARK: - Streaming Auto-End

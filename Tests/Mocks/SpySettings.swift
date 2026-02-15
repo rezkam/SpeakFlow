@@ -17,6 +17,8 @@ final class SpySettings: SettingsProviding {
     var deepgramEndpointingMs: Int = 300
     var deepgramModel: String = "nova-3"
     var deepgramLanguage: String = "en-US"
+    var focusWaitTimeout: Double = 60.0
+    var hotkeyRestartsRecording: Bool = true
     var maxChunkDuration: Double { chunkDuration.rawValue }
     var minChunkDuration: Double { chunkDuration.minDuration }
 }

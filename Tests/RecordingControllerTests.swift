@@ -33,12 +33,81 @@ struct RecordingControllerProviderGateTests {
     }
 
     @MainActor @Test
-    func startDuringProcessingFinalBlocked() {
-        let (controller, _, _, _) = makeTestRecordingController()
+    func startDuringProcessingFinalBlockedWhenRestartDisabled() {
+        let settings = SpySettings()
+        settings.hotkeyRestartsRecording = false
+        let (controller, _, _, _) = makeTestRecordingController(settings: settings)
         controller.isProcessingFinal = true
         controller.startRecording()
         #expect(!controller.isRecording, "Should not start recording while processing final")
         #expect(controller.isProcessingFinal, "Processing final should remain true")
+    }
+}
+
+@Suite("RecordingController — Hotkey Restart During Processing")
+struct RecordingControllerHotkeyRestartTests {
+
+    @MainActor @Test
+    func hotkeyDuringProcessingFinalRestartsWhenEnabled() {
+        let settings = SpySettings()
+        settings.hotkeyRestartsRecording = true
+
+        let providerSettings = SpyProviderSettings()
+        let providerRegistry = SpyProviderRegistry()
+        let mockProvider = MockStreamingProvider()
+        mockProvider.isConfigured = true
+        mockProvider.mockSession = MockStreamingSession()
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        providerRegistry.register(mockProvider)
+
+        let (controller, _, textInserter, _) = makeTestRecordingController(
+            providerSettings: providerSettings,
+            providerRegistry: providerRegistry,
+            settings: settings
+        )
+
+        controller.startRecording()
+        #expect(controller.isRecording)
+
+        controller.stopRecording(reason: .hotkey)
+        #expect(controller.isProcessingFinal)
+
+        // Press hotkey again — should cancel and restart
+        controller.startRecording()
+        #expect(controller.isRecording)
+        #expect(!controller.isProcessingFinal)
+        #expect(textInserter.cancelCalled)
+    }
+
+    @MainActor @Test
+    func hotkeyDuringProcessingFinalBlocksWhenDisabled() {
+        let settings = SpySettings()
+        settings.hotkeyRestartsRecording = false
+
+        let providerSettings = SpyProviderSettings()
+        let providerRegistry = SpyProviderRegistry()
+        let mockProvider = MockStreamingProvider()
+        mockProvider.isConfigured = true
+        mockProvider.mockSession = MockStreamingSession()
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        providerRegistry.register(mockProvider)
+
+        let (controller, _, _, _) = makeTestRecordingController(
+            providerSettings: providerSettings,
+            providerRegistry: providerRegistry,
+            settings: settings
+        )
+
+        controller.startRecording()
+        controller.stopRecording(reason: .hotkey)
+        #expect(controller.isProcessingFinal)
+
+        // Press hotkey again — should NOT restart
+        controller.startRecording()
+        #expect(!controller.isRecording)
+        #expect(controller.isProcessingFinal)
     }
 }
 

@@ -217,6 +217,33 @@ struct TextInserterPidFocusTests {
         inserter.cancelAndReset()
     }
 
+    /// Verifies focus detection uses the AX focused element PID, not just
+    /// the frontmost app. This catches system overlays (Spotlight, password
+    /// prompts) that steal keyboard focus without changing the frontmost app.
+    ///
+    /// The test finds a background GUI app and sets it as the target. Since
+    /// the test runner owns the actual keyboard focus, `isTargetAppFrontmost`
+    /// must return false — even though the background app might technically
+    /// be "frontmost" in some NSWorkspace sense, it doesn't own the focused element.
+    @MainActor @Test
+    func isTargetAppFrontmostDetectsAXFocusOwner() {
+        let inserter = TextInserter.shared
+        inserter.cancelAndReset()
+
+        // The focused element's PID should match whoever owns the keyboard focus.
+        // Set our target to a different running GUI app — since that app doesn't
+        // own the focused element, isTargetAppFrontmost must return false.
+        let ourPid = ProcessInfo.processInfo.processIdentifier
+        if let otherApp = NSWorkspace.shared.runningApplications.first(where: {
+            $0.processIdentifier != ourPid && $0.activationPolicy == .regular
+        }) {
+            inserter.targetPid = otherApp.processIdentifier
+            #expect(!inserter.isTargetAppFrontmost(),
+                    "Must return false when focused element belongs to a different process (Spotlight scenario)")
+            inserter.cancelAndReset()
+        }
+    }
+
     @MainActor @Test
     func isTargetAppFrontmostReturnsTrueForCurrentProcess() {
         let inserter = TextInserter.shared
@@ -307,74 +334,87 @@ struct TextInserterPidFocusTests {
 
         inserter.cancelAndReset()
     }
-}
 
-// MARK: - Integration Test (Real AX Focus Behavior)
+    // MARK: - Focus Wait Timeout
 
-@Suite("TextInserter Focus — AX Integration")
-struct TextInserterAXIntegrationTests {
+    /// Verifies that ensureTargetFocused returns false after the configured
+    /// timeout expires, rather than polling indefinitely.
+    @MainActor @Test
+    func ensureTargetFocusedTimesOutAfterConfiguredDuration() async throws {
+        let frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        guard let backgroundApp = NSWorkspace.shared.runningApplications.first(where: {
+            $0.processIdentifier != frontmostPid && $0.activationPolicy == .regular
+        }) else { return }
 
-    /// Comprehensive AX integration test: captures a real element, verifies
-    /// PID is stored correctly, and confirms focus check works within the same app.
-    ///
-    /// **Must run in isolation**: Creating NSWindow and manipulating TextInserter.shared
-    /// concurrently with other tests causes signal 11 in AppKit's internal state.
-    /// Run via: `AX_INTEGRATION=1 swift test --filter "captureAndVerify"`
-    @MainActor
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["AX_INTEGRATION"] != nil,
-                   "Set AX_INTEGRATION=1 to run — requires isolation from concurrent tests"))
+        let inserter = TextInserter.shared
+        inserter.cancelAndReset()
+        inserter.targetElement = AXUIElementCreateApplication(backgroundApp.processIdentifier)
+        inserter.targetPid = backgroundApp.processIdentifier
+
+        // Write a sub-second timeout directly to the test UserDefaults suite.
+        // The setter clamps to 10s minimum, but the getter trusts stored values,
+        // so writing directly to defaults enables fast test execution.
+        let suiteName = "app.monodo.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let testDefaults = UserDefaults(suiteName: suiteName) else { return }
+        testDefaults.set(0.5, forKey: "settings.focusWaitTimeout")
+
+        let result = await inserter.ensureTargetFocused()
+        #expect(!result, "ensureTargetFocused must return false after timeout expires")
+
+        testDefaults.removeObject(forKey: "settings.focusWaitTimeout")
+        inserter.cancelAndReset()
+    }
+
+    // MARK: - AX Integration (real element capture)
+
+    /// AX integration test: exercises real captureTarget and verifies the PID
+    /// mechanics work with the actual system focused element (whichever app
+    /// owns it at test time). The PID swap assertions verify cross-app detection
+    /// regardless of which process was captured.
+    @MainActor @Test
     func captureAndVerifyPidBasedFocus() async throws {
-        try #require(AXIsProcessTrusted(), "Accessibility permission required — skipping")
+        guard AXIsProcessTrusted() else {
+            Issue.record("Accessibility permission required — grant it to the test runner")
+            return
+        }
 
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
 
-        // Activate the test process so windows can take focus
-        NSRunningApplication.current.activate()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        let fieldA = NSTextField(frame: NSRect(x: 10, y: 100, width: 280, height: 24))
-        fieldA.isEditable = true
-        window.contentView?.addSubview(fieldA)
-        window.makeKeyAndOrderFront(nil)
-
-        try await Task.sleep(nanoseconds: 200_000_000) // 200ms for window
-        window.makeFirstResponder(fieldA)
-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms for focus
-
-        // Step 1: captureTarget stores both element and PID
+        // Capture whatever element currently has focus (may be our process or another)
         inserter.captureTarget()
-        #expect(inserter.targetElement != nil,
-                "captureTarget should capture a real AXUIElement")
-        #expect(inserter.targetPid == ProcessInfo.processInfo.processIdentifier,
-                "captureTarget must store our process PID")
 
-        // Step 2: isTargetAppFrontmost returns true (we're the frontmost app)
+        guard inserter.targetElement != nil else {
+            // No focused element (headless / no GUI) — PID mechanics are covered
+            // by the synthetic tests above. Nothing more to verify here.
+            inserter.cancelAndReset()
+            return
+        }
+
+        // captureTarget must have extracted a valid PID from the focused element
+        #expect(inserter.targetPid != 0,
+                "captureTarget must store the focused element's PID")
+
+        // isTargetAppFrontmost should be consistent with what we just captured
+        // (the captured element IS the currently focused one, so it should match)
         #expect(inserter.isTargetAppFrontmost(),
-                "Our app is frontmost, so isTargetAppFrontmost must return true")
+                "Freshly captured target should match current focus")
 
-        // Step 3: ensureTargetFocused returns true immediately (fast path)
+        // ensureTargetFocused should return true immediately (fast path)
         let result = await inserter.ensureTargetFocused()
-        #expect(result, "ensureTargetFocused should return true when our app is frontmost")
+        #expect(result, "ensureTargetFocused should return true for freshly captured target")
 
-        // Step 4: Simulate cross-app switch by changing PID
+        // Simulate cross-app switch by changing PID to a non-matching value
         let savedPid = inserter.targetPid
-        inserter.targetPid = 1  // launchd — not frontmost
+        inserter.targetPid = 1  // launchd — never the focused app
         #expect(!inserter.isTargetAppFrontmost(),
                 "After changing PID to another app, isTargetAppFrontmost must return false")
 
-        // Step 5: Restore PID — should work again
+        // Restore PID — should work again
         inserter.targetPid = savedPid
         #expect(inserter.isTargetAppFrontmost(),
                 "After restoring PID, isTargetAppFrontmost must return true again")
 
-        // Cleanup
         inserter.cancelAndReset()
-        window.close()
     }
 }

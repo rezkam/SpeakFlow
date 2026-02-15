@@ -59,6 +59,10 @@ final class AppState: BannerPresenting {
     var deepgramLanguage = "en-US"
     var streamingAutoEndEnabled = false
 
+    // MARK: - Behavior
+    var focusWaitTimeout: Double = 60.0
+    var hotkeyRestartsRecording: Bool = true
+
     // MARK: - Recording
     var isRecording = false
     var isProcessingFinal = false
@@ -139,6 +143,8 @@ final class AppState: BannerPresenting {
         deepgramModel = Settings.shared.deepgramModel
         deepgramLanguage = Settings.shared.deepgramLanguage
         streamingAutoEndEnabled = Settings.shared.streamingAutoEndEnabled
+        focusWaitTimeout = Settings.shared.focusWaitTimeout
+        hotkeyRestartsRecording = Settings.shared.hotkeyRestartsRecording
     }
 
     init(providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared) {

@@ -124,8 +124,12 @@ final class RecordingController {
     func startRecording() {
         guard !isRecording else { return }
         if isProcessingFinal {
-            SoundEffect.error.play()
-            return
+            if settings.hotkeyRestartsRecording {
+                cancelRecording()
+            } else {
+                SoundEffect.error.play()
+                return
+            }
         }
         if testMode == .mock {
             isRecording = true; isProcessingFinal = false; hasPlayedCompletionSound = false
@@ -176,7 +180,7 @@ final class RecordingController {
         recorder?.onAutoEnd = { [weak self] in
             Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
         }
-        keyInterceptor.start()
+        keyInterceptor.start(targetPid: textInserter.targetPid)
         Task { @MainActor in
             await self.transcription.queueBridge.reset()
             let started = await recorder?.start() ?? false
@@ -228,7 +232,7 @@ final class RecordingController {
             Task { @MainActor in if self?.isRecording == true { self?.stopRecording(reason: .autoEnd) } }
         }
 
-        keyInterceptor.start()
+        keyInterceptor.start(targetPid: textInserter.targetPid)
         Task { @MainActor in
             let started = await controller.start(provider: provider, config: config)
             if !started {

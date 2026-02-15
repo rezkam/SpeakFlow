@@ -49,6 +49,28 @@ struct GeneralSettingsView: View {
                 .pickerStyle(.menu)
             }
 
+            Section {
+                Toggle("Hotkey Restarts Recording", isOn: state.binding(for: \.hotkeyRestartsRecording))
+
+                SettingSlider(
+                    title: "Focus Wait Timeout",
+                    displayValue: formatTimeout(state.focusWaitTimeout),
+                    value: state.binding(for: \.focusWaitTimeout),
+                    range: 10...300, step: 10,
+                    lowLabel: "10s — discard quickly",
+                    highLabel: "5m — wait patiently"
+                )
+            } header: {
+                Text("Behavior")
+            } footer: {
+                Text("""
+                When Hotkey Restarts Recording is enabled, pressing the hotkey while \
+                transcription is still processing cancels it and starts a new recording. \
+                Focus Wait Timeout controls how long SpeakFlow waits for you to return \
+                to the original app before discarding pending text.
+                """)
+            }
+
             Section("System") {
                 Toggle("Launch at Login", isOn: launchAtLoginBinding)
             }
@@ -68,6 +90,14 @@ struct GeneralSettingsView: View {
                 state.refresh()
             }
         )
+    }
+
+    private func formatTimeout(_ seconds: Double) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        if mins > 0 && secs > 0 { return "\(mins)m \(secs)s" }
+        if mins > 0 { return "\(mins)m" }
+        return "\(secs)s"
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
