@@ -305,8 +305,27 @@ struct OAuthFormEncodingRegressionTests {
 // MARK: - OAuth Callback Server Tests
 
 struct OAuthCallbackServerTests {
+    /// Check whether we can bind to localhost — CI runners may block this.
+    private func canBindLocalhost(port: UInt16) -> Bool {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = UInt32(0x7f000001).bigEndian // 127.0.0.1
+        var one: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        return withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+    }
+
     @Test func testValidCallbackReturnsAuthorizationCode() async throws {
         let port = randomOAuthTestPort()
+        guard canBindLocalhost(port: port) else { return }
         let expectedState = "test-state"
         let expectedCode = "auth-code-123"
         let server = OAuthCallbackServer(expectedState: expectedState, port: port)
@@ -327,6 +346,7 @@ struct OAuthCallbackServerTests {
 
     @Test func testStateMismatchReturnsNil() async throws {
         let port = randomOAuthTestPort()
+        guard canBindLocalhost(port: port) else { return }
         let server = OAuthCallbackServer(expectedState: "expected", port: port)
 
         let waitTask = Task { await server.waitForCallback(timeout: 2.0) }

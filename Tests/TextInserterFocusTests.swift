@@ -227,11 +227,24 @@ struct TextInserterPidFocusTests {
     /// be "frontmost" in some NSWorkspace sense, it doesn't own the focused element.
     @MainActor @Test
     func isTargetAppFrontmostDetectsAXFocusOwner() {
-        // This test relies on the AX-based focused-element query.  Without
-        // Accessibility permission the implementation falls back to
+        // This test relies on the AX-based focused-element query returning a
+        // valid element.  In headless CI environments (even with AX trusted)
+        // there is no focused element, so the implementation falls back to
         // NSWorkspace.frontmostApplication which can give a different answer.
         guard AXIsProcessTrusted() else {
             Issue.record("Accessibility permission required — grant it to the test runner")
+            return
+        }
+
+        // Verify there is actually a focused UI element — skip in headless CI.
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        ) == .success, focusedRef != nil else {
+            // No focused element (headless / no GUI session).
             return
         }
 
