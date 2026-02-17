@@ -26,7 +26,7 @@ public final class HotkeyListener {
 
     #if DEBUG
     // swiftlint:disable:next identifier_name
-    static var _testStopHook: (() -> Void)?
+    nonisolated(unsafe) static var _testStopHook: (() -> Void)?
     /// Synchronous hook fired immediately when a double-tap is detected,
     /// before the async Task dispatch. Enables deterministic testing.
     // swiftlint:disable:next identifier_name
@@ -35,8 +35,24 @@ public final class HotkeyListener {
 
     public init() {}
 
-    @MainActor deinit {
-        stop()
+    deinit {
+        #if DEBUG
+        Self._testStopHook?()
+        #endif
+
+        // Clean up event tap and monitors directly without calling the
+        // @MainActor-isolated stop() method.  The lock-protected state
+        // is safe to access from any isolation context.
+        let (tap, source, monitor) = tapState.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?) in
+            let result = (s.eventTap, s.runLoopSource, s.globalMonitor)
+            s.eventTap = nil
+            s.runLoopSource = nil
+            s.globalMonitor = nil
+            return result
+        }
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let monitor { NSEvent.removeMonitor(monitor) }
     }
 
     public func start(type: HotkeyType) {

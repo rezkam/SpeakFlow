@@ -227,6 +227,14 @@ struct TextInserterPidFocusTests {
     /// be "frontmost" in some NSWorkspace sense, it doesn't own the focused element.
     @MainActor @Test
     func isTargetAppFrontmostDetectsAXFocusOwner() {
+        // This test relies on the AX-based focused-element query.  Without
+        // Accessibility permission the implementation falls back to
+        // NSWorkspace.frontmostApplication which can give a different answer.
+        guard AXIsProcessTrusted() else {
+            Issue.record("Accessibility permission required — grant it to the test runner")
+            return
+        }
+
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
 
