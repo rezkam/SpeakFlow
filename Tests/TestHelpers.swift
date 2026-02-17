@@ -71,6 +71,16 @@ func randomOAuthTestPort() -> UInt16 {
 
 func hitOAuthCallback(port: UInt16, query: String) async throws -> Int {
     let url = URL(string: "http://127.0.0.1:\(port)/auth/callback?\(query)")!
+    // Retry with back-off — CI runners may need extra time for the server to bind.
+    for attempt in 0..<5 {
+        do {
+            let (_, response) = try await URLSession.shared.data(from: url)
+            return (response as? HTTPURLResponse)?.statusCode ?? -1
+        } catch let error as URLError where error.code == .cannotConnectToHost && attempt < 4 {
+            try? await Task.sleep(for: .milliseconds(100 * (1 << attempt)))
+        }
+    }
+    // Final attempt — let it throw on failure.
     let (_, response) = try await URLSession.shared.data(from: url)
     return (response as? HTTPURLResponse)?.statusCode ?? -1
 }
