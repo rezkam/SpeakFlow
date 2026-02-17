@@ -1,9 +1,11 @@
+import ApplicationServices
 import Foundation
 import Testing
 @testable import SpeakFlow
 
 @MainActor
 final class SpyTextInserter: TextInserting {
+    var targetElement: AXUIElement?
     var captureTargetCalled = false
     var insertedTexts: [String] = []
     var deletedCounts: [Int] = []

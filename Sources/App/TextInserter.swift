@@ -420,16 +420,25 @@ final class TextInserter: TextInserting {
         return frontmost.processIdentifier == targetPid
     }
 
-    /// Types the given text character-by-character using CGEvent Unicode synthesis.
+    /// Number of characters to type before yielding to the run-loop.
+    /// Batching prevents flooding the WindowServer event queue (which would
+    /// block mouse clicks) and gives CGEvent tap callbacks a chance to fire.
+    private static let typingBatchSize = 20
+
+    /// Types the given text using CGEvent Unicode synthesis in small batches.
     ///
     /// This is the core text insertion mechanism:
-    /// 1. Ensures the target element has focus (activating its app if needed)
-    /// 2. Waits for modifier keys (Cmd/Ctrl/Option/Shift) to be released
-    /// 3. Synthesizes key-down and key-up events for each character using Unicode strings
-    /// 4. Adds a small delay between characters to prevent overwhelming the app
+    /// 1. Ensures the target element has focus (waiting for user to return if needed)
+    /// 2. Waits for modifier keys (Cmd/Ctrl/Option/Shift) to be released — **once**
+    /// 3. Types in batches of `typingBatchSize` characters, checking focus and
+    ///    yielding to the run-loop between batches so mouse clicks, CGEvent tap
+    ///    callbacks, and SwiftUI updates remain responsive
     ///
-    /// Cancellation-aware: checks `Task.isCancelled` before each character and
-    /// returns immediately if cancelled, leaving remaining text untyped.
+    /// **Why batching matters:** The previous per-character focus + modifier polling
+    /// starved the main run-loop for seconds during long transcriptions. When the
+    /// CGEvent tap (which ran on the main run-loop at the time) couldn't process
+    /// events, macOS queued ALL keyboard and mouse click events system-wide —
+    /// the user experienced a complete input freeze.
     ///
     /// - Parameter text: The sanitized text to type. Should not contain control characters.
     private func typeTextAsync(_ text: String) async {
@@ -437,59 +446,64 @@ final class TextInserter: TextInserting {
             return
         }
 
-        // Ensure the target element has focus (activates app if user switched away)
+        // Ensure the target element has focus (waits for user to return if switched)
         guard await self.ensureTargetFocused() else { return }
 
-        // Wait for the user to release Cmd/Ctrl/Option/Shift before typing
+        // Wait for modifier keys ONCE before starting — not per character.
+        // Per-character polling was a major contributor to the input freeze.
         await waitForModifiersReleased()
 
-        // Type each character individually
-        for char in text {
-            // Check if the task was cancelled
-            do {
-                try Task.checkCancellation()
-            } catch {
-                return
-            }
+        // Type in small batches, yielding between them so the WindowServer
+        // event queue can drain (keeps mouse clicks responsive) and other
+        // run-loop sources (CGEvent taps, SwiftUI) get processing time.
+        let chars = Array(text)
+        var index = 0
 
-            // Re-check focus between characters — if the user switched apps
-            // mid-stream, wait for return or timeout rather than typing into the wrong app
+        while index < chars.count {
+            do { try Task.checkCancellation() } catch { return }
+
+            // Re-check focus between batches — if the user switched apps,
+            // wait for return or timeout rather than typing into the wrong app
             guard await self.ensureTargetFocused() else { return }
 
-            // Re-check modifier keys before each character
-            await waitForModifiersReleased()
+            let end = min(index + Self.typingBatchSize, chars.count)
+            for i in index..<end {
+                // Convert character to UTF-16 code units for CGEvent's Unicode API
+                var unichar = Array(String(chars[i]).utf16)
 
-            // Convert character to UTF-16 code units for CGEvent's Unicode API
-            var unichar = Array(String(char).utf16)
-
-            // Create key events with virtualKey=0 to use Unicode string instead of key code
-            guard let keyDown = CGEvent(
-                keyboardEventSource: source,
-                virtualKey: 0,
-                keyDown: true
-            ),
-                  let keyUp = CGEvent(
+                // Create key events with virtualKey=0 to use Unicode string
+                guard let keyDown = CGEvent(
                     keyboardEventSource: source,
                     virtualKey: 0,
-                    keyDown: false
-            ) else {
-                continue
+                    keyDown: true
+                ),
+                      let keyUp = CGEvent(
+                        keyboardEventSource: source,
+                        virtualKey: 0,
+                        keyDown: false
+                ) else {
+                    continue
+                }
+
+                keyDown.keyboardSetUnicodeString(
+                    stringLength: unichar.count,
+                    unicodeString: &unichar
+                )
+                keyDown.post(tap: .cghidEventTap)
+                keyUp.post(tap: .cghidEventTap)
+
+                // Small delay to ensure the character is processed
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000
+                )
             }
 
-            // Attach the Unicode character to the key-down event
-            keyDown.keyboardSetUnicodeString(
-                stringLength: unichar.count,
-                unicodeString: &unichar
-            )
+            index = end
 
-            // Post both events to simulate a keystroke
-            keyDown.post(tap: .cghidEventTap)
-            keyUp.post(tap: .cghidEventTap)
-
-            // Small delay to ensure the character is processed before the next one
-            try? await Task.sleep(
-                nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000
-            )
+            // Yield between batches so the run-loop can process pending events
+            if index < chars.count {
+                try? await Task.sleep(nanoseconds: 5_000_000) // 5ms yield
+            }
         }
     }
 
@@ -506,7 +520,11 @@ final class TextInserter: TextInserting {
         var attempts = 0
 
         while attempts < Self.maxModifierReleaseAttempts {
-            let flags = CGEventSource.flagsState(.combinedSessionState)
+            // Use .hidSystemState to read REAL hardware modifier state only.
+            // .combinedSessionState merges the app's own synthetic keystrokes
+            // back into the state, creating a feedback loop where the app sees
+            // modifier flags from its own CGEvent posts and spin-waits on them.
+            let flags = CGEventSource.flagsState(.hidSystemState)
 
             // Check if any modifier keys are currently pressed
             if !flags.contains(.maskControl)

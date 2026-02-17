@@ -180,7 +180,7 @@ final class RecordingController {
         recorder?.onAutoEnd = { [weak self] in
             Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
         }
-        keyInterceptor.start(targetPid: textInserter.targetPid)
+        keyInterceptor.start(target: textInserter.targetElement)
         Task { @MainActor in
             await self.transcription.queueBridge.reset()
             let started = await recorder?.start() ?? false
@@ -232,7 +232,7 @@ final class RecordingController {
             Task { @MainActor in if self?.isRecording == true { self?.stopRecording(reason: .autoEnd) } }
         }
 
-        keyInterceptor.start(targetPid: textInserter.targetPid)
+        keyInterceptor.start(target: textInserter.targetElement)
         Task { @MainActor in
             let started = await controller.start(provider: provider, config: config)
             if !started {

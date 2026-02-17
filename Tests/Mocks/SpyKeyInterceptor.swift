@@ -1,3 +1,4 @@
+import ApplicationServices
 import Testing
 @testable import SpeakFlow
 
@@ -7,7 +8,8 @@ final class SpyKeyInterceptor: KeyIntercepting {
     var onEnterPressed: (() -> Void)?
     var startCallCount = 0
     var stopCallCount = 0
+    var lastTarget: AXUIElement?
 
-    func start() { startCallCount += 1 }
+    func start(target: AXUIElement? = nil) { startCallCount += 1; lastTarget = target }
     func stop() { stopCallCount += 1 }
 }
