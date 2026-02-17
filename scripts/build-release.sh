@@ -8,9 +8,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 APP_NAME="SpeakFlow"
 BUNDLE_ID="app.monodo.speakflow"
-VERSION="${1:-1.0.0}"
 
 cd "$PROJECT_DIR"
+
+# Auto-detect version from the latest git tag (strip leading 'v'), fallback to 0.0.0
+if [ -n "$1" ]; then
+    VERSION="$1"
+else
+    LATEST_TAG=$(git tag --sort=-v:refname | head -1 2>/dev/null)
+    VERSION="${LATEST_TAG#v}"
+    VERSION="${VERSION:-0.0.0}"
+fi
 
 echo "Building $APP_NAME v$VERSION..."
 
@@ -104,13 +112,28 @@ else
     echo ""
     echo "Done! App: $APP_NAME.app"
     echo ""
-    echo "To install: cp -r $APP_NAME.app /Applications/"
     echo "To create a DMG: brew install create-dmg && bash $0 $VERSION"
 fi
 
+# Quit running instance before overwriting
+if pgrep -x "$APP_NAME" > /dev/null 2>&1; then
+    echo ""
+    echo "Quitting running $APP_NAME..."
+    osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || killall "$APP_NAME" 2>/dev/null || true
+    sleep 1
+fi
+
+# Install to /Applications
+echo "Installing to /Applications/$APP_NAME.app..."
+rm -rf "/Applications/$APP_NAME.app"
+cp -r "$APP_NAME.app" "/Applications/$APP_NAME.app"
+
+echo ""
+echo "✅ $APP_NAME v$VERSION installed to /Applications/$APP_NAME.app"
 echo ""
 echo "Next steps:"
-echo "  1. Drag SpeakFlow.app to /Applications"
-echo "  2. Launch SpeakFlow — settings window opens automatically"
-echo "  3. Grant Accessibility and Microphone from the General tab"
-echo "  4. Add a transcription provider from the Accounts tab"
+echo "  1. Launch SpeakFlow — settings window opens automatically"
+echo "  2. Grant Accessibility and Microphone from the General tab"
+echo "     ⚠️  If upgrading, you may need to remove and re-add SpeakFlow"
+echo "        in System Settings → Privacy & Security → Accessibility"
+echo "  3. Add a transcription provider from the Accounts tab"
