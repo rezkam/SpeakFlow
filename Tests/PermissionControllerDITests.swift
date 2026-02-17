@@ -43,14 +43,12 @@ struct PermissionControllerDITests {
     }
 
     @Test @MainActor
-    func grantedAlertUsesInjectedHotkeyDisplayName() {
+    func grantedAlertShowsSuccessBanner() {
         let spyBanner = SpyBannerPresenter()
-        let spyHK = SpyHotkeySettings()
-        spyHK.currentHotkey = .doubleTapControl
 
         let controller = PermissionController(
             appState: spyBanner,
-            hotkeySettings: spyHK,
+            hotkeySettings: SpyHotkeySettings(),
             setupHotkeyAction: {}
         )
 
@@ -58,8 +56,7 @@ struct PermissionControllerDITests {
 
         let lastMessage = spyBanner.bannerMessages.last
         #expect(lastMessage != nil)
-        // displayName for .doubleTapControl is "⌃⌃ Double-tap"
-        #expect(lastMessage?.0.contains("Double-tap") == true)
+        #expect(lastMessage?.0.contains("Accessibility") == true)
         #expect(lastMessage?.1 == .success)
     }
 

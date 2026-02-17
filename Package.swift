@@ -17,7 +17,10 @@ let package = Package(
             dependencies: [
                 "FluidAudio"
             ],
-            path: "Sources/SpeakFlowCore"
+            path: "Sources/SpeakFlowCore",
+            swiftSettings: [
+                .enableExperimentalFeature("IsolatedDeinit")
+            ]
         ),
         // Main executable
         .executableTarget(

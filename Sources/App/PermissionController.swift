@@ -127,10 +127,7 @@ final class PermissionController: AccessibilityPermissionDelegate {
 
     func showAccessibilityGrantedAlert() {
         appState.refresh()
-        appState.showBanner(
-            "Accessibility granted — ready to dictate with \(hotkeySettings.currentHotkey.displayName)",
-            style: .success
-        )
+        appState.showBanner("Accessibility permission granted", style: .success)
     }
 
     // MARK: - Private
