@@ -46,14 +46,22 @@ if [ -z "$VERSION" ]; then
     VERSION="${VERSION:-0.0.0}"
 fi
 
+# Local builds get an RC suffix to distinguish from production releases
+if [ "$MODE" = "local" ]; then
+    RC_TIMESTAMP=$(date +%Y%m%d%H%M)
+    DISPLAY_VERSION="${VERSION}-rc.${RC_TIMESTAMP}"
+else
+    DISPLAY_VERSION="$VERSION"
+fi
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$MODE" = "github" ]; then
     echo "  🚀 $APP_NAME v$VERSION — GitHub Release"
     echo "     Signed + Notarized + Uploaded"
 else
-    echo "  🔨 $APP_NAME v$VERSION — Local Build"
-    echo "     Signed for development"
+    echo "  🔨 $APP_NAME v$DISPLAY_VERSION — Local Build"
+    echo "     Signed for development (release candidate)"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -168,9 +176,9 @@ cat > "$APP_NAME.app/Contents/Info.plist" << EOF
     <key>CFBundleDisplayName</key>
     <string>$APP_NAME</string>
     <key>CFBundleVersion</key>
-    <string>$VERSION</string>
+    <string>$DISPLAY_VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>$VERSION</string>
+    <string>$DISPLAY_VERSION</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -317,7 +325,7 @@ if [ "$MODE" = "github" ]; then
     echo "  ✅ $APP_NAME v$VERSION — Released to GitHub!"
     echo "     https://github.com/rezkam/SpeakFlow/releases/tag/v$VERSION"
 else
-    echo "  ✅ $APP_NAME v$VERSION — Installed locally!"
+    echo "  ✅ $APP_NAME v$DISPLAY_VERSION — Installed locally!"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
