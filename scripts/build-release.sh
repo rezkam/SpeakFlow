@@ -276,14 +276,7 @@ if [ "$MODE" = "github" ]; then
     echo ""
     echo "▸ Creating GitHub release v$VERSION..."
 
-    # Create tag if it doesn't exist
-    if ! git tag -l "v$VERSION" | grep -q "v$VERSION"; then
-        echo "  Creating tag v$VERSION..."
-        git tag "v$VERSION"
-        git push origin "v$VERSION"
-    fi
-
-    # Create release and upload DMG
+    # Create release (gh creates the tag automatically)
     if gh release view "v$VERSION" &>/dev/null 2>&1; then
         echo "  Release v$VERSION exists — uploading DMG..."
         gh release upload "v$VERSION" "$APP_NAME.dmg" --clobber
