@@ -16,7 +16,7 @@ public final class HotkeySettings {
         let isTestRun = Bundle.main.bundlePath.contains(".xctest")
             || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
         if isTestRun {
-            let suiteName = "app.monodo.speakflow.hotkey.tests.\(ProcessInfo.processInfo.processIdentifier)"
+            let suiteName = "nu.rez.speakflow.hotkey.tests.\(ProcessInfo.processInfo.processIdentifier)"
             defaults = UserDefaults(suiteName: suiteName) ?? .standard
             defaults.removePersistentDomain(forName: suiteName)
         } else {

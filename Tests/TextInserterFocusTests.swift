@@ -375,7 +375,7 @@ struct TextInserterPidFocusTests {
         // Write a sub-second timeout directly to the test UserDefaults suite.
         // The setter clamps to 10s minimum, but the getter trusts stored values,
         // so writing directly to defaults enables fast test execution.
-        let suiteName = "app.monodo.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
+        let suiteName = "nu.rez.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
         guard let testDefaults = UserDefaults(suiteName: suiteName) else { return }
         testDefaults.set(0.5, forKey: "settings.focusWaitTimeout")
 

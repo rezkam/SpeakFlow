@@ -247,7 +247,7 @@ public final class ProviderSettings {
         let isTestRun = Bundle.main.bundlePath.contains(".xctest")
             || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
         if isTestRun {
-            let suiteName = "app.monodo.speakflow.provider.tests.\(ProcessInfo.processInfo.processIdentifier)"
+            let suiteName = "nu.rez.speakflow.provider.tests.\(ProcessInfo.processInfo.processIdentifier)"
             defaults = UserDefaults(suiteName: suiteName) ?? .standard
             defaults.removePersistentDomain(forName: suiteName)
         } else {

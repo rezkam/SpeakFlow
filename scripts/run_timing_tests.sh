@@ -23,5 +23,5 @@ echo ""
 echo "---- LOGS ----"
 # Show logs since start of test
 log show --last 3m --style compact --info --debug \
-  --predicate '((subsystem == "app.monodo.speakflow") OR (subsystem == "SpeakFlow")) && ((category == "audio") OR (category == "Session") OR (category == "VAD") OR (category == "app") OR (category == "transcription"))' \
+  --predicate '((subsystem == "nu.rez.speakflow") OR (subsystem == "SpeakFlow")) && ((category == "audio") OR (category == "Session") OR (category == "VAD") OR (category == "app") OR (category == "transcription"))' \
   | egrep "🎤|🔇|⚡|🛑|VAD CONFIG DUMP|Auto-end triggered|stopRecording|hotkey|VADActive|state changed" || true

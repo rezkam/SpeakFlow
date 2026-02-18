@@ -9,7 +9,7 @@ echo "" > /tmp/speakflow_logs.txt
 
 # Start log capture in background
 log stream --style compact --info --debug \
-  --predicate '((subsystem == "app.monodo.speakflow") OR (subsystem == "SpeakFlow")) && ((category == "audio") OR (category == "Session") OR (category == "VAD") OR (category == "app") OR (category == "transcription"))' \
+  --predicate '((subsystem == "nu.rez.speakflow") OR (subsystem == "SpeakFlow")) && ((category == "audio") OR (category == "Session") OR (category == "VAD") OR (category == "app") OR (category == "transcription"))' \
   >> /tmp/speakflow_logs.txt &
 LOG_PID=$!
 

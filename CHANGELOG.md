@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+* **Developer ID signing** — app is now signed with a Developer ID Application certificate instead of ad-hoc, so macOS Gatekeeper trusts it on all Macs without warnings.
+* **Permissions persist across updates** — Accessibility and Microphone grants are preserved when upgrading, no need to re-grant on every release.
+* **Hardened Runtime with entitlements** — added `SpeakFlow.entitlements` for microphone access and Apple Events under hardened runtime (required for notarization).
+* **Bundle ID changed** — `app.monodo.speakflow` → `nu.rez.speakflow`. Requires a one-time re-grant of permissions.
+* **Release script rewrite** — `make release` for local signed builds, `make release-github` for signed + notarized + GitHub Release uploads.
+
 ## 0.4.1
 
 * Added configurable focus wait timeout — `ensureTargetFocused()` now times out after a configurable duration (default 60s) instead of polling indefinitely when the user switches apps, discarding pending text on expiry.
