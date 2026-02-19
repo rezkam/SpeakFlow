@@ -342,7 +342,8 @@ public final class LiveStreamingController {
             logger.info("Provider session closed")
             cancelSilenceTimer()
             if isActive {
-                // Unexpected close
+                // Provider closed while active; route through session-closed callback.
+                // RecordingController decides whether to stop or present UI feedback.
                 isActive = false
                 Task { @MainActor in
                     await cleanup()

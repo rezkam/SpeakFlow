@@ -222,14 +222,29 @@ final class RecordingController {
         controller.onAutoEnd = { [weak self] in
             Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
         }
-        controller.onUtteranceEnd = { Logger.audio.info("Deepgram: utterance end") }
-        controller.onSpeechStarted = { Logger.audio.info("Deepgram: speech started") }
+        controller.onUtteranceEnd = { Logger.audio.info("Streaming: utterance end") }
+        controller.onSpeechStarted = { Logger.audio.info("Streaming: speech started") }
         controller.onError = { [weak self] error in
-            Logger.audio.error("Deepgram error: \(error.localizedDescription)")
+            Logger.audio.error("Streaming error: \(error.localizedDescription)")
             Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
         }
         controller.onSessionClosed = { [weak self] in
-            Task { @MainActor in if self?.isRecording == true { self?.stopRecording(reason: .autoEnd) } }
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                let hadText = !self.fullTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if hadText {
+                    self.stopRecording(reason: .autoEnd)
+                } else {
+                    // Early session close with no transcript (observed with Mistral realtime
+                    // in some environments) should not silently behave like successful auto-end.
+                    // Stop recording and surface explicit guidance.
+                    self.stopRecording(reason: .autoEnd)
+                    self.appState.showBanner(
+                        "Mistral realtime session ended before audio was transcribed. Please try again or switch provider.",
+                        style: .error
+                    )
+                }
+            }
         }
 
         keyInterceptor.start(targetPid: textInserter.targetPid)

@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let registry = ProviderRegistry.shared
         registry.register(ChatGPTBatchProvider())
         registry.register(DeepgramProvider())
+        registry.register(MistralProvider())
+        registry.register(MistralBatchProvider())
 
         let recording = RecordingController.shared
         let permissions = PermissionController.shared
