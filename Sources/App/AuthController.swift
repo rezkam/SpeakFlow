@@ -61,7 +61,8 @@ final class AuthController {
 
     func handleRemoveApiKey(for providerId: String) {
         providerSettings.removeApiKey(for: providerId)
-        if providerSettings.activeProviderId == providerId {
+        let activeId = providerSettings.activeProviderId
+        if !(providerRegistry.provider(for: activeId)?.isConfigured ?? false) {
             // Fall back to the first remaining configured provider, or first registered
             let fallback = providerRegistry.configuredProviders.first
                 ?? providerRegistry.allProviders.first

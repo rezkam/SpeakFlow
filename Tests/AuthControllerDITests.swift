@@ -55,6 +55,9 @@ struct AuthControllerDITests {
         spyPS.storedKeys[ProviderId.deepgram] = "key456"
 
         let spyReg = SpyProviderRegistry()
+        // Register the active provider as configured so it stays selected
+        let chatGPTStub = StubProvider(id: ProviderId.chatGPT, isConfigured: true)
+        spyReg.register(chatGPTStub)
         let spyBanner = SpyBannerPresenter()
 
         let controller = AuthController(
@@ -65,9 +68,36 @@ struct AuthControllerDITests {
 
         controller.handleRemoveApiKey(for: ProviderId.deepgram)
 
-        // Active provider unchanged because removed provider wasn't active
+        // Active provider unchanged because it is still configured
         #expect(spyPS.activeProviderId == ProviderId.chatGPT)
         #expect(spyPS.removedKeys.contains(ProviderId.deepgram))
+    }
+
+    @Test @MainActor
+    func removeSharedKeyFallsBackWhenBatchVariantIsActive() {
+        // Bug scenario: active = mistralBatch, remove key for mistral.
+        // Both providers share the same key, so removing "mistral" deconfigures "mistral-batch" too.
+        let spyPS = SpyProviderSettings()
+        spyPS.activeProviderId = ProviderId.mistralBatch
+
+        let spyReg = SpyProviderRegistry()
+        // mistralBatch becomes unconfigured after key removal
+        let batchStub = StubProvider(id: ProviderId.mistralBatch, isConfigured: false)
+        let fallbackStub = StubProvider(id: ProviderId.chatGPT, isConfigured: true)
+        spyReg.register(batchStub)
+        spyReg.register(fallbackStub)
+        let spyBanner = SpyBannerPresenter()
+
+        let controller = AuthController(
+            appState: spyBanner,
+            providerSettings: spyPS,
+            providerRegistry: spyReg
+        )
+
+        controller.handleRemoveApiKey(for: ProviderId.mistral)
+
+        // Should fall back because the active provider is no longer configured
+        #expect(spyPS.activeProviderId == ProviderId.chatGPT)
     }
 
     @Test @MainActor
