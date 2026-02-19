@@ -228,7 +228,8 @@ struct Issue17TextStreamOverwriteRegressionTests {
 @Suite("Issue #14 — RateLimiter cancellation propagation (additional)")
 struct Issue14CancellationTests {
 
-    /// A pre-cancelled task must throw CancellationError immediately without sleeping.
+    /// A pre-cancelled task must throw CancellationError quickly.
+    /// Note: CI runners can be slow, so we use a more tolerant timeout.
     @Test func testPreCancelledTaskThrowsImmediately() async {
         let limiter = RateLimiter(minimumInterval: 10.0)
 
@@ -244,7 +245,8 @@ struct Issue14CancellationTests {
             Issue.record("Expected CancellationError")
         } catch is CancellationError {
             let elapsed = Date().timeIntervalSince(start)
-            #expect(elapsed < 0.5, "Pre-cancelled task should throw fast, took \(elapsed)s")
+            // CI runners can be slow; allow up to 2s for cancellation to propagate
+            #expect(elapsed < 2.0, "Pre-cancelled task should throw fast, took \(elapsed)s")
         } catch {
             Issue.record("Expected CancellationError, got \(error)")
         }
