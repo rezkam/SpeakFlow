@@ -7,6 +7,8 @@ import Foundation
 public enum ProviderId {
     public static let chatGPT = "gpt"
     public static let deepgram = "deepgram"
+    public static let mistral = "mistral"
+    public static let mistralBatch = "mistral-batch"
 }
 
 // MARK: - Provider Mode & Auth

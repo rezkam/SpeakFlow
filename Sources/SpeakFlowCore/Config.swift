@@ -345,6 +345,70 @@ public final class Settings {
         set { defaults.set(newValue, forKey: DeepgramKeys.language) }
     }
 
+    // MARK: - Mistral Voxtral Realtime Settings
+
+    private enum MistralKeys {
+        static let model = "settings.mistral.model"
+        static let batchModel = "settings.mistral.batchModel"
+        static let language = "settings.mistral.language"
+        static let temperature = "settings.mistral.temperature"
+        static let diarize = "settings.mistral.diarize"
+        static let contextBias = "settings.mistral.contextBias"
+    }
+
+    /// Mistral Voxtral realtime transcription model
+    public var mistralModel: String {
+        get {
+            let stored = defaults.string(forKey: MistralKeys.model)
+            // Migrate from -latest to -2602 if needed (latest alias not universally available)
+            if stored == "voxtral-mini-transcribe-realtime-latest" {
+                defaults.set("voxtral-mini-transcribe-realtime-2602", forKey: MistralKeys.model)
+                return "voxtral-mini-transcribe-realtime-2602"
+            }
+            return stored ?? "voxtral-mini-transcribe-realtime-2602"
+        }
+        set { defaults.set(newValue, forKey: MistralKeys.model) }
+    }
+
+    /// Mistral Voxtral batch transcription model
+    public var mistralBatchModel: String {
+        get { defaults.string(forKey: MistralKeys.batchModel) ?? "voxtral-mini-latest" }
+        set { defaults.set(newValue, forKey: MistralKeys.batchModel) }
+    }
+
+    /// Mistral Voxtral transcription language
+    public var mistralLanguage: String {
+        get { defaults.string(forKey: MistralKeys.language) ?? "en" }
+        set { defaults.set(newValue, forKey: MistralKeys.language) }
+    }
+
+    /// Mistral transcription temperature (0.0 = deterministic, higher = more creative)
+    public var mistralTemperature: Float {
+        get {
+            if defaults.object(forKey: MistralKeys.temperature) != nil {
+                return defaults.float(forKey: MistralKeys.temperature)
+            }
+            return 0.0
+        }
+        set { defaults.set(newValue, forKey: MistralKeys.temperature) }
+    }
+
+    /// Whether to enable speaker diarization (batch mode only, not compatible with realtime)
+    public var mistralDiarize: Bool {
+        get {
+            if defaults.object(forKey: MistralKeys.diarize) == nil { return false }
+            return defaults.bool(forKey: MistralKeys.diarize)
+        }
+        set { defaults.set(newValue, forKey: MistralKeys.diarize) }
+    }
+
+    /// Context bias string (batch only): comma-separated terms to guide recognition.
+    /// Up to 100 words/phrases per API spec. Empty = disabled.
+    public var mistralContextBias: String {
+        get { defaults.string(forKey: MistralKeys.contextBias) ?? "" }
+        set { defaults.set(newValue, forKey: MistralKeys.contextBias) }
+    }
+
     // MARK: - Computed Properties for Audio Processing
 
     /// Maximum seconds before forced chunk send

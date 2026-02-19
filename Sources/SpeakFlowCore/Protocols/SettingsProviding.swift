@@ -22,6 +22,21 @@ public protocol StreamingSettingsProviding: AnyObject {
     var streamingAutoEndEnabled: Bool { get set }
 }
 
+/// Mistral Voxtral settings (shared by realtime and batch providers).
+@MainActor
+public protocol MistralSettingsProviding: AnyObject {
+    var mistralModel: String { get set }
+    var mistralBatchModel: String { get set }
+    /// BCP-47 language code, e.g. "en". Empty string = auto-detect.
+    var mistralLanguage: String { get set }
+    var mistralTemperature: Float { get set }
+    /// Speaker diarization — batch only; not compatible with realtime.
+    var mistralDiarize: Bool { get set }
+    /// Context bias: comma-separated terms to bias recognition toward (batch only).
+    /// Up to 100 words/phrases. Optimised for English; other languages experimental.
+    var mistralContextBias: String { get set }
+}
+
 /// Voice Activity Detection and auto-end settings.
 @MainActor
 public protocol VADSettingsProviding: AnyObject {
@@ -44,4 +59,4 @@ public protocol BehaviorSettingsProviding: AnyObject {
 /// Full settings surface — existing consumers continue to use this unchanged.
 @MainActor
 public protocol SettingsProviding: BatchSettingsProviding, StreamingSettingsProviding,
-    VADSettingsProviding, BehaviorSettingsProviding {}
+    MistralSettingsProviding, VADSettingsProviding, BehaviorSettingsProviding {}

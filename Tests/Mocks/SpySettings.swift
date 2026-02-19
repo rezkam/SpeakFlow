@@ -17,6 +17,12 @@ final class SpySettings: SettingsProviding {
     var deepgramEndpointingMs: Int = 300
     var deepgramModel: String = "nova-3"
     var deepgramLanguage: String = "en-US"
+    var mistralModel: String = "voxtral-mini-transcribe-realtime-2602"
+    var mistralBatchModel: String = "voxtral-mini-latest"
+    var mistralLanguage: String = "en"
+    var mistralTemperature: Float = 0.0
+    var mistralDiarize: Bool = false
+    var mistralContextBias: String = ""
     var focusWaitTimeout: Double = 60.0
     var hotkeyRestartsRecording: Bool = true
     var maxChunkDuration: Double { chunkDuration.rawValue }
