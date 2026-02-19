@@ -224,6 +224,8 @@ struct ProviderRegistryTests {
         if registry.allProviders.isEmpty {
             registry.register(ChatGPTBatchProvider())
             registry.register(DeepgramProvider())
+            registry.register(MistralProvider())
+            registry.register(MistralBatchProvider())
         }
     }
 
@@ -270,6 +272,10 @@ struct ProviderRegistryTests {
                 "ProviderId.chatGPT must match a registered provider")
         #expect(registry.provider(for: ProviderId.deepgram) != nil,
                 "ProviderId.deepgram must match a registered provider")
+        #expect(registry.provider(for: ProviderId.mistral) != nil,
+                "ProviderId.mistral must match a registered provider")
+        #expect(registry.provider(for: ProviderId.mistralBatch) != nil,
+                "ProviderId.mistralBatch must match a registered provider")
     }
 
     @Test @MainActor func testChatGPTProviderMetadata() {
@@ -298,5 +304,50 @@ struct ProviderRegistryTests {
         } else {
             Issue.record("Deepgram auth requirement must be .apiKey")
         }
+    }
+
+    @Test @MainActor func testMistralRealtimeProviderMetadata() {
+        Self.ensureRegistered()
+        guard let provider = ProviderRegistry.shared.provider(for: ProviderId.mistral) else {
+            Issue.record("Mistral realtime provider not registered"); return
+        }
+        #expect(provider.id == ProviderId.mistral)
+        #expect(provider.displayName == "Mistral")
+        #expect(provider.mode == .streaming)
+        if case .apiKey(let providerId) = provider.authRequirement {
+            #expect(providerId == ProviderId.mistral)
+        } else {
+            Issue.record("Mistral auth requirement must be .apiKey(mistral)")
+        }
+    }
+
+    @Test @MainActor func testMistralBatchProviderMetadata() {
+        Self.ensureRegistered()
+        guard let provider = ProviderRegistry.shared.provider(for: ProviderId.mistralBatch) else {
+            Issue.record("Mistral batch provider not registered"); return
+        }
+        #expect(provider.id == ProviderId.mistralBatch)
+        #expect(provider.displayName == "Mistral")
+        #expect(provider.mode == .batch)
+        if case .apiKey(let providerId) = provider.authRequirement {
+            #expect(providerId == ProviderId.mistral, "Batch provider shares API key with realtime")
+        } else {
+            Issue.record("Mistral batch auth requirement must be .apiKey(mistral)")
+        }
+    }
+
+    @Test @MainActor func testRegistryLookupByMode_Mistral() {
+        Self.ensureRegistered()
+        let registry = ProviderRegistry.shared
+        // Mistral realtime is streaming
+        let streaming = registry.streamingProvider(for: ProviderId.mistral)
+        #expect(streaming != nil, "Mistral must be registered as a streaming provider")
+        #expect(registry.batchProvider(for: ProviderId.mistral) == nil,
+                "Mistral realtime must not be a batch provider")
+        // Mistral batch is batch
+        let batch = registry.batchProvider(for: ProviderId.mistralBatch)
+        #expect(batch != nil, "Mistral batch must be registered as a batch provider")
+        #expect(registry.streamingProvider(for: ProviderId.mistralBatch) == nil,
+                "Mistral batch must not be a streaming provider")
     }
 }

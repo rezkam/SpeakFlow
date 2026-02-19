@@ -19,23 +19,31 @@
   <img src="https://img.shields.io/badge/Swift-6-orange" alt="Swift 6">
 </p>
 
-## Two Transcription Modes
+## Transcription Providers
 
-| | **Deepgram Nova-3 — Real-time** | **ChatGPT (GPT-4o) — Batch** |
-|---|---|---|
-| **How it works** | Audio streams to Deepgram over WebSocket; text appears as you speak | Audio is recorded locally, then sent for transcription when you stop |
-| **Latency** | Words appear in ~300ms | Text appears after you finish speaking |
-| **Best for** | Live dictation, long-form writing, conversations | Short notes, high-accuracy single takes |
-| **Requires** | Deepgram API key | ChatGPT login |
+SpeakFlow supports four transcription modes across three providers. Switch between them from the **Transcription** tab in settings.
 
-Switch between modes from the **Transcription** tab in the settings window.
+| | **Deepgram Nova-3** | **Mistral Voxtral Realtime** | **Mistral Voxtral Mini** | **ChatGPT (GPT-4o)** |
+|---|---|---|---|---|
+| **Mode** | Streaming | Streaming | Batch | Batch |
+| **How it works** | Audio streams over WebSocket; text appears as you speak | Audio streams over WebSocket with sub-500ms latency | Full recording sent after each chunk | Full recording sent after each chunk |
+| **Latency** | ~300ms | <500ms | After chunk completes | After chunk completes |
+| **Best for** | Live dictation, long-form writing | Low-latency multilingual dictation | Batch transcription with speaker diarization | Short notes, high-accuracy single takes |
+| **Extras** | Smart formatting, interim results | 13 languages, auto-detection | Speaker diarization, temperature control | — |
+| **Requires** | Deepgram API key | Mistral API key | Mistral API key (shared) | ChatGPT login |
 
-### Deepgram API Key
+### API Keys
 
-Deepgram offers a **free $200 credit** — no credit card required.
+**Deepgram** — offers a **free $200 credit**, no credit card required.
 
 1. Sign up at [deepgram.com/pricing](https://deepgram.com/pricing)
 2. Create an API key in the Deepgram console
+3. Paste it into SpeakFlow via the **Accounts** tab in settings
+
+**Mistral** — one API key unlocks both Voxtral Realtime (streaming) and Voxtral Mini (batch).
+
+1. Sign up at [console.mistral.ai](https://console.mistral.ai)
+2. Create an API key in the Mistral console
 3. Paste it into SpeakFlow via the **Accounts** tab in settings
 
 ## Installation
@@ -46,7 +54,7 @@ Deepgram offers a **free $200 credit** — no credit card required.
 2. Open the DMG and drag SpeakFlow to Applications
 3. Launch SpeakFlow — the settings window opens automatically
 4. Grant **Accessibility** and **Microphone** permissions from the General tab
-5. Log in to ChatGPT or add a Deepgram API key from the Accounts tab
+5. Add an API key (Deepgram or Mistral) or log in to ChatGPT from the Accounts tab
 
 ### Build from Source
 
@@ -108,16 +116,18 @@ Text is inserted into whichever app was focused when you started recording. If y
 
 All settings are in the **Transcription** tab:
 
-- **Interim results** (streaming) — partial text appears and refines as you speak. Each update only retypes the changed portion, so there's no flickering. Disable for final-only output.
+- **Interim results** (Deepgram streaming) — partial text appears and refines as you speak. Each update only retypes the changed portion, so there's no flickering. Disable for final-only output.
 - **Voice activity detection** (batch) — a neural network runs locally on Apple Silicon to detect speech in real-time. Silent and noise-only chunks are filtered out before transcription, saving API calls. Adjustable sensitivity threshold.
 - **Auto-end** — recording stops automatically after a configurable silence period (3–30s). In streaming mode this is off by default since text is already live; in batch mode it defaults to 5s.
-- **Smart formatting** (streaming) — automatic punctuation and capitalization.
-- **Endpointing** (streaming) — controls how quickly Deepgram detects the end of an utterance (100–3000ms).
+- **Smart formatting** (Deepgram streaming) — automatic punctuation and capitalization.
+- **Endpointing** (Deepgram streaming) — controls how quickly Deepgram detects the end of an utterance (100–3000ms).
+- **Speaker diarization** (Mistral batch) — identifies different speakers in the transcription.
+- **Temperature** (Mistral batch) — controls output variability. 0 gives deterministic results; higher values produce more varied output.
 
 ## Features
 
-- **Real-time streaming transcription** — words appear as you speak with Deepgram Nova-3; interim results refine in-place using smart diff (only changed characters are retyped, no flickering)
-- **Batch transcription** — record first, transcribe after with GPT-4o via ChatGPT
+- **Real-time streaming transcription** — words appear as you speak with Deepgram Nova-3 or Mistral Voxtral Realtime; interim results refine in-place using smart diff (only changed characters are retyped, no flickering)
+- **Batch transcription** — record first, transcribe after with GPT-4o via ChatGPT or Mistral Voxtral Mini (with optional speaker diarization)
 - **On-device voice activity detection** — a neural network model runs locally on Apple Silicon to distinguish speech from silence in real-time; no audio leaves your machine until speech is confirmed
 - **Automatic turn detection** — when you stop speaking, silence is detected and the session ends automatically (works in both modes — local VAD for batch, server-side for streaming)
 - **Smart chunking** — in batch mode, audio is split at natural sentence boundaries detected by silence analysis
@@ -136,6 +146,14 @@ All settings are in the **Transcription** tab:
 5. **Final results** — server finalizes each utterance with punctuation and formatting
 6. **Auto-end** — after 5+ seconds of server-detected silence following speech, the session ends
 
+### Streaming (Mistral Voxtral Realtime)
+
+1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+2. **Stream** — raw audio is base64-encoded and sent over WebSocket to Mistral's realtime transcription API
+3. **Delta accumulation** — incremental text fragments arrive as `transcription.text.delta` messages and are displayed as interim results
+4. **Segment finalization** — the server emits `transcription.segment` with timing info, producing a final result and resetting the delta buffer
+5. **Auto-end** — after configurable silence following speech, the session ends
+
 ### Batch (ChatGPT)
 
 1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
@@ -144,6 +162,15 @@ All settings are in the **Transcription** tab:
 4. **Chunking** — audio is buffered and sent at the configured interval, waiting for natural pauses
 5. **Auto-end** — after 5+ seconds of confirmed silence following speech, the session ends
 6. **Transcription** — speech chunks are sent to the Whisper API; results arrive in order and are typed into the active app
+
+### Batch (Mistral Voxtral Mini)
+
+1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+2. **Voice activity detection** — same on-device neural model as ChatGPT batch mode
+3. **Speech segmentation** — same hysteresis and silence debounce logic
+4. **Chunking** — audio is buffered as WAV and sent via multipart POST to Mistral's `/v1/audio/transcriptions` endpoint
+5. **Auto-end** — after 5+ seconds of confirmed silence following speech, the session ends
+6. **Transcription** — Voxtral Mini processes each chunk; optional speaker diarization identifies different speakers in the output
 
 ## License
 
