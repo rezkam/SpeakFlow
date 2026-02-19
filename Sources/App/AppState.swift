@@ -59,6 +59,14 @@ final class AppState: BannerPresenting {
     var deepgramLanguage = "en-US"
     var streamingAutoEndEnabled = false
 
+    // MARK: - Mistral Settings
+    var mistralModel = "voxtral-mini-transcribe-realtime-2602"
+    var mistralBatchModel = "voxtral-mini-latest"
+    var mistralLanguage = "en"
+    var mistralTemperature: Float = 0.0
+    var mistralDiarize = false
+    var mistralContextBias = ""
+
     // MARK: - Behavior
     var focusWaitTimeout: Double = 60.0
     var hotkeyRestartsRecording: Bool = true
@@ -143,6 +151,12 @@ final class AppState: BannerPresenting {
         deepgramModel = Settings.shared.deepgramModel
         deepgramLanguage = Settings.shared.deepgramLanguage
         streamingAutoEndEnabled = Settings.shared.streamingAutoEndEnabled
+        mistralModel = Settings.shared.mistralModel
+        mistralBatchModel = Settings.shared.mistralBatchModel
+        mistralLanguage = Settings.shared.mistralLanguage
+        mistralTemperature = Settings.shared.mistralTemperature
+        mistralDiarize = Settings.shared.mistralDiarize
+        mistralContextBias = Settings.shared.mistralContextBias
         focusWaitTimeout = Settings.shared.focusWaitTimeout
         hotkeyRestartsRecording = Settings.shared.hotkeyRestartsRecording
     }
