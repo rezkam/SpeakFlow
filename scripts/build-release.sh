@@ -4,8 +4,10 @@
 # =============================================================================
 #
 # USAGE
-#   ./scripts/build-release.sh rc        — build, sign, install locally for testing
-#   ./scripts/build-release.sh release   — build, sign, notarize, publish to GitHub
+#   ./scripts/build-release.sh rc               — build, sign, install locally for testing
+#   ./scripts/build-release.sh release          — build, sign, notarize, publish to GitHub
+#   ./scripts/build-release.sh release --yes    — same, skip all confirmations (non-interactive)
+#   ./scripts/build-release.sh release -y       — shorthand for --yes
 #
 # REQUIRED ENVIRONMENT VARIABLES (never hardcoded here)
 #   SPEAKFLOW_BUNDLE_ID          e.g. com.example.speakflow
@@ -52,8 +54,12 @@ banner() {
 }
 
 confirm() {
-    # confirm <prompt>  — exits the script if user does not type y/Y
+    # confirm <prompt>  — skipped silently when YES=1, otherwise prompts y/N
     local prompt="$1"
+    if [[ "${YES:-0}" == "1" ]]; then
+        printf "\n${DIM}  ? %s [auto-yes]${RESET}\n" "$prompt"
+        return 0
+    fi
     printf "\n${YELLOW}  ? %s [y/N]${RESET} " "$prompt"
     read -r answer
     if [[ ! "$answer" =~ ^[Yy]$ ]]; then
@@ -62,10 +68,15 @@ confirm() {
     fi
 }
 
-# ── Mode ──────────────────────────────────────────────────────────────────────
+# ── Mode & flags ──────────────────────────────────────────────────────────────
 MODE="${1:-}"
+YES=0
+for arg in "$@"; do
+    [[ "$arg" == "--yes" || "$arg" == "-y" ]] && YES=1
+done
+
 if [[ "$MODE" != "rc" && "$MODE" != "release" ]]; then
-    printf "${RED}Usage: %s rc | release${RESET}\n" "$(basename "$0")" >&2
+    printf "${RED}Usage: %s rc | release [--yes|-y]${RESET}\n" "$(basename "$0")" >&2
     exit 1
 fi
 

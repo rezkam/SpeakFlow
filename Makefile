@@ -73,6 +73,10 @@ rc:
 release:
 	@./scripts/build-release.sh release
 
+# Production release, non-interactive (skip all confirmations)
+release-yes:
+	@./scripts/build-release.sh release --yes
+
 # Run specific test suite
 test-security:
 	swift test --filter SecurityTests
@@ -101,6 +105,7 @@ help:
 	@echo "  make clean               - Clean build artifacts"
 	@echo "  make rc                  - Build + sign + install locally (RC, nothing uploaded)"
 	@echo "  make release             - Build + sign + notarize + publish to GitHub"
+	@echo "  make release-yes         - Same as release, skip all confirmations"
 	@echo "  make test-security       - Run security tests only"
 	@echo "  make test-cancellation   - Run cancellation tests only"
 	@echo "  make test-p2             - Run P2 issue tests only"
