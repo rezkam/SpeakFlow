@@ -65,13 +65,13 @@ clean:
 lint:
 	swiftlint lint --quiet
 
-# Build release version (local install, signed)
-release:
-	@./scripts/build-release.sh
+# RC build: compile, sign, install locally — nothing pushed or uploaded
+rc:
+	@./scripts/build-release.sh rc
 
-# GitHub release (signed + notarized + uploaded to GitHub)
-release-github:
-	@./scripts/build-release.sh --github
+# Production release: compile, sign, notarize, publish to GitHub
+release:
+	@./scripts/build-release.sh release
 
 # Run specific test suite
 test-security:
@@ -99,8 +99,8 @@ help:
 	@echo "  make coverage-html       - Run tests with HTML coverage (opens browser)"
 	@echo "  make lint                - Run SwiftLint"
 	@echo "  make clean               - Clean build artifacts"
-	@echo "  make release             - Build + sign + install locally"
-	@echo "  make release-github      - Build + sign + notarize + GitHub release"
+	@echo "  make rc                  - Build + sign + install locally (RC, nothing uploaded)"
+	@echo "  make release             - Build + sign + notarize + publish to GitHub"
 	@echo "  make test-security       - Run security tests only"
 	@echo "  make test-cancellation   - Run cancellation tests only"
 	@echo "  make test-p2             - Run P2 issue tests only"

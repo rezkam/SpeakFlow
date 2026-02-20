@@ -1,251 +1,293 @@
 #!/bin/bash
-set -eo pipefail
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SpeakFlow Release Build Script
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# =============================================================================
+# SpeakFlow Release Script
+# =============================================================================
 #
-# Usage:
-#   ./scripts/build-release.sh              # Local install (signed for dev)
-#   ./scripts/build-release.sh --github     # GitHub release (signed + notarized + uploaded)
-#   ./scripts/build-release.sh --github v1.2.3  # GitHub release with explicit version
+# USAGE
+#   ./scripts/build-release.sh rc        — build, sign, install locally for testing
+#   ./scripts/build-release.sh release   — build, sign, notarize, publish to GitHub
 #
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_NAME="SpeakFlow"
-
-# ─── Identity — set these in your environment, never hardcode here ──
+# REQUIRED ENVIRONMENT VARIABLES (never hardcoded here)
+#   SPEAKFLOW_BUNDLE_ID          e.g. com.example.speakflow
+#   SPEAKFLOW_SIGNING_IDENTITY   e.g. "Developer ID Application: Your Name (TEAMID)"
+#   SPEAKFLOW_TEAM_ID            e.g. ABCDE12345
+#   SPEAKFLOW_NOTARY_PROFILE     name of keychain notarytool profile (release only)
 #
-# Add to ~/.zprofile (or ~/.zshrc) so they persist across sessions:
-#
-#   export SPEAKFLOW_BUNDLE_ID="com.yourname.speakflow"
-#   export SPEAKFLOW_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-#   export SPEAKFLOW_TEAM_ID="YOURTEAMID"
-#   export SPEAKFLOW_NOTARY_PROFILE="your-keychain-profile-name"
+# Add to ~/.bash_profile so every bash login shell sees them:
+#   export SPEAKFLOW_BUNDLE_ID="..."
+#   export SPEAKFLOW_SIGNING_IDENTITY="..."
+#   export SPEAKFLOW_TEAM_ID="..."
+#   export SPEAKFLOW_NOTARY_PROFILE="..."
 #
 # Create the notary profile once with:
 #   xcrun notarytool store-credentials "$SPEAKFLOW_NOTARY_PROFILE" \
 #     --apple-id YOUR_APPLE_ID \
 #     --team-id "$SPEAKFLOW_TEAM_ID" \
 #     --password APP_SPECIFIC_PASSWORD
-#
-# Generate an app-specific password at:
-#   https://appleid.apple.com/account/manage → Sign In → App-Specific Passwords → +
-# ────────────────────────────────────────────────────────────────────
+# =============================================================================
+set -eo pipefail
 
-BUNDLE_ID="${SPEAKFLOW_BUNDLE_ID:?❌ SPEAKFLOW_BUNDLE_ID is not set. See comments above.}"
-SIGNING_IDENTITY="${SPEAKFLOW_SIGNING_IDENTITY:?❌ SPEAKFLOW_SIGNING_IDENTITY is not set. See comments above.}"
-TEAM_ID="${SPEAKFLOW_TEAM_ID:?❌ SPEAKFLOW_TEAM_ID is not set. See comments above.}"
-NOTARY_PROFILE="${SPEAKFLOW_NOTARY_PROFILE:?❌ SPEAKFLOW_NOTARY_PROFILE is not set. See comments above.}"
+# ── Colours ───────────────────────────────────────────────────────────────────
+BOLD='\033[1m'
+DIM='\033[2m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+RESET='\033[0m'
 
-cd "$PROJECT_DIR"
+# ── Helpers ───────────────────────────────────────────────────────────────────
+ok()   { printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
+fail() { printf "  ${RED}✗${RESET} %s\n" "$*"; exit 1; }
+info() { printf "  ${DIM}%s${RESET}\n" "$*"; }
+step() { printf "\n${BOLD}▸ %s${RESET}\n" "$*"; }
+warn() { printf "  ${YELLOW}⚠${RESET}  %s\n" "$*"; }
 
-# ─── Parse arguments ────────────────────────────────────────────────
-MODE="local"
-VERSION=""
+banner() {
+    local title="$1" subtitle="$2"
+    printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+    printf "${BOLD}  %s${RESET}\n" "$title"
+    [ -n "$subtitle" ] && printf "${DIM}  %s${RESET}\n" "$subtitle"
+    printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+}
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --github)
-            MODE="github"
-            shift
-            ;;
-        *)
-            VERSION="$1"
-            shift
-            ;;
-    esac
-done
+confirm() {
+    # confirm <prompt>  — exits the script if user does not type y/Y
+    local prompt="$1"
+    printf "\n${YELLOW}  ? %s [y/N]${RESET} " "$prompt"
+    read -r answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+        printf "${RED}  Aborted.${RESET}\n\n"
+        exit 1
+    fi
+}
 
-# Auto-detect version from latest git tag
-if [ -z "$VERSION" ]; then
-    LATEST_TAG=$(git tag --sort=-v:refname | head -1 2>/dev/null)
-    VERSION="${LATEST_TAG#v}"
-    VERSION="${VERSION:-0.0.0}"
-fi
-
-# Local builds get an RC suffix to distinguish from production releases
-if [ "$MODE" = "local" ]; then
-    RC_TIMESTAMP=$(date +%Y%m%d%H%M)
-    DISPLAY_VERSION="${VERSION}-rc.${RC_TIMESTAMP}"
-else
-    DISPLAY_VERSION="$VERSION"
-fi
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ "$MODE" = "github" ]; then
-    echo "  🚀 $APP_NAME v$VERSION — GitHub Release"
-    echo "     Signed + Notarized + Uploaded"
-else
-    echo "  🔨 $APP_NAME v$DISPLAY_VERSION — Local Build"
-    echo "     Signed for development (release candidate)"
-fi
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# ─── Verify signing identity ────────────────────────────────────────
-echo ""
-echo "▸ Checking signing identity..."
-if ! security find-identity -v -p codesigning | grep -q "$SIGNING_IDENTITY"; then
-    echo "  ❌ Not found: $SIGNING_IDENTITY"
-    echo "     Run: security find-identity -v -p codesigning"
+# ── Mode ──────────────────────────────────────────────────────────────────────
+MODE="${1:-}"
+if [[ "$MODE" != "rc" && "$MODE" != "release" ]]; then
+    printf "${RED}Usage: %s rc | release${RESET}\n" "$(basename "$0")" >&2
     exit 1
 fi
-echo "  ✓ $SIGNING_IDENTITY"
 
-# ─── GitHub mode: verify tools & credentials ────────────────────────
-if [ "$MODE" = "github" ]; then
-    echo ""
-    echo "▸ Checking GitHub CLI..."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+APP_NAME="SpeakFlow"
+cd "$PROJECT_DIR"
+
+# ── Required env vars ─────────────────────────────────────────────────────────
+# Die immediately with a clear message if any are missing.
+# Values are NEVER printed — only their presence is checked.
+: "${SPEAKFLOW_BUNDLE_ID:?SPEAKFLOW_BUNDLE_ID is not set — see script header}"
+: "${SPEAKFLOW_SIGNING_IDENTITY:?SPEAKFLOW_SIGNING_IDENTITY is not set — see script header}"
+: "${SPEAKFLOW_TEAM_ID:?SPEAKFLOW_TEAM_ID is not set — see script header}"
+if [[ "$MODE" == "release" ]]; then
+    : "${SPEAKFLOW_NOTARY_PROFILE:?SPEAKFLOW_NOTARY_PROFILE is not set — see script header}"
+fi
+
+BUNDLE_ID="$SPEAKFLOW_BUNDLE_ID"
+SIGNING_IDENTITY="$SPEAKFLOW_SIGNING_IDENTITY"
+NOTARY_PROFILE="${SPEAKFLOW_NOTARY_PROFILE:-}"
+
+# ── Version ───────────────────────────────────────────────────────────────────
+LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]' | head -1 2>/dev/null || true)
+BASE_VERSION="${LATEST_TAG#v}"
+BASE_VERSION="${BASE_VERSION:-0.0.0}"
+
+if [[ "$MODE" == "rc" ]]; then
+    RC_TIMESTAMP=$(date +%Y%m%d%H%M)
+    DISPLAY_VERSION="${BASE_VERSION}-rc.${RC_TIMESTAMP}"
+    BUNDLE_VERSION="$DISPLAY_VERSION"
+else
+    DISPLAY_VERSION="$BASE_VERSION"
+    BUNDLE_VERSION="$BASE_VERSION"
+fi
+
+# ── Header ────────────────────────────────────────────────────────────────────
+if [[ "$MODE" == "rc" ]]; then
+    banner "🔨 SpeakFlow $DISPLAY_VERSION — Release Candidate" \
+           "Local install only · nothing pushed · nothing uploaded"
+else
+    banner "🚀 SpeakFlow $DISPLAY_VERSION — Production Release" \
+           "Signed · Notarized · Published to GitHub"
+fi
+
+# =============================================================================
+# STAGE 1 — Preflight checks
+# =============================================================================
+step "Preflight checks"
+
+# 1a. Signing identity exists in keychain
+if security find-identity -v -p codesigning | grep -qF "$SIGNING_IDENTITY"; then
+    ok "Signing identity found"
+else
+    fail "Signing identity not found in keychain: $SIGNING_IDENTITY"
+fi
+
+# 1b. create-dmg available
+if ! command -v create-dmg &>/dev/null; then
+    info "Installing create-dmg..."
+    brew install create-dmg &>/dev/null || fail "Could not install create-dmg"
+fi
+ok "create-dmg available"
+
+# 1c. gh CLI (release only)
+if [[ "$MODE" == "release" ]]; then
     if ! command -v gh &>/dev/null; then
-        echo "  ❌ gh not found. Install: brew install gh"
-        exit 1
+        fail "gh CLI not found — install with: brew install gh"
     fi
     if ! gh auth status &>/dev/null 2>&1; then
-        echo "  ❌ Not logged in. Run: gh auth login"
-        exit 1
+        fail "gh not authenticated — run: gh auth login"
     fi
-    echo "  ✓ gh authenticated"
+    ok "GitHub CLI authenticated"
 
-    echo ""
-    echo "▸ Checking notarization credentials..."
-    # Try a dummy lookup — it will fail but tells us if the profile exists
+    # 1d. Notary profile
     if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" &>/dev/null 2>&1; then
-        echo ""
-        echo "  ❌ Notarization credentials not found."
-        echo ""
-        echo "  Set them up once (you need an app-specific password):"
-        echo ""
-        echo "    xcrun notarytool store-credentials \"$NOTARY_PROFILE\" \\"
-        echo "      --apple-id YOUR_APPLE_ID@email.com \\"
-        echo "      --team-id $TEAM_ID \\"
-        echo "      --password APP_SPECIFIC_PASSWORD"
-        echo ""
-        echo "  Generate an app-specific password at:"
-        echo "    https://appleid.apple.com/account/manage"
-        echo "    → Sign In → App-Specific Passwords → +"
-        exit 1
+        fail "Notary profile '$NOTARY_PROFILE' not found in keychain"
     fi
-    echo "  ✓ Notarization profile '$NOTARY_PROFILE' found"
+    ok "Notary profile found"
 
-    # Check for clean git state
-    echo ""
-    echo "▸ Checking git state..."
+    # 1e. Clean git working tree
     if [ -n "$(git status --porcelain)" ]; then
-        echo "  ⚠️  Working directory has uncommitted changes"
-        read -p "  Continue anyway? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
+        warn "Working directory has uncommitted changes"
+        confirm "Release anyway?"
     else
-        echo "  ✓ Working directory clean"
+        ok "Git working tree clean"
+    fi
+
+    # 1f. Tag exists on origin
+    if ! git ls-remote --tags origin "refs/tags/v${DISPLAY_VERSION}" | grep -q .; then
+        warn "Tag v${DISPLAY_VERSION} not found on origin"
+        confirm "Continue without tag on origin?"
+    else
+        ok "Tag v${DISPLAY_VERSION} exists on origin"
     fi
 fi
 
-# ─── Build release binary ──────────────────────────────────────────
-echo ""
-echo "▸ Building release binary..."
-swift build -c release --product SpeakFlow 2>&1 | grep -v "Found unhandled resource"
-echo "  ✓ Build complete"
+# =============================================================================
+# STAGE 2 — Tests
+# =============================================================================
+step "Running test suite"
+if swift test --quiet 2>&1 | tail -3 | grep -qE "passed|0 failures"; then
+    ok "All tests passed"
+else
+    warn "Tests may have failures — check output above"
+    confirm "Release anyway?"
+fi
 
-# ─── Create app bundle ──────────────────────────────────────────────
-echo ""
-echo "▸ Creating app bundle..."
+# =============================================================================
+# STAGE 3 — Build
+# =============================================================================
+step "Building release binary"
+swift build -c release --product SpeakFlow 2>&1 \
+    | grep -v "^Found unhandled resource" \
+    | grep -v "^$" \
+    | sed 's/^/  /' \
+    || fail "Build failed"
+
+BUILT_BINARY=".build/release/$APP_NAME"
+[ -f "$BUILT_BINARY" ] || fail "Binary not found after build: $BUILT_BINARY"
+ok "Build complete"
+# Hash captured after signing (stage 5) once codesign has written its seal
+
+# =============================================================================
+# STAGE 4 — Assemble app bundle
+# =============================================================================
+step "Assembling app bundle"
+
 rm -rf "$APP_NAME.app"
 mkdir -p "$APP_NAME.app/Contents/MacOS"
 mkdir -p "$APP_NAME.app/Contents/Resources"
 
-# Copy binary
-cp ".build/release/$APP_NAME" "$APP_NAME.app/Contents/MacOS/"
+# Binary
+cp "$BUILT_BINARY" "$APP_NAME.app/Contents/MacOS/"
 
-# Copy SPM resource bundle
-cp -r ".build/release/${APP_NAME}_${APP_NAME}.bundle" "$APP_NAME.app/Contents/Resources/" 2>/dev/null || true
+# SPM resource bundle (optional)
+if [ -d ".build/release/${APP_NAME}_${APP_NAME}.bundle" ]; then
+    cp -r ".build/release/${APP_NAME}_${APP_NAME}.bundle" \
+        "$APP_NAME.app/Contents/Resources/"
+fi
 
-# Generate .icns from the high-res logo
-echo "  Creating app icon..."
-ICONSET_DIR=$(mktemp -d)/AppIcon.iconset
+# App icon
+ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET_DIR"
-sips -z 16 16 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_16x16.png" 2>/dev/null
-sips -z 32 32 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_16x16@2x.png" 2>/dev/null
-sips -z 32 32 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_32x32.png" 2>/dev/null
-sips -z 64 64 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_32x32@2x.png" 2>/dev/null
-sips -z 128 128 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_128x128.png" 2>/dev/null
-sips -z 256 256 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_128x128@2x.png" 2>/dev/null
-sips -z 256 256 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_256x256.png" 2>/dev/null
-sips -z 512 512 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_256x256@2x.png" 2>/dev/null
-sips -z 512 512 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_512x512.png" 2>/dev/null
-sips -z 1024 1024 Sources/Resources/AppIcon.png --out "$ICONSET_DIR/icon_512x512@2x.png" 2>/dev/null
-iconutil -c icns "$ICONSET_DIR" -o "$APP_NAME.app/Contents/Resources/AppIcon.icns"
+SRC_ICON="Sources/Resources/AppIcon.png"
+for size in 16 32 128 256 512; do
+    sips -z $size $size "$SRC_ICON" \
+        --out "$ICONSET_DIR/icon_${size}x${size}.png" &>/dev/null
+    dbl=$((size * 2))
+    sips -z $dbl $dbl "$SRC_ICON" \
+        --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" &>/dev/null
+done
+iconutil -c icns "$ICONSET_DIR" \
+    -o "$APP_NAME.app/Contents/Resources/AppIcon.icns"
 rm -rf "$(dirname "$ICONSET_DIR")"
 
-# Create Info.plist
-cat > "$APP_NAME.app/Contents/Info.plist" << EOF
+# Info.plist — no local values; only BUNDLE_ID and version are substituted
+cat > "$APP_NAME.app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>$APP_NAME</string>
-    <key>CFBundleIdentifier</key>
-    <string>$BUNDLE_ID</string>
-    <key>CFBundleName</key>
-    <string>$APP_NAME</string>
-    <key>CFBundleDisplayName</key>
-    <string>$APP_NAME</string>
-    <key>CFBundleVersion</key>
-    <string>$DISPLAY_VERSION</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$DISPLAY_VERSION</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>LSUIElement</key>
-    <true/>
+    <key>CFBundleExecutable</key>      <string>$APP_NAME</string>
+    <key>CFBundleIdentifier</key>      <string>$BUNDLE_ID</string>
+    <key>CFBundleName</key>            <string>$APP_NAME</string>
+    <key>CFBundleDisplayName</key>     <string>$APP_NAME</string>
+    <key>CFBundleVersion</key>         <string>$BUNDLE_VERSION</string>
+    <key>CFBundleShortVersionString</key> <string>$DISPLAY_VERSION</string>
+    <key>CFBundlePackageType</key>     <string>APPL</string>
+    <key>CFBundleIconFile</key>        <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>  <string>15.0</string>
+    <key>LSUIElement</key>             <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>$APP_NAME needs microphone access to record your voice for transcription.</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
+        <string>$APP_NAME needs microphone access to transcribe your voice.</string>
+    <key>NSHighResolutionCapable</key> <true/>
 </dict>
 </plist>
-EOF
-echo "  ✓ App bundle created"
+PLIST
 
-# ─── Code sign ──────────────────────────────────────────────────────
-echo ""
-echo "▸ Signing app with Developer ID..."
+ok "App bundle assembled"
 
-# Sign embedded bundles first, then the app itself
-# --options runtime enables Hardened Runtime (required for notarization)
-# --timestamp uses Apple's secure timestamp server
-codesign --force --options runtime --timestamp \
-    --sign "$SIGNING_IDENTITY" \
-    "$APP_NAME.app/Contents/Resources/${APP_NAME}_${APP_NAME}.bundle" 2>/dev/null || true
+# =============================================================================
+# STAGE 5 — Code sign
+# =============================================================================
+step "Code signing"
 
+# Sign embedded framework/plugin bundles that contain a Mach-O executable.
+# Pure resource bundles (images only) are not signable and are skipped.
+EMBEDDED_BUNDLE="$APP_NAME.app/Contents/Resources/${APP_NAME}_${APP_NAME}.bundle"
+if [ -d "$EMBEDDED_BUNDLE" ]; then
+    EXEC_COUNT=$(find "$EMBEDDED_BUNDLE" -type f \
+        -exec sh -c 'file "$1" | grep -q "Mach-O"' _ {} \; -print 2>/dev/null | wc -l)
+    if [ "$EXEC_COUNT" -gt 0 ]; then
+        codesign --force --options runtime --timestamp \
+            --sign "$SIGNING_IDENTITY" \
+            "$EMBEDDED_BUNDLE" 2>&1 | sed 's/^/  /' \
+            || fail "Failed to sign embedded bundle"
+    else
+        info "Skipping resource-only bundle (no Mach-O)"
+    fi
+fi
+
+# Sign the app
 codesign --force --options runtime --timestamp \
     --entitlements "$PROJECT_DIR/$APP_NAME.entitlements" \
     --sign "$SIGNING_IDENTITY" \
-    "$APP_NAME.app"
-
-echo "  ✓ App signed"
+    "$APP_NAME.app" 2>&1 | sed 's/^/  /' || fail "Failed to sign app"
 
 # Verify
-echo "  Verifying..."
-codesign --verify --deep --strict "$APP_NAME.app" 2>&1
-echo "  ✓ Signature valid"
+codesign --verify --deep --strict "$APP_NAME.app" 2>&1 | sed 's/^/  /' \
+    || fail "Code signature verification failed"
 
-# ─── Create DMG ─────────────────────────────────────────────────────
-echo ""
-echo "▸ Creating DMG..."
-if ! command -v create-dmg &>/dev/null; then
-    echo "  Installing create-dmg..."
-    brew install create-dmg
-fi
+# Capture binary hash NOW — after codesign has written the signature seal
+BINARY_SHA256=$(shasum -a 256 "$APP_NAME.app/Contents/MacOS/$APP_NAME" | awk '{print $1}')
+ok "App signed and verified"
+info "Signed binary SHA-256: $BINARY_SHA256"
+
+# =============================================================================
+# STAGE 6 — DMG
+# =============================================================================
+step "Creating DMG"
 
 rm -f "$APP_NAME.dmg"
 create-dmg \
@@ -258,94 +300,189 @@ create-dmg \
     --hide-extension "$APP_NAME.app" \
     --no-internet-enable \
     "$APP_NAME.dmg" \
-    "$APP_NAME.app"
+    "$APP_NAME.app" 2>&1 | grep -v "^$" | sed 's/^/  /'
+
+[ -f "$APP_NAME.dmg" ] || fail "DMG not created"
 
 # Sign the DMG
 codesign --force --timestamp \
     --sign "$SIGNING_IDENTITY" \
-    "$APP_NAME.dmg"
+    "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' || fail "Failed to sign DMG"
 
-echo "  ✓ DMG created and signed"
-ls -lh "$APP_NAME.dmg"
+DMG_SHA256=$(shasum -a 256 "$APP_NAME.dmg" | awk '{print $1}')
+DMG_SIZE=$(du -sh "$APP_NAME.dmg" | awk '{print $1}')
+ok "DMG created and signed ($DMG_SIZE)"
+info "DMG SHA-256: $DMG_SHA256"
 
-# ─── Notarize (GitHub mode only) ───────────────────────────────────
-if [ "$MODE" = "github" ]; then
-    echo ""
-    echo "▸ Submitting to Apple for notarization..."
-    echo "  (this usually takes 1–5 minutes)"
+# =============================================================================
+# STAGE 7 — Notarize (release only)
+# =============================================================================
+if [[ "$MODE" == "release" ]]; then
+    step "Notarizing with Apple"
+    info "Submitting to Apple notary service (usually 1–5 minutes)..."
 
+    NOTARIZE_LOG="$(mktemp)"
     xcrun notarytool submit "$APP_NAME.dmg" \
         --keychain-profile "$NOTARY_PROFILE" \
-        --wait 2>&1 | tee /tmp/speakflow-notarize.txt
+        --wait 2>&1 | tee "$NOTARIZE_LOG" | sed 's/^/  /'
 
-    if grep -q "status: Accepted" /tmp/speakflow-notarize.txt; then
-        echo "  ✓ Notarization accepted!"
-
-        echo ""
-        echo "▸ Stapling notarization ticket..."
-        xcrun stapler staple "$APP_NAME.dmg"
-        echo "  ✓ Ticket stapled to DMG"
+    if grep -q "status: Accepted" "$NOTARIZE_LOG"; then
+        ok "Notarization accepted by Apple"
     else
-        echo ""
-        echo "  ❌ Notarization failed!"
-        SUBMISSION_ID=$(grep "id:" /tmp/speakflow-notarize.txt | head -1 | awk '{print $2}')
-        if [ -n "$SUBMISSION_ID" ]; then
-            echo ""
-            echo "  Log:"
+        SUBMISSION_ID=$(grep -E "^\s*id:" "$NOTARIZE_LOG" | head -1 | awk '{print $2}')
+        [ -n "$SUBMISSION_ID" ] && \
             xcrun notarytool log "$SUBMISSION_ID" \
-                --keychain-profile "$NOTARY_PROFILE" 2>&1
-        fi
-        exit 1
+                --keychain-profile "$NOTARY_PROFILE" 2>&1 | sed 's/^/  /'
+        fail "Notarization rejected — see log above"
     fi
+    rm -f "$NOTARIZE_LOG"
+
+    step "Stapling notarization ticket"
+    xcrun stapler staple "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
+        || fail "Stapling failed"
+    xcrun stapler validate "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
+        || fail "Stapler validation failed"
+    ok "Ticket stapled and validated"
+
+    step "Gatekeeper check"
+    spctl --assess --type open --context context:primary-signature \
+        "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
+        || fail "Gatekeeper assessment failed"
+    ok "Gatekeeper: Notarized Developer ID"
+
+    # Re-capture DMG hash after stapling (ticket changes the file)
+    DMG_SHA256=$(shasum -a 256 "$APP_NAME.dmg" | awk '{print $1}')
+    info "Stapled DMG SHA-256: $DMG_SHA256"
 fi
 
-# ─── GitHub Release ─────────────────────────────────────────────────
-if [ "$MODE" = "github" ]; then
-    echo ""
-    echo "▸ Creating GitHub release v$VERSION..."
+# =============================================================================
+# STAGE 8 — Install verification (RC) / Release notes confirmation (release)
+# =============================================================================
+if [[ "$MODE" == "rc" ]]; then
+    step "Installing to /Applications"
 
-    # Create release (gh creates the tag automatically)
-    if gh release view "v$VERSION" &>/dev/null 2>&1; then
-        echo "  Release v$VERSION exists — uploading DMG..."
-        gh release upload "v$VERSION" "$APP_NAME.dmg" --clobber
-    else
-        echo "  Creating release v$VERSION with DMG..."
-        gh release create "v$VERSION" "$APP_NAME.dmg" \
-            --title "v$VERSION" \
-            --generate-notes
-    fi
-
-    echo "  ✓ Release published!"
-    echo ""
-    gh release view "v$VERSION" --web 2>/dev/null || true
-fi
-
-# ─── Local install ──────────────────────────────────────────────────
-if [ "$MODE" = "local" ]; then
-    echo ""
-
-    # Quit running instance
-    if pgrep -x "$APP_NAME" > /dev/null 2>&1; then
-        echo "▸ Quitting running $APP_NAME..."
-        osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || killall "$APP_NAME" 2>/dev/null || true
+    # Quit any running instance
+    if pgrep -x "$APP_NAME" &>/dev/null; then
+        info "Quitting running $APP_NAME..."
+        osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
         sleep 1
+        if pgrep -x "$APP_NAME" &>/dev/null; then
+            killall -9 "$APP_NAME" 2>/dev/null || true
+            sleep 1
+        fi
     fi
 
     # Install
-    echo "▸ Installing to /Applications..."
     rm -rf "/Applications/$APP_NAME.app"
-    cp -r "$APP_NAME.app" "/Applications/$APP_NAME.app"
-    echo "  ✓ Installed to /Applications/$APP_NAME.app"
+    ditto "$APP_NAME.app" "/Applications/$APP_NAME.app"
+    touch "/Applications/$APP_NAME.app"
+
+    # Verify installed binary hash matches what was built
+    INSTALLED_BINARY="/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+    INSTALLED_SHA256=$(shasum -a 256 "$INSTALLED_BINARY" | awk '{print $1}')
+
+    if [ "$INSTALLED_SHA256" = "$BINARY_SHA256" ]; then
+        ok "Installed binary hash matches build"
+        info "SHA-256: $INSTALLED_SHA256"
+    else
+        fail "Hash mismatch — installed binary does not match build output
+       Built:     $BINARY_SHA256
+       Installed: $INSTALLED_SHA256"
+    fi
+
+    # Verify code signature of installed app
+    codesign --verify --deep --strict "/Applications/$APP_NAME.app" 2>&1 \
+        | sed 's/^/  /' || fail "Installed app signature invalid"
+    ok "Installed app signature valid"
+
+    # Verify version string in installed Info.plist
+    INSTALLED_VERSION=$(defaults read \
+        "/Applications/$APP_NAME.app/Contents/Info" \
+        CFBundleShortVersionString 2>/dev/null || echo "unknown")
+    if [ "$INSTALLED_VERSION" = "$DISPLAY_VERSION" ]; then
+        ok "Version string correct: $INSTALLED_VERSION"
+    else
+        fail "Version mismatch — expected $DISPLAY_VERSION, got $INSTALLED_VERSION"
+    fi
+
+else
+    # ── Release: show release notes and ask for confirmation ──────────────────
+    step "Release notes review"
+
+    # Extract the section for this version from CHANGELOG.md
+    NOTES=$(awk \
+        "/^## ${DISPLAY_VERSION}[[:space:]]/,/^## [0-9]/" \
+        CHANGELOG.md \
+        | head -n -1)
+
+    if [ -z "$NOTES" ]; then
+        warn "No CHANGELOG entry found for v${DISPLAY_VERSION}"
+        confirm "Publish release without changelog notes?"
+        NOTES="See CHANGELOG.md"
+    else
+        printf "\n${CYAN}%s${RESET}\n" "$NOTES"
+    fi
+
+    confirm "Publish v${DISPLAY_VERSION} to GitHub with these release notes?"
+
+    # ==========================================================================
+    # STAGE 9 — Publish to GitHub
+    # ==========================================================================
+    step "Publishing GitHub release v${DISPLAY_VERSION}"
+
+    if gh release view "v${DISPLAY_VERSION}" &>/dev/null 2>&1; then
+        info "Release v${DISPLAY_VERSION} already exists — uploading DMG..."
+        gh release upload "v${DISPLAY_VERSION}" "$APP_NAME.dmg" --clobber \
+            2>&1 | sed 's/^/  /'
+    else
+        info "Creating release v${DISPLAY_VERSION}..."
+        NOTES_FILE="$(mktemp)"
+        printf '%s' "$NOTES" > "$NOTES_FILE"
+        gh release create "v${DISPLAY_VERSION}" "$APP_NAME.dmg" \
+            --title "v${DISPLAY_VERSION}" \
+            --notes-file "$NOTES_FILE" \
+            2>&1 | sed 's/^/  /'
+        rm -f "$NOTES_FILE"
+    fi
+    ok "Published to GitHub"
+
+    step "Verifying GitHub release asset"
+    # Download the published DMG and verify its hash matches what we uploaded
+    VERIFY_DIR="$(mktemp -d)"
+    gh release download "v${DISPLAY_VERSION}" \
+        --pattern "*.dmg" \
+        --dir "$VERIFY_DIR" 2>&1 | sed 's/^/  /'
+    DOWNLOADED_DMG="$VERIFY_DIR/$APP_NAME.dmg"
+
+    if [ -f "$DOWNLOADED_DMG" ]; then
+        DOWNLOADED_SHA256=$(shasum -a 256 "$DOWNLOADED_DMG" | awk '{print $1}')
+        if [ "$DOWNLOADED_SHA256" = "$DMG_SHA256" ]; then
+            ok "Downloaded DMG hash matches uploaded file"
+            info "SHA-256: $DOWNLOADED_SHA256"
+        else
+            fail "Hash mismatch after upload
+       Uploaded:   $DMG_SHA256
+       Downloaded: $DOWNLOADED_SHA256"
+        fi
+    else
+        fail "Could not download DMG from GitHub release"
+    fi
+    rm -rf "$VERIFY_DIR"
 fi
 
-# ─── Done ───────────────────────────────────────────────────────────
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ "$MODE" = "github" ]; then
-    echo "  ✅ $APP_NAME v$VERSION — Released to GitHub!"
-    echo "     https://github.com/rezkam/SpeakFlow/releases/tag/v$VERSION"
+# =============================================================================
+# Done
+# =============================================================================
+printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+if [[ "$MODE" == "rc" ]]; then
+    printf "${GREEN}${BOLD}  ✅ RC ready: SpeakFlow $DISPLAY_VERSION${RESET}\n"
+    printf "${DIM}     Installed at /Applications/SpeakFlow.app${RESET}\n"
+    printf "${DIM}     Binary SHA-256: $BINARY_SHA256${RESET}\n"
+    printf "${DIM}     Nothing was pushed or uploaded.${RESET}\n"
 else
-    echo "  ✅ $APP_NAME v$DISPLAY_VERSION — Installed locally!"
+    printf "${GREEN}${BOLD}  ✅ Released: SpeakFlow v$DISPLAY_VERSION${RESET}\n"
+    REPO_URL=$(gh repo view --json url -q .url 2>/dev/null || echo "https://github.com")
+    printf "${DIM}     ${REPO_URL}/releases/tag/v${DISPLAY_VERSION}${RESET}\n"
+    printf "${DIM}     DMG SHA-256: $DMG_SHA256${RESET}\n"
 fi
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
+printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
