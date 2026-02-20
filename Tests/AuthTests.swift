@@ -318,9 +318,10 @@ struct OAuthCallbackServerTests {
         // Bind first so the socket is ready before the browser would open.
         #expect(server.prepareForCallback())
 
-        // async let: both branches run concurrently. waitForCallback installs
-        // the CheckedContinuation before suspending, so the continuation is
-        // guaranteed to be in place before hitOAuthCallback resolves.
+        // async let starts both concurrently. waitForPreparedCallback installs
+        // the CheckedContinuation synchronously inside withCheckedContinuation
+        // before suspending. URLSession.data incurs at least one network hop
+        // before accept() fires, so the continuation is in place in practice.
         async let code = server.waitForPreparedCallback(timeout: 5.0)
         async let status = hitOAuthCallback(
             port: port,
@@ -379,9 +380,10 @@ struct OAuthCallbackServerRegressionTests {
         let server = OAuthCallbackServer(expectedState: "state", port: port)
         #expect(server.prepareForCallback())
 
-        // async let: both branches run concurrently. waitForPreparedCallback
-        // installs the CheckedContinuation before suspending, so the continuation
-        // is in place before hitOAuthCallback resolves.
+        // async let starts both concurrently. waitForPreparedCallback installs
+        // the CheckedContinuation synchronously inside withCheckedContinuation
+        // before suspending. URLSession.data incurs at least one network hop
+        // before accept() fires, so the continuation is in place in practice.
         async let code = server.waitForPreparedCallback(timeout: 5.0)
         async let status = hitOAuthCallback(port: port, query: "code=abc&state=state")
 
