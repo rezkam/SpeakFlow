@@ -410,11 +410,11 @@ else
     # ── Release: show release notes and ask for confirmation ──────────────────
     step "Release notes review"
 
-    # Extract the section for this version from CHANGELOG.md
+    # Extract the section for this version from CHANGELOG.md.
+    # Match heading "## VERSION" (anything after), collect until the next "## " heading.
     NOTES=$(awk \
-        "/^## ${DISPLAY_VERSION}[[:space:]]/,/^## [0-9]/" \
-        CHANGELOG.md \
-        | head -n -1)
+        "BEGIN{found=0} /^## ${DISPLAY_VERSION}( |$)/{found=1; next} found && /^## /{exit} found{print}" \
+        CHANGELOG.md)
 
     if [ -z "$NOTES" ]; then
         warn "No CHANGELOG entry found for v${DISPLAY_VERSION}"
