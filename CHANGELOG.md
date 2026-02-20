@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.1 — Bug fixes & test reliability
+
+Patch release fixing one production bug and hardening the test suite against
+timing-dependent failures on macOS 26 (Xcode 26.0).
+
+### Bug Fix
+
+- **OAuth callback startup race** — `AuthController.startLoginFlow()` previously
+  opened the browser before the local callback server had bound its socket. On a
+  heavily loaded system the provider's redirect could arrive before the server
+  was listening, causing authentication to fail silently. The server now binds
+  synchronously via `OAuthCallbackServer.prepareForCallback()` before the browser
+  is opened. A new `waitForPreparedCallback()` entry point encodes the
+  precondition in its name so the correct call sequence is self-documenting.
+
+### Test Reliability
+
+Five categories of flaky tests eliminated across two CI runners
+(macOS 15 / Xcode 16.4 and macOS 26 / Xcode 26.0):
+
+- **RateLimiter cancellation** — replaced elapsed-time assertion with a
+  deterministic pre-cancel pattern; 60s interval ensures the task cannot
+  complete naturally.
+- **TranscriptionQueue real-time delivery** — rewrote sleep+poll loop as a
+  direct `for await` consumer; natural rendezvous, zero sleeps.
+- **Silence auto-end timer** — increased silence duration (150ms → 300ms) and
+  `waitUntil` timeout (3s → 5s) to give the unstructured timer task reliable
+  headroom on loaded CI runners.
+- **OAuth callback server tests** — converted to `async let` concurrent
+  pattern so the `CheckedContinuation` is always installed before the HTTP
+  request can be accepted; removed all fixed-duration sleeps.
+- **VAD model cache tests** — network requests to `huggingface.co` are now
+  skipped gracefully when the CI runner has no outbound access
+  (`NSURLErrorCancelled` / `NSURLErrorNotConnectedToInternet`, domain-checked).
+
+### Code Quality
+
+- `OAuthCallbackServer` public API tightened: removed the footgun `autoStart`
+  boolean parameter; callers now choose between `waitForCallback()` (auto-starts)
+  or the explicit `prepareForCallback()` + `waitForPreparedCallback()` sequence.
+- Error domain verified alongside error code in all network-skip catch clauses
+  (`error.domain == NSURLErrorDomain`) so non-network errors with coincident
+  codes cannot silently swallow real failures.
+- `defer { collectTask.cancel() }` added to stream lifecycle test so a dropped
+  submit produces a clean failure instead of an indefinite hang.
+
+---
+
 ## 0.6.0 — Mistral Voxtral Provider
 
 Adds Mistral as a fully supported transcription provider in two modes — realtime streaming and batch — bringing the total to four transcription modes across three providers. Includes a comprehensive settings UI for Mistral-specific features, robust session lifecycle handling, and 1,836 lines of new test coverage.
