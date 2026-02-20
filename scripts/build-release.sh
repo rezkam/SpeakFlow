@@ -45,6 +45,51 @@ info() { printf "  ${DIM}%s${RESET}\n" "$*"; }
 step() { printf "\n${BOLD}▸ %s${RESET}\n" "$*"; }
 warn() { printf "  ${YELLOW}⚠${RESET}  %s\n" "$*"; }
 
+install_and_verify() {
+    # Install the just-built, just-signed app to /Applications and verify it.
+    # Called from both rc and release paths.
+    step "Installing to /Applications"
+
+    if pgrep -x "$APP_NAME" &>/dev/null; then
+        info "Quitting running $APP_NAME..."
+        osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
+        sleep 1
+        if pgrep -x "$APP_NAME" &>/dev/null; then
+            killall -9 "$APP_NAME" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+
+    rm -rf "/Applications/$APP_NAME.app"
+    ditto "$APP_NAME.app" "/Applications/$APP_NAME.app"
+    touch "/Applications/$APP_NAME.app"
+
+    INSTALLED_BINARY="/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+    INSTALLED_SHA256=$(shasum -a 256 "$INSTALLED_BINARY" | awk '{print $1}')
+
+    if [ "$INSTALLED_SHA256" = "$BINARY_SHA256" ]; then
+        ok "Installed binary hash matches build"
+        info "SHA-256: $INSTALLED_SHA256"
+    else
+        fail "Hash mismatch — installed binary does not match build output
+       Built:     $BINARY_SHA256
+       Installed: $INSTALLED_SHA256"
+    fi
+
+    codesign --verify --deep --strict "/Applications/$APP_NAME.app" 2>&1 \
+        | sed 's/^/  /' || fail "Installed app signature invalid"
+    ok "Installed app signature valid"
+
+    INSTALLED_VERSION=$(defaults read \
+        "/Applications/$APP_NAME.app/Contents/Info" \
+        CFBundleShortVersionString 2>/dev/null || echo "unknown")
+    if [ "$INSTALLED_VERSION" = "$DISPLAY_VERSION" ]; then
+        ok "Version string correct: $INSTALLED_VERSION"
+    else
+        fail "Version mismatch — expected $DISPLAY_VERSION, got $INSTALLED_VERSION"
+    fi
+}
+
 banner() {
     local title="$1" subtitle="$2"
     printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
@@ -371,51 +416,7 @@ fi
 # STAGE 8 — Install verification (RC) / Release notes confirmation (release)
 # =============================================================================
 if [[ "$MODE" == "rc" ]]; then
-    step "Installing to /Applications"
-
-    # Quit any running instance
-    if pgrep -x "$APP_NAME" &>/dev/null; then
-        info "Quitting running $APP_NAME..."
-        osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
-        sleep 1
-        if pgrep -x "$APP_NAME" &>/dev/null; then
-            killall -9 "$APP_NAME" 2>/dev/null || true
-            sleep 1
-        fi
-    fi
-
-    # Install
-    rm -rf "/Applications/$APP_NAME.app"
-    ditto "$APP_NAME.app" "/Applications/$APP_NAME.app"
-    touch "/Applications/$APP_NAME.app"
-
-    # Verify installed binary hash matches what was built
-    INSTALLED_BINARY="/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME"
-    INSTALLED_SHA256=$(shasum -a 256 "$INSTALLED_BINARY" | awk '{print $1}')
-
-    if [ "$INSTALLED_SHA256" = "$BINARY_SHA256" ]; then
-        ok "Installed binary hash matches build"
-        info "SHA-256: $INSTALLED_SHA256"
-    else
-        fail "Hash mismatch — installed binary does not match build output
-       Built:     $BINARY_SHA256
-       Installed: $INSTALLED_SHA256"
-    fi
-
-    # Verify code signature of installed app
-    codesign --verify --deep --strict "/Applications/$APP_NAME.app" 2>&1 \
-        | sed 's/^/  /' || fail "Installed app signature invalid"
-    ok "Installed app signature valid"
-
-    # Verify version string in installed Info.plist
-    INSTALLED_VERSION=$(defaults read \
-        "/Applications/$APP_NAME.app/Contents/Info" \
-        CFBundleShortVersionString 2>/dev/null || echo "unknown")
-    if [ "$INSTALLED_VERSION" = "$DISPLAY_VERSION" ]; then
-        ok "Version string correct: $INSTALLED_VERSION"
-    else
-        fail "Version mismatch — expected $DISPLAY_VERSION, got $INSTALLED_VERSION"
-    fi
+    install_and_verify
 
 else
     # ── Release: show release notes and ask for confirmation ──────────────────
@@ -480,6 +481,8 @@ else
         fail "Could not download DMG from GitHub release"
     fi
     rm -rf "$VERIFY_DIR"
+
+    install_and_verify
 fi
 
 # =============================================================================
@@ -496,5 +499,6 @@ else
     REPO_URL=$(gh repo view --json url -q .url 2>/dev/null || echo "https://github.com")
     printf "${DIM}     ${REPO_URL}/releases/tag/v${DISPLAY_VERSION}${RESET}\n"
     printf "${DIM}     DMG SHA-256: $DMG_SHA256${RESET}\n"
+    printf "${DIM}     Installed at /Applications/SpeakFlow.app${RESET}\n"
 fi
 printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
