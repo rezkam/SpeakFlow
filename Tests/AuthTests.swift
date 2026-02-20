@@ -315,11 +315,9 @@ struct OAuthCallbackServerTests {
         let expectedCode = "auth-code-123"
         let server = OAuthCallbackServer(expectedState: expectedState, port: port)
 
-        // waitForCallback calls start() synchronously, binding the socket before
-        // suspending. We give the unstructured Task time to be scheduled and
-        // bind on any CI runner (macOS 26 can be slow to schedule tasks).
-        let waitTask = Task { await server.waitForCallback(timeout: 5.0) }
-        try? await Task.sleep(for: .milliseconds(500))
+        // Deterministic startup: bind/listen before sending callback.
+        #expect(server.prepareForCallback())
+        let waitTask = Task { await server.waitForCallback(timeout: 5.0, autoStart: false) }
 
         let status = try await hitOAuthCallback(
             port: port,
@@ -336,8 +334,8 @@ struct OAuthCallbackServerTests {
         let port = randomOAuthTestPort()
         let server = OAuthCallbackServer(expectedState: "expected", port: port)
 
-        let waitTask = Task { await server.waitForCallback(timeout: 5.0) }
-        try? await Task.sleep(for: .milliseconds(500))
+        #expect(server.prepareForCallback())
+        let waitTask = Task { await server.waitForCallback(timeout: 5.0, autoStart: false) }
 
         let status = try await hitOAuthCallback(
             port: port,
@@ -373,6 +371,30 @@ struct OAuthCallbackServerRegressionTests {
 
         #expect(result == nil)
         #expect(elapsed < 2.0)
+    }
+
+    @Test func testPrepareThenWaitAutoStartFalseImmediateCallback() async throws {
+        let port = randomOAuthTestPort()
+        let server = OAuthCallbackServer(expectedState: "state", port: port)
+        #expect(server.prepareForCallback())
+
+        let waitTask = Task { await server.waitForCallback(timeout: 5.0, autoStart: false) }
+
+        let status = try await hitOAuthCallback(
+            port: port,
+            query: "code=abc&state=state"
+        )
+
+        let result = await waitTask.value
+        #expect(status == 200)
+        #expect(result == "abc")
+    }
+
+    @Test func testWaitAutoStartFalseWithoutPrepareReturnsNil() async {
+        let port = randomOAuthTestPort()
+        let server = OAuthCallbackServer(expectedState: "state", port: port)
+        let result = await server.waitForCallback(timeout: 0.2, autoStart: false)
+        #expect(result == nil)
     }
 }
 

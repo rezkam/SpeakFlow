@@ -62,12 +62,31 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         continuation?.resume(returning: value)
     }
 
-    /// Start the server and wait for callback.
-    /// Returns authorization code, or nil on timeout/cancellation/error.
-    public func waitForCallback(timeout: TimeInterval = 120) async -> String? {
-        guard start() else {
-            Logger.auth.error("Failed to start OAuth callback server")
-            return nil
+    /// Prepare the callback server by binding/listening on localhost if needed.
+    /// Safe to call multiple times; returns true once the server is ready.
+    @discardableResult
+    public func prepareForCallback() -> Bool {
+        startIfNeeded()
+    }
+
+    /// Wait for OAuth callback.
+    /// - Parameters:
+    ///   - timeout: max seconds to wait before returning nil.
+    ///   - autoStart: when true (default), binds/listens before waiting.
+    ///                Set false if caller already called `prepareForCallback()`.
+    /// - Returns: authorization code, or nil on timeout/cancellation/error.
+    public func waitForCallback(timeout: TimeInterval = 120, autoStart: Bool = true) async -> String? {
+        if autoStart {
+            guard startIfNeeded() else {
+                Logger.auth.error("Failed to start OAuth callback server")
+                return nil
+            }
+        } else {
+            let running = state.withLock { $0.isRunning }
+            guard running else {
+                Logger.auth.error("waitForCallback(autoStart: false) called before prepareForCallback()")
+                return nil
+            }
         }
 
         defer { stop() }
@@ -89,11 +108,10 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         }
     }
 
-    private func start() -> Bool {
+    private func startIfNeeded() -> Bool {
         let alreadyRunning = state.withLock { $0.isRunning }
-        guard !alreadyRunning else {
-            Logger.auth.warning("OAuth callback server already running")
-            return false
+        if alreadyRunning {
+            return true
         }
 
         let newSocket = Darwin.socket(AF_INET, SOCK_STREAM, 0)

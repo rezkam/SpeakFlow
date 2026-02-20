@@ -45,10 +45,19 @@ final class AuthController {
     func startLoginFlow() {
         let flow = OpenAICodexAuth.createAuthorizationFlow()
         let server = OAuthCallbackServer(expectedState: flow.state)
+
+        // Bind/listen before opening the browser to avoid a startup race where
+        // the callback arrives before the local server is ready.
+        guard server.prepareForCallback() else {
+            appState.showBanner("Login failed — could not start callback server", style: .error)
+            return
+        }
+
         oauthCallbackServer = server
         NSWorkspace.shared.open(flow.url)
+
         Task { [weak self] in
-            let code = await server.waitForCallback(timeout: 120)
+            let code = await server.waitForCallback(timeout: 120, autoStart: false)
             await MainActor.run {
                 guard let self else { return }
                 self.oauthCallbackServer = nil
