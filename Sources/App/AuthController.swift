@@ -57,7 +57,7 @@ final class AuthController {
         NSWorkspace.shared.open(flow.url)
 
         Task { [weak self] in
-            let code = await server.waitForCallback(timeout: 120, autoStart: false)
+            let code = await server.waitForPreparedCallback(timeout: 120)
             await MainActor.run {
                 guard let self else { return }
                 self.oauthCallbackServer = nil

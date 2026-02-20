@@ -62,33 +62,51 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         continuation?.resume(returning: value)
     }
 
-    /// Prepare the callback server by binding/listening on localhost if needed.
-    /// Safe to call multiple times; returns true once the server is ready.
+    /// Bind/listen on localhost before the browser is opened so the socket is
+    /// ready to accept the OAuth redirect immediately.
+    ///
+    /// Sequence: `prepareForCallback()` → open browser → `waitForPreparedCallback()`.
+    /// This eliminates the startup race where the provider redirects before the
+    /// socket is listening. Safe to call multiple times — idempotent.
     @discardableResult
     public func prepareForCallback() -> Bool {
         startIfNeeded()
     }
 
-    /// Wait for OAuth callback.
-    /// - Parameters:
-    ///   - timeout: max seconds to wait before returning nil.
-    ///   - autoStart: when true (default), binds/listens before waiting.
-    ///                Set false if caller already called `prepareForCallback()`.
+    /// Wait for OAuth callback after `prepareForCallback()` has already bound the socket.
+    ///
+    /// Use this in the `prepareForCallback()` → open browser → `waitForPreparedCallback()`
+    /// sequence. Returns nil immediately if the server was not pre-started.
+    ///
+    /// - Parameter timeout: max seconds to wait before returning nil.
     /// - Returns: authorization code, or nil on timeout/cancellation/error.
-    public func waitForCallback(timeout: TimeInterval = 120, autoStart: Bool = true) async -> String? {
-        if autoStart {
-            guard startIfNeeded() else {
-                Logger.auth.error("Failed to start OAuth callback server")
-                return nil
-            }
-        } else {
-            let running = state.withLock { $0.isRunning }
-            guard running else {
-                Logger.auth.error("waitForCallback(autoStart: false) called before prepareForCallback()")
-                return nil
-            }
+    public func waitForPreparedCallback(timeout: TimeInterval = 120) async -> String? {
+        let running = state.withLock { $0.isRunning }
+        guard running else {
+            Logger.auth.error("waitForPreparedCallback() called before prepareForCallback()")
+            return nil
         }
+        return await acceptAndWait(timeout: timeout)
+    }
 
+    /// Wait for OAuth callback, binding/listening first if not already running.
+    ///
+    /// For flows where the server is started and the browser opened in a single
+    /// async context, prefer `prepareForCallback()` + `waitForPreparedCallback()`
+    /// to avoid the startup race.
+    ///
+    /// - Parameter timeout: max seconds to wait before returning nil.
+    /// - Returns: authorization code, or nil on timeout/cancellation/error.
+    public func waitForCallback(timeout: TimeInterval = 120) async -> String? {
+        guard startIfNeeded() else {
+            Logger.auth.error("Failed to start OAuth callback server")
+            return nil
+        }
+        return await acceptAndWait(timeout: timeout)
+    }
+
+    /// Shared wait body used by both public entry points.
+    private func acceptAndWait(timeout: TimeInterval) async -> String? {
         defer { stop() }
 
         return await withTaskCancellationHandler {

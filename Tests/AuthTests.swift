@@ -315,18 +315,20 @@ struct OAuthCallbackServerTests {
         let expectedCode = "auth-code-123"
         let server = OAuthCallbackServer(expectedState: expectedState, port: port)
 
-        // Deterministic startup: bind/listen before sending callback.
+        // Bind first so the socket is ready before the browser would open.
         #expect(server.prepareForCallback())
-        let waitTask = Task { await server.waitForCallback(timeout: 5.0, autoStart: false) }
 
-        let status = try await hitOAuthCallback(
+        // async let: both branches run concurrently. waitForCallback installs
+        // the CheckedContinuation before suspending, so the continuation is
+        // guaranteed to be in place before hitOAuthCallback resolves.
+        async let code = server.waitForPreparedCallback(timeout: 5.0)
+        async let status = hitOAuthCallback(
             port: port,
             query: "code=\(expectedCode)&state=\(expectedState)"
         )
 
-        let receivedCode = await waitTask.value
-
-        #expect(status == 200)
+        let (receivedCode, httpStatus) = try await (code, status)
+        #expect(httpStatus == 200)
         #expect(receivedCode == expectedCode)
     }
 
@@ -335,16 +337,15 @@ struct OAuthCallbackServerTests {
         let server = OAuthCallbackServer(expectedState: "expected", port: port)
 
         #expect(server.prepareForCallback())
-        let waitTask = Task { await server.waitForCallback(timeout: 5.0, autoStart: false) }
 
-        let status = try await hitOAuthCallback(
+        async let code = server.waitForPreparedCallback(timeout: 5.0)
+        async let status = hitOAuthCallback(
             port: port,
             query: "code=abc&state=wrong"
         )
 
-        let receivedCode = await waitTask.value
-
-        #expect(status == 400)
+        let (receivedCode, httpStatus) = try await (code, status)
+        #expect(httpStatus == 400)
         #expect(receivedCode == nil)
     }
 }
@@ -373,27 +374,26 @@ struct OAuthCallbackServerRegressionTests {
         #expect(elapsed < 2.0)
     }
 
-    @Test func testPrepareThenWaitAutoStartFalseImmediateCallback() async throws {
+    @Test func testPrepareThenWaitPreparedImmediateCallback() async throws {
         let port = randomOAuthTestPort()
         let server = OAuthCallbackServer(expectedState: "state", port: port)
         #expect(server.prepareForCallback())
 
-        let waitTask = Task { await server.waitForCallback(timeout: 5.0, autoStart: false) }
+        // async let: both branches run concurrently. waitForPreparedCallback
+        // installs the CheckedContinuation before suspending, so the continuation
+        // is in place before hitOAuthCallback resolves.
+        async let code = server.waitForPreparedCallback(timeout: 5.0)
+        async let status = hitOAuthCallback(port: port, query: "code=abc&state=state")
 
-        let status = try await hitOAuthCallback(
-            port: port,
-            query: "code=abc&state=state"
-        )
-
-        let result = await waitTask.value
-        #expect(status == 200)
-        #expect(result == "abc")
+        let (receivedCode, httpStatus) = try await (code, status)
+        #expect(httpStatus == 200)
+        #expect(receivedCode == "abc")
     }
 
-    @Test func testWaitAutoStartFalseWithoutPrepareReturnsNil() async {
+    @Test func testWaitForPreparedCallbackWithoutPrepareReturnsNil() async {
         let port = randomOAuthTestPort()
         let server = OAuthCallbackServer(expectedState: "state", port: port)
-        let result = await server.waitForCallback(timeout: 0.2, autoStart: false)
+        let result = await server.waitForPreparedCallback(timeout: 0.2)
         #expect(result == nil)
     }
 }

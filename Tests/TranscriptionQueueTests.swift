@@ -228,9 +228,13 @@ struct Issue17TextStreamOverwriteRegressionTests {
 @Suite("Issue #14 — RateLimiter cancellation propagation (additional)")
 struct Issue14CancellationTests {
 
-    /// A pre-cancelled task must throw CancellationError.
-    /// We cancel before the task body runs, so the nonisolated
-    /// checkCancellation() guard fires before actor scheduling begins.
+    /// A cancelled task must eventually throw CancellationError rather than
+    /// completing normally, regardless of when cancellation is observed.
+    ///
+    /// The 60 s interval ensures the task cannot complete naturally; if the
+    /// scheduler runs the task before observing cancellation it will hit the
+    /// cooperative `Task.checkCancellation()` inside `_reserveAndWait` during
+    /// the sleep, and throw there. Either way the result must be CancellationError.
     @Test func testPreCancelledTaskThrowsImmediately() async {
         let limiter = RateLimiter(minimumInterval: 60.0) // never completes naturally
 
@@ -241,11 +245,9 @@ struct Issue14CancellationTests {
 
         do {
             try await task.value
-            Issue.record("Expected CancellationError — pre-cancelled task must throw")
+            Issue.record("Expected CancellationError — cancelled task must not complete normally")
         } catch is CancellationError {
-            // Correct. No elapsed-time assertion: the scheduler can take
-            // arbitrarily long to run the task body; we only care that it
-            // throws CancellationError, not how quickly.
+            // Correct.
         } catch {
             Issue.record("Expected CancellationError, got \(error)")
         }
@@ -762,8 +764,9 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         let t1 = await queue.nextSequence()
 
         // Collect via a task that drives the AsyncStream.
-        // Each `await stream.next()` suspends until the queue yields a value,
-        // giving us a natural rendezvous: we submit, the consumer unblocks.
+        // Each `for await` suspends until the queue yields a value — natural
+        // rendezvous with no sleeps. The defer cancel ensures a dropped submit
+        // produces a clean timeout failure rather than an infinite hang.
         let collectTask = Task {
             var results: [String] = []
             for await text in stream {
@@ -772,6 +775,7 @@ struct TranscriptionQueueTextStreamLifecycleTests {
             }
             return results
         }
+        defer { collectTask.cancel() }
 
         // Submit first — the collect task will unblock and record it.
         await queue.submitResult(ticket: t0, text: "first")
