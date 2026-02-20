@@ -154,8 +154,9 @@ if [[ "$MODE" == "release" ]]; then
         ok "Git working tree clean"
     fi
 
-    # 1f. Tag exists on origin
-    if ! git ls-remote --tags origin "refs/tags/v${DISPLAY_VERSION}" | grep -q .; then
+    # 1f. Tag exists on origin (checked via gh API — no SSH needed)
+    if ! gh api "repos/{owner}/{repo}/git/refs/tags/v${DISPLAY_VERSION}" \
+            --silent &>/dev/null 2>&1; then
         warn "Tag v${DISPLAY_VERSION} not found on origin"
         confirm "Continue without tag on origin?"
     else
