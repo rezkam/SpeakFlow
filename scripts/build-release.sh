@@ -15,10 +15,30 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 APP_NAME="SpeakFlow"
-BUNDLE_ID="$SPEAKFLOW_BUNDLE_ID"
-SIGNING_IDENTITY="$SPEAKFLOW_SIGNING_IDENTITY"
-TEAM_ID="$SPEAKFLOW_TEAM_ID"
-NOTARY_PROFILE="$SPEAKFLOW_NOTARY_PROFILE"
+
+# ─── Identity — set these in your environment, never hardcode here ──
+#
+# Add to ~/.zprofile (or ~/.zshrc) so they persist across sessions:
+#
+#   export SPEAKFLOW_BUNDLE_ID="com.yourname.speakflow"
+#   export SPEAKFLOW_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+#   export SPEAKFLOW_TEAM_ID="YOURTEAMID"
+#   export SPEAKFLOW_NOTARY_PROFILE="your-keychain-profile-name"
+#
+# Create the notary profile once with:
+#   xcrun notarytool store-credentials "$SPEAKFLOW_NOTARY_PROFILE" \
+#     --apple-id YOUR_APPLE_ID \
+#     --team-id "$SPEAKFLOW_TEAM_ID" \
+#     --password APP_SPECIFIC_PASSWORD
+#
+# Generate an app-specific password at:
+#   https://appleid.apple.com/account/manage → Sign In → App-Specific Passwords → +
+# ────────────────────────────────────────────────────────────────────
+
+BUNDLE_ID="${SPEAKFLOW_BUNDLE_ID:?❌ SPEAKFLOW_BUNDLE_ID is not set. See comments above.}"
+SIGNING_IDENTITY="${SPEAKFLOW_SIGNING_IDENTITY:?❌ SPEAKFLOW_SIGNING_IDENTITY is not set. See comments above.}"
+TEAM_ID="${SPEAKFLOW_TEAM_ID:?❌ SPEAKFLOW_TEAM_ID is not set. See comments above.}"
+NOTARY_PROFILE="${SPEAKFLOW_NOTARY_PROFILE:?❌ SPEAKFLOW_NOTARY_PROFILE is not set. See comments above.}"
 
 cd "$PROJECT_DIR"
 
