@@ -1267,15 +1267,18 @@ struct SilenceAutoEndTests {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
         col.wire(c, simulateActive: true)
-        c.autoEndSilenceDuration = 0.15  // 150ms for fast test
+        // Use 300ms — large enough that the timer reliably fires before the
+        // poll deadline on any CI runner, small enough that the test is fast.
+        c.autoEndSilenceDuration = 0.3
 
         // Simulate: speech → utterance end → silence
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Poll until auto-end fires (tolerant of main-actor scheduling contention)
-        try await waitUntil { col.autoEndCount >= 1 }
+        // Poll with a generous timeout so the unstructured Task inside
+        // LiveStreamingController has time to be scheduled and run.
+        try await waitUntil(timeout: .seconds(5)) { col.autoEndCount >= 1 }
         #expect(col.autoEndCount == 1, "Auto-end should fire after silence duration")
     }
 
@@ -1322,7 +1325,7 @@ struct SilenceAutoEndTests {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
         col.wire(c, simulateActive: true)
-        c.autoEndSilenceDuration = 0.15
+        c.autoEndSilenceDuration = 0.3  // match testAutoEndFiresAfterSilence
 
         // Speech occurred, then utteranceEnd (not speechFinal)
         c.handleEvent(.speechStarted(timestamp: 0))
@@ -1330,8 +1333,7 @@ struct SilenceAutoEndTests {
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hi.", confidence: 0.99, words: [])))
         c.handleEvent(.utteranceEnd(lastWordEnd: 0))
 
-        // Poll until auto-end fires (tolerant of main-actor scheduling contention)
-        try await waitUntil { col.autoEndCount >= 1 }
+        try await waitUntil(timeout: .seconds(5)) { col.autoEndCount >= 1 }
         #expect(col.autoEndCount == 1, "utteranceEnd should also start the silence timer")
     }
 

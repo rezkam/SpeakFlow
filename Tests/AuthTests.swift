@@ -315,8 +315,11 @@ struct OAuthCallbackServerTests {
         let expectedCode = "auth-code-123"
         let server = OAuthCallbackServer(expectedState: expectedState, port: port)
 
-        let waitTask = Task { await server.waitForCallback(timeout: 2.0) }
-        try? await Task.sleep(for: .milliseconds(120))
+        // waitForCallback calls start() synchronously, binding the socket before
+        // suspending. We give the unstructured Task time to be scheduled and
+        // bind on any CI runner (macOS 26 can be slow to schedule tasks).
+        let waitTask = Task { await server.waitForCallback(timeout: 5.0) }
+        try? await Task.sleep(for: .milliseconds(500))
 
         let status = try await hitOAuthCallback(
             port: port,
@@ -333,8 +336,8 @@ struct OAuthCallbackServerTests {
         let port = randomOAuthTestPort()
         let server = OAuthCallbackServer(expectedState: "expected", port: port)
 
-        let waitTask = Task { await server.waitForCallback(timeout: 2.0) }
-        try? await Task.sleep(for: .milliseconds(120))
+        let waitTask = Task { await server.waitForCallback(timeout: 5.0) }
+        try? await Task.sleep(for: .milliseconds(500))
 
         let status = try await hitOAuthCallback(
             port: port,

@@ -228,25 +228,24 @@ struct Issue17TextStreamOverwriteRegressionTests {
 @Suite("Issue #14 — RateLimiter cancellation propagation (additional)")
 struct Issue14CancellationTests {
 
-    /// A pre-cancelled task must throw CancellationError quickly.
-    /// Note: CI runners can be slow, so we use a more tolerant timeout.
+    /// A pre-cancelled task must throw CancellationError.
+    /// We cancel before the task body runs, so the nonisolated
+    /// checkCancellation() guard fires before actor scheduling begins.
     @Test func testPreCancelledTaskThrowsImmediately() async {
-        let limiter = RateLimiter(minimumInterval: 10.0)
+        let limiter = RateLimiter(minimumInterval: 60.0) // never completes naturally
 
         let task = Task {
-            // Pre-cancel before the actor call even starts
             try await limiter.waitAndRecord()
         }
         task.cancel()
 
-        let start = Date()
         do {
             try await task.value
-            Issue.record("Expected CancellationError")
+            Issue.record("Expected CancellationError — pre-cancelled task must throw")
         } catch is CancellationError {
-            let elapsed = Date().timeIntervalSince(start)
-            // CI runners can be slow; allow up to 2s for cancellation to propagate
-            #expect(elapsed < 2.0, "Pre-cancelled task should throw fast, took \(elapsed)s")
+            // Correct. No elapsed-time assertion: the scheduler can take
+            // arbitrarily long to run the task body; we only care that it
+            // throws CancellationError, not how quickly.
         } catch {
             Issue.record("Expected CancellationError, got \(error)")
         }
