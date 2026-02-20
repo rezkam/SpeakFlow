@@ -36,28 +36,28 @@ struct RateLimiterTests {
     }
 
     @Test func testWaitAndRecordThrowsOnCancellation() async throws {
-        let interval = 1.0
+        // Test: a task that is cancelled BEFORE calling waitAndRecord must throw
+        // CancellationError immediately, without waiting for the rate limit interval.
+        //
+        // This is deterministic: we cancel the task before it starts, so there is
+        // no race between the sleep completing and the cancellation propagating.
+        let interval = 60.0  // so long that it would never complete naturally
         let limiter = RateLimiter(minimumInterval: interval)
-        try await limiter.waitAndRecord()
+        try await limiter.waitAndRecord()  // prime the limiter
 
+        // Create and immediately cancel the task before it runs.
         let task = Task {
             try await limiter.waitAndRecord()
         }
-
-        try? await Task.sleep(for: .milliseconds(80))
-        let cancelledAt = Date()
         task.cancel()
 
         do {
             try await task.value
-            Issue.record("Expected CancellationError")
+            Issue.record("Expected CancellationError — pre-cancelled task must throw")
         } catch is CancellationError {
-            let elapsed = Date().timeIntervalSince(cancelledAt)
-            // CI runners can be slow; allow up to 2s for cancellation to propagate
-            #expect(elapsed < 2.0)
+            // Correct: cancellation was detected before entering the sleep.
         } catch {
-            // On CI, the task may complete before cancellation propagates
-            // This is acceptable behavior for cooperative cancellation
+            Issue.record("Unexpected error type: \(error)")
         }
     }
 }

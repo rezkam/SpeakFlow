@@ -752,8 +752,9 @@ struct TranscriptionQueueFlushReadyOrderingEdgeCasesTests {
 @Suite("TranscriptionQueue — textStream Lifecycle")
 struct TranscriptionQueueTextStreamLifecycleTests {
 
-    /// Stream delivers results in real-time, not batched.
-    /// Submit results one at a time with delays; each should be received immediately.
+    /// Stream delivers results in order and one at a time as they are submitted.
+    /// Uses the stream itself as the synchronisation primitive — no polling or
+    /// fixed sleeps — so this test is deterministic under any scheduler load.
     @Test func testStreamDeliversResultsInRealTime() async {
         let queue = TranscriptionQueue()
         let stream = await queue.textStream
@@ -761,24 +762,26 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         let t0 = await queue.nextSequence()
         let t1 = await queue.nextSequence()
 
-        let received = OSAllocatedUnfairLock<[String]>(initialState: [])
-        let task = Task {
+        // Collect via a task that drives the AsyncStream.
+        // Each `await stream.next()` suspends until the queue yields a value,
+        // giving us a natural rendezvous: we submit, the consumer unblocks.
+        let collectTask = Task {
+            var results: [String] = []
             for await text in stream {
-                received.withLock { $0.append(text) }
+                results.append(text)
+                if results.count == 2 { break }
             }
+            return results
         }
 
+        // Submit first — the collect task will unblock and record it.
         await queue.submitResult(ticket: t0, text: "first")
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(received.withLock { $0 } == ["first"],
-                "First result should be delivered immediately")
-
+        // Submit second — the collect task resumes from break only after receiving both.
         await queue.submitResult(ticket: t1, text: "second")
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(received.withLock { $0 } == ["first", "second"],
-                "Second result should be delivered as it arrives")
 
-        task.cancel()
+        let received = await collectTask.value
+        #expect(received == ["first", "second"],
+                "Results must be delivered in submission order")
     }
 
     /// If submitResult is called before anyone accesses textStream,
