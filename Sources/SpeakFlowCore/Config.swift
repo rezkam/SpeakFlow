@@ -63,6 +63,51 @@ public enum Config {
     public static let vadMinSpeechDuration: Double = 0.25
     public static let autoEndSilenceDuration: Double = 5.0
     public static let autoEndMinSessionDuration: Double = 2.0
+
+    // MARK: - VAD Volume Gate (fixes false speech starts from non-vocal sounds)
+
+    /// Whether the volume gate is enabled by default.
+    ///
+    /// When true, a `speechStart` event from Silero is only forwarded if the
+    /// audio's smoothed RMS also exceeds `vadMinVolumeForSpeech`. This prevents
+    /// keyboard clicks, fan surges, and other non-vocal transients from blocking
+    /// auto-end or sending silent chunks to the transcription API.
+    ///
+    /// Can be disabled per user if they use a very quiet microphone or experience
+    /// legitimate speech being suppressed. See Settings.vadVolumeGateEnabled.
+    public static let vadVolumeGateEnabled: Bool = true
+
+    /// Minimum smoothed RMS amplitude (float32 range 0–1) for a speechStart
+    /// event to pass the volume gate.
+    ///
+    /// Empirical reference ranges (MacBook Pro mic at typical desk usage):
+    ///   - Silence (open mic, no sound):  RMS ≈ 0.0001 – 0.0005
+    ///   - Background fan / HVAC:         RMS ≈ 0.001  – 0.003
+    ///   - Keyboard typing (1m away):     RMS ≈ 0.002  – 0.005
+    ///   - Quiet speech (arm's length):   RMS ≈ 0.010  – 0.030
+    ///   - Normal speech (0.5m):          RMS ≈ 0.020  – 0.060
+    ///
+    /// 0.008 sits between keyboard noise (~0.005) and quiet speech (~0.010).
+    public static let vadMinVolumeForSpeech: Float = 0.008
+
+    /// Exponential smoothing factor applied to per-frame RMS before the volume gate.
+    ///
+    /// With factor 0.2, the current frame contributes 20% to the running estimate.
+    /// A single-frame spike decays to near-zero within 5–6 frames (~300ms at 50ms
+    /// frame stride). Only sustained loudness (speech) moves the value above the
+    /// threshold.
+    public static let vadVolumeSmoothingFactor: Float = 0.2
+
+    // MARK: - VAD State Reset (fixes probability drift in long sessions)
+
+    /// How often (seconds) the Silero RNN hidden state is reset during recording.
+    ///
+    /// Silero is an LSTM/GRU-based model whose hidden state accumulates context
+    /// from every frame. In sessions longer than ~5 minutes, this can cause
+    /// probability drift — the model adjusts to environmental noise and starts
+    /// classifying it as speech. Resetting every 5 seconds prevents this drift
+    /// with minimal context loss (~100–200ms per reset).
+    public static let vadStateResetInterval: Double = 5.0
     
     // MARK: - Chunk Safety Limits
     /// Hard multiplier for force-sending chunks during continuous speech.
@@ -125,6 +170,8 @@ public final class Settings {
         public static let skipSilentChunks = "settings.skipSilentChunks"
         public static let vadEnabled = "settings.vadEnabled"
         public static let vadThreshold = "settings.vadThreshold"
+        public static let vadVolumeGateEnabled = "settings.vad.volumeGateEnabled"
+        public static let vadMinVolumeForSpeech = "settings.vad.minVolumeForSpeech"
         public static let autoEndEnabled = "settings.autoEndEnabled"
         public static let autoEndSilenceDuration = "settings.autoEndSilenceDuration"
         public static let minSpeechRatio = "settings.minSpeechRatio"
@@ -208,6 +255,52 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.vadThreshold)
+        }
+    }
+
+    // MARK: - VAD Volume Gate Settings
+
+    /// Whether the volume gate is enabled.
+    ///
+    /// When enabled, a `speechStart` event from Silero is only forwarded when
+    /// the audio's smoothed RMS also exceeds `vadMinVolumeForSpeech`. This
+    /// prevents keyboard clicks, fan surges, and other non-vocal transients
+    /// from triggering false speech detection.
+    ///
+    /// Disable if you use a very quiet microphone and legitimate speech is
+    /// being suppressed. Default: true.
+    public var vadVolumeGateEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.vadVolumeGateEnabled) == nil {
+                return Config.vadVolumeGateEnabled
+            }
+            return defaults.bool(forKey: Keys.vadVolumeGateEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.vadVolumeGateEnabled)
+        }
+    }
+
+    /// Minimum smoothed RMS amplitude (0–1) for a speechStart to pass the volume gate.
+    ///
+    /// Lower this if soft speech is being suppressed (e.g. quiet environment,
+    /// distant microphone). Raise it if non-vocal noises keep triggering speech.
+    ///
+    /// Empirical ranges (MacBook Pro mic):
+    ///   - Keyboard noise: ~0.002–0.005
+    ///   - Quiet speech:   ~0.010–0.030
+    /// Default 0.008 sits between them. Range: 0.001–0.050 is sensible.
+    public var vadMinVolumeForSpeech: Float {
+        get {
+            if defaults.object(forKey: Keys.vadMinVolumeForSpeech) != nil {
+                let value = defaults.float(forKey: Keys.vadMinVolumeForSpeech)
+                return value > 0 ? value : Config.vadMinVolumeForSpeech
+            }
+            return Config.vadMinVolumeForSpeech
+        }
+        set {
+            // Clamp to a sane range to prevent accidentally zeroing out the gate
+            defaults.set(max(0.0001, min(0.1, newValue)), forKey: Keys.vadMinVolumeForSpeech)
         }
     }
 

@@ -42,6 +42,11 @@ public protocol MistralSettingsProviding: AnyObject {
 public protocol VADSettingsProviding: AnyObject {
     var vadEnabled: Bool { get set }
     var vadThreshold: Float { get set }
+    /// Whether the volume gate is active. When true, speechStart events are
+    /// suppressed if the audio's smoothed RMS is below vadMinVolumeForSpeech.
+    var vadVolumeGateEnabled: Bool { get set }
+    /// Minimum smoothed RMS (0–1) required to pass the volume gate.
+    var vadMinVolumeForSpeech: Float { get set }
     var autoEndEnabled: Bool { get set }
     var autoEndSilenceDuration: Double { get set }
     var minSpeechRatio: Float { get set }

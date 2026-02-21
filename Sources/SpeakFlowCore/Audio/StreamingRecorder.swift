@@ -60,22 +60,22 @@ private final class AudioRecordingState: Sendable {
 /// Thread-safe queue for passing audio samples from callback to main actor
 private final class AudioSampleQueue: @unchecked Sendable {
     private struct QueueState {
-        var samples: [(frames: [Float], hasSpeech: Bool)] = []
+        var samples: [[Float]] = []
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: QueueState())
     private let maxQueueSize = 100
 
-    func enqueue(frames: [Float], hasSpeech: Bool) {
+    func enqueue(frames: [Float]) {
         lock.withLock { state in
             if state.samples.count >= maxQueueSize {
                 state.samples.removeFirst()
             }
-            state.samples.append((frames: frames, hasSpeech: hasSpeech))
+            state.samples.append(frames)
         }
     }
 
-    func dequeueAll() -> [(frames: [Float], hasSpeech: Bool)] {
+    func dequeueAll() -> [[Float]] {
         lock.withLockUnchecked { state in
             let result = state.samples
             state.samples.removeAll()
@@ -141,13 +141,12 @@ private func installAudioTap(
             var rms: Float = 0
             vDSP_rmsqv(channelData, 1, &rms, vDSP_Length(frames))
 
-            let hasSpeech = rms > silenceThreshold
-            if hasSpeech {
+            if rms > silenceThreshold {
                 recordingState.updateLastSoundTime()
             }
 
             let frameArray = Array(UnsafeBufferPointer(start: channelData, count: frames))
-            sampleQueue.enqueue(frames: frameArray, hasSpeech: hasSpeech)
+            sampleQueue.enqueue(frames: frameArray)
         }
     }
 }
@@ -191,6 +190,19 @@ public final class StreamingRecorder {
 
     public init(settings: any SettingsProviding = Settings.shared) {
         self.settings = settings
+    }
+
+    /// Update the transcript text used for thinking-pause detection.
+    ///
+    /// When the user pauses mid-sentence, `SessionController` checks whether the
+    /// current transcript ends with an incomplete linguistic pattern (trailing
+    /// conjunction, preposition, filler word, etc.). If so, it extends the
+    /// silence threshold before auto-end fires.
+    ///
+    /// Call this from `RecordingController` whenever new transcription text arrives.
+    /// The text should be the cumulative transcript for the current recording session.
+    public func updateTranscript(_ text: String) async {
+        await sessionController?.set(lastTranscript: text)
     }
 
     /// Cancel recording without emitting final chunk
@@ -303,17 +315,53 @@ public final class StreamingRecorder {
     private func processQueuedSamples() async {
         guard state.getRecording() else { return }
 
-        let samples = sampleQueue.dequeueAll()
-        guard !samples.isEmpty else { return }
+        let batches = sampleQueue.dequeueAll()
+        guard !batches.isEmpty else { return }
 
-        Logger.audio.debug("Processing \(samples.count) queued sample batches")
-        
-        for sample in samples {
-            await audioBuffer?.append(frames: sample.frames, hasSpeech: sample.hasSpeech)
+        Logger.audio.debug("Processing \(batches.count) queued sample batches")
 
-            if state.getVADActive() {
-                await processWithVAD(samples: sample.frames)
-            }
+        // ── Accumulate sub-batches before any actor work ───────────────────────────
+        //
+        // Merge all sub-batches into one contiguous array for efficient batch
+        // processing. The `reserveCapacity` avoids Array growth reallocations.
+        var accumulated: [Float] = []
+        accumulated.reserveCapacity(batches.reduce(0) { $0 + $1.count })
+        for batch in batches {
+            accumulated.append(contentsOf: batch)
+        }
+
+        // Single actor hop into AudioBuffer
+        await audioBuffer?.append(frames: accumulated)
+
+        // ── VAD inference in model-sized chunks ───────────────────────────────────
+        //
+        // Silero's model processes at most 4096 samples (256ms at 16kHz) per call.
+        // FluidAudio's `processChunk` truncates any input larger than 4096 samples
+        // using `prefix(Self.chunkSize)`, discarding excess audio.
+        //
+        // Under normal conditions (50ms timer, ~1000 samples/tick), this is fine.
+        // But if the main actor stalls (UI-heavy work, system load), the queue can
+        // accumulate many batches before processing, exceeding 4096 samples.
+        //
+        // If we pass >4096 samples to VAD:
+        //   - The model only sees the first 4096 samples
+        //   - Probability is computed for those samples only
+        //   - processedSamples advances by the FULL chunk size
+        //   - Event timestamps become misaligned
+        //   - Speech in samples 4097+ is invisible to VAD
+        //
+        // SOLUTION: Split accumulated samples into 4096-sample chunks and process
+        // each chunk through VAD sequentially. This ensures every sample gets
+        // evaluated while still amortizing actor hop overhead.
+        guard state.getVADActive() else { return }
+
+        let maxChunkSize = 4096
+        var offset = 0
+        while offset < accumulated.count {
+            let end = min(offset + maxChunkSize, accumulated.count)
+            let chunk = Array(accumulated[offset..<end])
+            await processWithVAD(samples: chunk)
+            offset = end
         }
     }
 
@@ -335,7 +383,18 @@ public final class StreamingRecorder {
                 threshold: settings.vadThreshold,
                 minSilenceAfterSpeech: Config.vadMinSilenceAfterSpeech,
                 minSpeechDuration: Config.vadMinSpeechDuration,
-                enabled: true
+                enabled: true,
+                // Volume gate: suppress speechStart events that lack sufficient
+                // audio loudness (prevents keyboard/fan noise from triggering speech).
+                // Users can tune minVolumeForSpeech or disable the gate in Settings.
+                volumeGateEnabled: settings.vadVolumeGateEnabled,
+                minVolumeForSpeech: settings.vadMinVolumeForSpeech,
+                // Smoothing factor and state-reset interval use hardcoded defaults
+                // (0.2 and 5.0s respectively) — these are not user-configurable
+                // because they are internal signal-processing parameters that
+                // non-expert users should not need to touch.
+                volumeSmoothingFactor: Config.vadVolumeSmoothingFactor,
+                stateResetInterval: Config.vadStateResetInterval
             )
 
             let autoEndConfig = AutoEndConfiguration(
@@ -358,7 +417,7 @@ public final class StreamingRecorder {
             state.setVADActive(true)
             Logger.audio.info("VAD enabled on \(PlatformSupport.platformDescription)")
             // swiftlint:disable:next line_length
-            Logger.audio.warning("VAD CONFIG: vadThreshold=\(settings.vadThreshold, privacy: .public) minSilence=\(Config.vadMinSilenceAfterSpeech, privacy: .public) autoEnd=\(settings.autoEndEnabled, privacy: .public) silenceDur=\(settings.autoEndSilenceDuration, privacy: .public) minSession=\(Config.autoEndMinSessionDuration, privacy: .public) maxChunk=\(settings.maxChunkDuration, privacy: .public) chunkDur=\(settings.chunkDuration.rawValue, privacy: .public) skipSilent=\(settings.skipSilentChunks, privacy: .public)")
+            Logger.audio.warning("VAD CONFIG: vadThreshold=\(settings.vadThreshold, privacy: .public) minSilence=\(Config.vadMinSilenceAfterSpeech, privacy: .public) volumeGate=\(settings.vadVolumeGateEnabled, privacy: .public) minVol=\(settings.vadMinVolumeForSpeech, privacy: .public) stateReset=\(Config.vadStateResetInterval, privacy: .public)s autoEnd=\(settings.autoEndEnabled, privacy: .public) silenceDur=\(settings.autoEndSilenceDuration, privacy: .public) minSession=\(Config.autoEndMinSessionDuration, privacy: .public) maxChunk=\(settings.maxChunkDuration, privacy: .public) chunkDur=\(settings.chunkDuration.rawValue, privacy: .public) skipSilent=\(settings.skipSilentChunks, privacy: .public)")
         } catch {
             Logger.audio.warning("VAD initialization failed: \(error.localizedDescription). Using fallback mode.")
             vadProcessor = nil
@@ -391,6 +450,40 @@ public final class StreamingRecorder {
 
             if let event = result.event {
                 await session.onSpeechEvent(event)
+
+                // ── Early chunk emission on speechEnd ─────────────────────────────
+                //
+                // WHY: In batch mode, chunks are only emitted when buffer duration
+                // exceeds maxChunkDuration (default 60s). But auto-end evaluates
+                // every 0.5s with ~5s silence thresholds, and thinking-pause uses
+                // `lastTranscript` to detect incomplete sentences.
+                //
+                // For a typical short dictation (e.g. 10s), auto-end fires at ~7s
+                // (5s silence after 2s speech), but the chunk wouldn't emit until 60s.
+                // Result: lastTranscript is always empty → thinking-pause never
+                // engages → mid-thought utterances get cut off.
+                //
+                // SOLUTION: When speechEnd fires, emit the current buffer as a chunk
+                // immediately. This triggers transcription within ~1-2s, well before
+                // auto-end evaluates. The transcript then populates lastTranscript,
+                // enabling thinking-pause to extend the silence threshold.
+                //
+                // Only emit on speechEnd (not speechStart) to avoid fragmenting
+                // chunks mid-utterance. The isFullRecording guard prevents this from
+                // changing behavior in "full recording" mode.
+                if case .ended = event {
+                    let isFullRecording = self.settings.chunkDuration.isFullRecording
+                    if !isFullRecording, await session.hasSpoken {
+                        let duration = await audioBuffer?.duration ?? 0
+                        if duration >= self.settings.minChunkDuration {
+                            Logger.audio.info("⚡ EARLY CHUNK on speechEnd: duration=\(String(format: "%.1f", duration), privacy: .public)s (feeding transcript for thinking-pause)")
+                            let sent = await sendChunkIfReady(reason: "speechEnd: early emit for transcript")
+                            if sent {
+                                await session.chunkSent()
+                            }
+                        }
+                    }
+                }
             }
         } catch {
             Logger.audio.error("VAD processing error: \(error.localizedDescription)")
@@ -410,7 +503,11 @@ public final class StreamingRecorder {
                 lastHeartbeatLog = now
                 let summary = await session.diagnosticSummary
                 let vadProb = await vadProcessor?.averageSpeechProbability ?? 0
-                Logger.audio.debug("💓 HEARTBEAT: \(summary, privacy: .public) vadProb=\(String(format: "%.2f", vadProb), privacy: .public)")
+                let smoothedVol = await vadProcessor?.currentSmoothedVolume ?? 0
+                // smoothedVol shows the volume-gate signal in real time — useful for
+                // tuning vadMinVolumeForSpeech: if legitimate speech is being
+                // suppressed, check whether smoothedVol stays below 0.008 during speech.
+                Logger.audio.debug("💓 HEARTBEAT: \(summary, privacy: .public) vadProb=\(String(format: "%.2f", vadProb), privacy: .public) smoothedVol=\(String(format: "%.4f", smoothedVol), privacy: .public)")
             }
         }
 
@@ -526,8 +623,8 @@ public final class StreamingRecorder {
         }
 
         // ── Drain buffer and send ──────────────────────────────────────
-        let result = await buffer.takeAll()
-        let duration = Double(result.samples.count) / sampleRate
+        let samples = await buffer.takeAll()
+        let duration = Double(samples.count) / sampleRate
 
         // Reset VAD chunk accumulator after draining (only when we commit to sending)
         if vadActive {
@@ -538,7 +635,7 @@ public final class StreamingRecorder {
         let speechPct = String(format: "%.0f", speechProbability * 100)
         Logger.audio.info("Chunk ready (\(reason)): \(durationStr)s, \(speechPct)% speech")
 
-        let wavData = createWav(from: result.samples)
+        let wavData = createWav(from: samples)
         let chunk = AudioChunk(wavData: wavData, durationSeconds: duration, speechProbability: speechProbability)
 
         onChunkReady?(chunk)
@@ -572,14 +669,14 @@ public final class StreamingRecorder {
                 Logger.audio.debug("Flushing \(pendingSamples.count) pending sample batches on stop")
             }
             for sample in pendingSamples {
-                await buffer.append(frames: sample.frames, hasSpeech: sample.hasSpeech)
+                await buffer.append(frames: sample)
                 if hadVADActive {
-                    await self.processWithVAD(samples: sample.frames)
+                    await self.processWithVAD(samples: sample)
                 }
             }
 
-            let result = await buffer.takeAll()
-            let duration = Double(result.samples.count) / self.sampleRate
+            let finalSamples = await buffer.takeAll()
+            let duration = Double(finalSamples.count) / self.sampleRate
 
             guard !wasCancelled else {
                 Logger.audio.info("Recording cancelled, discarding \(String(format: "%.1f", duration))s of audio")
@@ -618,7 +715,7 @@ public final class StreamingRecorder {
 
             if shouldSend {
                 Logger.audio.info("Final chunk: \(String(format: "%.1f", duration))s, speech=\(String(format: "%.0f", speechProbability * 100))%")
-                let wavData = self.createWav(from: result.samples)
+                let wavData = self.createWav(from: finalSamples)
                 let chunk = AudioChunk(wavData: wavData, durationSeconds: duration, speechProbability: speechProbability)
                 await MainActor.run {
                     self.onChunkReady?(chunk)
@@ -633,26 +730,93 @@ public final class StreamingRecorder {
         }
     }
 
+    /// Encode PCM Float32 samples as a WAV file.
+    ///
+    /// ## Performance
+    ///
+    /// Previous implementation:
+    ///   `samples.map { Int16(...) }` → intermediate `[Int16]` heap array  (~938 KB for 30s)
+    ///   `int16.forEach { wav.append(withUnsafeBytes(of: $0.littleEndian) { Data($0) }) }`
+    ///   → 480,000 individual `Data($0)` heap allocations per 30-second chunk
+    ///
+    /// This implementation:
+    ///   1 `[Float]` scratch buffer (for in-place clip + scale)
+    ///   1 `Data(count: totalBytes)` pre-allocation for the output
+    ///   `vDSP_vclip` + `vDSP_vsmul` + `vDSP_vfix16`: vectorised SIMD clamp → scale → truncate
+    ///   `withUnsafeMutableBytes` storeBytes for header fields — direct pointer writes
+    ///
+    /// Allocation budget: 2 heap objects (down from ~480K + 1 intermediate [Int16])
+    ///
+    /// ## Why vDSP_vclip + vDSP_vsmul + vDSP_vfix16 and not vDSP_vfixr16?
+    ///
+    /// `vDSP_vfixr16` converts float to Int16 by **rounding** without pre-scaling,
+    /// which collapses the full [-1, 1] float range to just {-1, 0, 1} — completely wrong.
+    /// The correct 3-step pipeline:
+    ///   1. `vDSP_vclip`: clamp to [-1, 1]       — identical to `max(-1, min(1, x))`
+    ///   2. `vDSP_vsmul`: multiply by 32767.0     — scale to Int16 range
+    ///   3. `vDSP_vfix16`: truncate to Int16      — identical to Swift's `Int16(Float)`
+    /// This produces bit-for-bit identical output to the original scalar loop.
     private func createWav(from samples: [Float]) -> Data {
         guard !samples.isEmpty else { return Data() }
 
-        let int16 = samples.map { Int16(max(-1, min(1, $0)) * 32767) }
-        var wav = Data()
-        let sr = UInt32(sampleRate)
-        let sz = UInt32(int16.count * 2)
-        wav.append(contentsOf: "RIFF".utf8)
-        wav.append(withUnsafeBytes(of: (36 + sz).littleEndian) { Data($0) })
-        wav.append(contentsOf: "WAVEfmt ".utf8)
-        wav.append(withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })
-        wav.append(withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
-        wav.append(withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
-        wav.append(withUnsafeBytes(of: sr.littleEndian) { Data($0) })
-        wav.append(withUnsafeBytes(of: (sr * 2).littleEndian) { Data($0) })
-        wav.append(withUnsafeBytes(of: UInt16(2).littleEndian) { Data($0) })
-        wav.append(withUnsafeBytes(of: UInt16(16).littleEndian) { Data($0) })
-        wav.append(contentsOf: "data".utf8)
-        wav.append(withUnsafeBytes(of: sz.littleEndian) { Data($0) })
-        int16.forEach { wav.append(withUnsafeBytes(of: $0.littleEndian) { Data($0) }) }
+        let sampleCount = samples.count
+        let n           = vDSP_Length(sampleCount)
+        let dataBytes   = sampleCount * MemoryLayout<Int16>.stride   // 2 bytes per sample
+        let totalBytes  = 44 + dataBytes                              // WAV header is exactly 44 bytes
+
+        // Scratch buffer for in-place clip + scale (avoids mutating the immutable `samples` param)
+        var scratch = [Float](unsafeUninitializedCapacity: sampleCount) { buf, count in
+            samples.withUnsafeBufferPointer { src in
+                buf.baseAddress!.initialize(from: src.baseAddress!, count: sampleCount)
+            }
+            count = sampleCount
+        }
+
+        // Step 1: clip to [-1, 1] (in-place)
+        var low: Float  = -1.0
+        var high: Float =  1.0
+        vDSP_vclip(scratch, 1, &low, &high, &scratch, 1, n)
+
+        // Step 2: scale by 32767 (in-place)
+        var scale: Float = 32767.0
+        vDSP_vsmul(scratch, 1, &scale, &scratch, 1, n)
+
+        // Single pre-allocated output — avoids the 480K per-sample Data allocs of the old forEach loop.
+        var wav = Data(count: totalBytes)
+
+        wav.withUnsafeMutableBytes { raw in
+            let b = raw.baseAddress!
+
+            // ── RIFF chunk descriptor ──────────────────────────────────────
+            b.storeBytes(of: 0x46464952 as UInt32, as: UInt32.self)                        // "RIFF"
+            (b + 4).storeBytes(of: UInt32(36 + dataBytes).littleEndian, as: UInt32.self)   // chunk size
+            (b + 8).storeBytes(of: 0x45564157 as UInt32, as: UInt32.self)                  // "WAVE"
+
+            // ── fmt  sub-chunk (16 bytes) ─────────────────────────────────
+            (b + 12).storeBytes(of: 0x20746D66 as UInt32, as: UInt32.self)                 // "fmt "
+            (b + 16).storeBytes(of: UInt32(16).littleEndian, as: UInt32.self)              // sub-chunk size
+            (b + 20).storeBytes(of: UInt16(1).littleEndian,  as: UInt16.self)              // PCM = 1
+            (b + 22).storeBytes(of: UInt16(1).littleEndian,  as: UInt16.self)              // mono
+            let sr = UInt32(sampleRate)
+            (b + 24).storeBytes(of: sr.littleEndian,           as: UInt32.self)            // sample rate
+            (b + 28).storeBytes(of: (sr * 2).littleEndian,     as: UInt32.self)            // byte rate
+            (b + 32).storeBytes(of: UInt16(2).littleEndian,    as: UInt16.self)            // block align
+            (b + 34).storeBytes(of: UInt16(16).littleEndian,   as: UInt16.self)            // bits/sample
+
+            // ── data sub-chunk header ─────────────────────────────────────
+            (b + 36).storeBytes(of: 0x61746164 as UInt32, as: UInt32.self)                 // "data"
+            (b + 40).storeBytes(of: UInt32(dataBytes).littleEndian, as: UInt32.self)       // data size
+
+            // ── Step 3: truncate scaled floats to Int16 ───────────────────
+            //
+            // vDSP_vfix16 truncates (matches Swift's `Int16(Float)` truncation semantics),
+            // producing bit-for-bit identical output to the original scalar loop.
+            // The destination pointer is bound directly into the pre-allocated wav buffer,
+            // writing all Int16 samples in a single SIMD pass — zero per-sample overhead.
+            let dst = (b + 44).bindMemory(to: Int16.self, capacity: sampleCount)
+            vDSP_vfix16(scratch, 1, dst, 1, n)
+        }
+
         return wav
     }
 
@@ -693,13 +857,13 @@ public final class StreamingRecorder {
                 
                 var rms: Float = 0
                 vDSP_rmsqv(frames, 1, &rms, vDSP_Length(frames.count))
-                let hasSpeech = rms > Config.silenceThreshold
-                
-                if hasSpeech {
+                // RMS drives non-VAD fallback silence detection (lastSoundTime).
+                // VADProcessor's Silero probability is authoritative for speech.
+                if rms > Config.silenceThreshold {
                     state.updateLastSoundTime()
                 }
-                
-                sampleQueue.enqueue(frames: frames, hasSpeech: hasSpeech)
+
+                sampleQueue.enqueue(frames: frames)
                 
                 offset = end
                 try? await Task.sleep(for: .milliseconds(50))
@@ -745,9 +909,24 @@ extension StreamingRecorder {
         await periodicCheck()
     }
 
+    func _testInvokeProcessQueuedSamples() async {
+        await processQueuedSamples()
+    }
+
     func _testAudioBufferDuration() async -> Double {
         guard let buffer = audioBuffer else { return 0 }
         return await buffer.duration
+    }
+
+    /// Enqueue a sample batch directly into the internal AudioSampleQueue.
+    /// Used by tests to bypass the audio tap and inject controlled sample data.
+    func _testEnqueueSamples(_ frames: [Float]) {
+        sampleQueue.enqueue(frames: frames)
+    }
+
+    /// Expose createWav for correctness tests.
+    func _testCreateWav(from samples: [Float]) -> Data {
+        createWav(from: samples)
     }
 
     var _testHasProcessingTimer: Bool { processingTimer != nil }

@@ -8,36 +8,39 @@ import Testing
 
 @Suite("AudioBuffer Tests")
 struct AudioBufferTests {
+    /// takeAll() drains the buffer and returns all samples as a plain [Float].
+    /// Since speechRatio was removed (it was dead code — VADProcessor is authoritative),
+    /// there's only one thing to verify: sample count and that the buffer is emptied.
     @Test func testTakeAllDrainsBuffer() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         let frames = [Float](repeating: 0.5, count: 16000) // 1s of audio
-        await buffer.append(frames: frames, hasSpeech: true)
+        await buffer.append(frames: frames)
 
         let duration = await buffer.duration
         #expect(duration > 0.9 && duration < 1.1)
 
         let result = await buffer.takeAll()
-        #expect(result.samples.count == 16000)
-        #expect(result.speechRatio > 0.9)
+        #expect(result.count == 16000, "takeAll must return all 16000 samples")
 
         let afterDuration = await buffer.duration
-        #expect(afterDuration == 0)
+        #expect(afterDuration == 0, "Buffer must be empty after takeAll")
     }
 
-    @Test func testSpeechRatioAvailableWithoutDrain() async {
+    /// Verify that duration is non-destructive (buffer not drained when reading duration).
+    @Test func testDurationIsNonDestructive() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         let speechFrames = [Float](repeating: 0.5, count: 8000)
         let silentFrames = [Float](repeating: 0.001, count: 8000)
-        await buffer.append(frames: speechFrames, hasSpeech: true)
-        await buffer.append(frames: silentFrames, hasSpeech: false)
+        await buffer.append(frames: speechFrames)
+        await buffer.append(frames: silentFrames)
 
-        // speechRatio is accessible without takeAll
-        let ratio = await buffer.speechRatio
-        #expect(ratio > 0.4 && ratio < 0.6, "Expected ~0.5, got \(ratio)")
+        // Reading duration must not drain the buffer
+        let duration = await buffer.duration
+        #expect(abs(duration - 1.0) < 0.001, "Expected 1.0s, got \(duration)")
 
         // Buffer is still intact
-        let duration = await buffer.duration
-        #expect(duration == 1.0, "Buffer should not be drained by reading speechRatio")
+        let durationAgain = await buffer.duration
+        #expect(durationAgain == duration, "Buffer should not be drained by reading duration")
     }
 }
 
@@ -75,11 +78,11 @@ struct ChunkSkipBehavioralRegressionTests {
 
         if speechFrames > 0 {
             let speech = [Float](repeating: 0.5, count: speechFrames)
-            await buffer.append(frames: speech, hasSpeech: true)
+            await buffer.append(frames: speech)
         }
         if silentFrames > 0 {
             let silence = [Float](repeating: 0.001, count: silentFrames)
-            await buffer.append(frames: silence, hasSpeech: false)
+            await buffer.append(frames: silence)
         }
 
         return buffer
@@ -209,8 +212,8 @@ struct ChunkSkipBehavioralRegressionTests {
 
         // --- Chunk 1: 15s with 27% speech probability (below 0.30 threshold) ---
         let buffer1 = AudioBuffer(sampleRate: sampleRate)
-        await buffer1.append(frames: [Float](repeating: 0.5, count: Int(8.0 * sampleRate)), hasSpeech: true)
-        await buffer1.append(frames: [Float](repeating: 0.001, count: Int(7.0 * sampleRate)), hasSpeech: false)
+        await buffer1.append(frames: [Float](repeating: 0.5, count: Int(8.0 * sampleRate)))
+        await buffer1.append(frames: [Float](repeating: 0.001, count: Int(7.0 * sampleRate)))
 
         let vad1 = VADProcessor(config: .default)
         await vad1._testSeedAverageSpeechProbability(0.27, chunks: 10) // Below threshold
@@ -224,8 +227,8 @@ struct ChunkSkipBehavioralRegressionTests {
 
         // --- Chunk 2: new 15s buffer, also below threshold ---
         let buffer2 = AudioBuffer(sampleRate: sampleRate)
-        await buffer2.append(frames: [Float](repeating: 0.5, count: Int(6.0 * sampleRate)), hasSpeech: true)
-        await buffer2.append(frames: [Float](repeating: 0.001, count: Int(9.0 * sampleRate)), hasSpeech: false)
+        await buffer2.append(frames: [Float](repeating: 0.5, count: Int(6.0 * sampleRate)))
+        await buffer2.append(frames: [Float](repeating: 0.001, count: Int(9.0 * sampleRate)))
 
         let vad2 = VADProcessor(config: .default)
         await vad2._testSeedAverageSpeechProbability(0.22, chunks: 10) // Even lower!
@@ -275,7 +278,7 @@ struct ChunkSkipBehavioralRegressionTests {
     /// Chunk too short → returns false immediately, no drain, no skip check.
     @Test func testShortBufferReturnsEarlyWithoutDrain() async {
         let buffer = AudioBuffer(sampleRate: 16000)
-        await buffer.append(frames: [Float](repeating: 0.5, count: 80_000), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 80_000))
 
         let noSession: SessionController? = nil
         let noVAD: VADProcessor? = nil
@@ -293,8 +296,7 @@ struct ChunkSkipBehavioralRegressionTests {
         let buffer = AudioBuffer(sampleRate: 16000)
         // 15s of pure silence → speechRatio = 0.0
         await buffer.append(
-            frames: [Float](repeating: 0.001, count: Int(15.0 * 16000)),
-            hasSpeech: false
+            frames: [Float](repeating: 0.001, count: Int(15.0 * 16000))
         )
 
         let noSession: SessionController? = nil
@@ -441,7 +443,7 @@ struct StreamingRecorderWAVFormatAndAudioChunkTests {
 
         // 15s of audio with speech
         let samples = [Float](repeating: 0.5, count: 240_000)
-        await buffer.append(frames: samples, hasSpeech: true)
+        await buffer.append(frames: samples)
 
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
@@ -498,7 +500,7 @@ struct StreamingRecorderWAVFormatAndAudioChunkTests {
 
         let expectedSamples = 240_000  // 15s at 16kHz
         let samples = [Float](repeating: 0.5, count: expectedSamples)
-        await buffer.append(frames: samples, hasSpeech: true)
+        await buffer.append(frames: samples)
 
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
@@ -608,7 +610,7 @@ struct StreamingRecorderStartAndMockTests {
         let dur0 = await recorder._testAudioBufferDuration()
         #expect(dur0 == 0)
 
-        await buffer.append(frames: [Float](repeating: 0.5, count: 16000), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 16000))
         let dur1 = await recorder._testAudioBufferDuration()
         #expect(dur1 > 0.9 && dur1 < 1.1, "1s of 16kHz audio = ~1.0s duration")
     }
@@ -633,7 +635,7 @@ struct StreamingRecorderStopCancelTests {
     @Test @MainActor func testCancelSuppressesFinalChunk() async {
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
-        await buffer.append(frames: [Float](repeating: 0.5, count: 240_000), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 240_000))
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
 
@@ -653,7 +655,7 @@ struct StreamingRecorderStopCancelTests {
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
         // 1s of audio (above minRecordingDurationMs=250ms)
-        await buffer.append(frames: [Float](repeating: 0.3, count: 16000), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.3, count: 16000))
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
 
@@ -688,7 +690,7 @@ struct StreamingRecorderStopCancelTests {
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
         // 100ms of audio — too short
-        await buffer.append(frames: [Float](repeating: 0.5, count: 1600), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 1600))
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
 
@@ -770,36 +772,36 @@ struct IntegrationRecorderToQueueTests {
         #expect(values.contains("hello world"), "textStream must emit flushed results")
     }
 
-    /// Buffer stores samples → takeAll returns them correctly.
+    /// Buffer stores samples → takeAll returns them correctly as a plain [Float].
+    /// Note: speechRatio was removed — VADProcessor is the authoritative speech signal.
     @Test func testAudioBufferRoundTrip() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         let original = (0..<16000).map { Float(sin(Double($0) * 2.0 * .pi * 440.0 / 16000.0)) }
-        await buffer.append(frames: original, hasSpeech: true)
+        await buffer.append(frames: original)
 
         let result = await buffer.takeAll()
-        #expect(result.samples.count == 16000, "All samples must be returned")
-        #expect(result.speechRatio == 1.0, "All frames had speech")
+        #expect(result.count == 16000, "All samples must be returned")
 
         // Buffer should be empty after takeAll
         let second = await buffer.takeAll()
-        #expect(second.samples.isEmpty, "Buffer must be empty after takeAll")
+        #expect(second.isEmpty, "Buffer must be empty after takeAll")
     }
 
-    /// Speech ratio calculated correctly with mixed speech/silence.
-    @Test func testAudioBufferSpeechRatioCalculation() async {
+    /// Duration tracks total accumulated sample count regardless of content.
+    @Test func testAudioBufferDurationTracksAllSamples() async {
         let buffer = AudioBuffer(sampleRate: 16000)
-        // 50% speech, 50% silence
-        await buffer.append(frames: [Float](repeating: 0.5, count: 8000), hasSpeech: true)
-        await buffer.append(frames: [Float](repeating: 0.001, count: 8000), hasSpeech: false)
+        // Append 8000 "loud" and 8000 "quiet" samples (1s total)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 8000))
+        await buffer.append(frames: [Float](repeating: 0.001, count: 8000))
 
-        let ratio = await buffer.speechRatio
-        #expect(ratio == 0.5, "50/50 speech ratio must be exactly 0.5")
+        let duration = await buffer.duration
+        #expect(abs(duration - 1.0) < 0.001, "Duration must reflect all 16000 samples at 16kHz")
     }
 
     /// Duration calculated correctly from sample count and sample rate.
     @Test func testAudioBufferDurationCalculation() async {
         let buffer = AudioBuffer(sampleRate: 16000)
-        await buffer.append(frames: [Float](repeating: 0.0, count: 48000), hasSpeech: false)
+        await buffer.append(frames: [Float](repeating: 0.0, count: 48000))
         let duration = await buffer.duration
         #expect(abs(duration - 3.0) < 0.001, "48000 samples at 16kHz = 3.0s")
     }
@@ -839,7 +841,7 @@ struct IntegrationRecorderToQueueTests {
             chunkData = c.wavData
         }
 
-        await buffer.append(frames: [Float](repeating: 0.5, count: 240_000), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 240_000))
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
 
@@ -907,10 +909,10 @@ struct IntegrationRecorderToQueueTests {
                 "Failed chunk must be skipped, subsequent chunks must flush in order")
     }
 
-    /// AudioBuffer reset clears all state.
+    /// AudioBuffer reset clears all samples.
     @Test func testAudioBufferReset() async {
         let buffer = AudioBuffer(sampleRate: 16000)
-        await buffer.append(frames: [Float](repeating: 0.5, count: 16000), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 16000))
 
         let durBefore = await buffer.duration
         #expect(durBefore > 0.9)
@@ -918,8 +920,9 @@ struct IntegrationRecorderToQueueTests {
         await buffer.reset()
         let durAfter = await buffer.duration
         #expect(durAfter == 0, "Reset must clear all samples")
-        let ratio = await buffer.speechRatio
-        #expect(ratio == 0, "Reset must clear speech ratio")
+        // speechRatio was removed — VADProcessor.averageSpeechProbability is authoritative
+        let afterSamples = await buffer.takeAll()
+        #expect(afterSamples.isEmpty, "Reset must leave buffer empty")
     }
 }
 
@@ -937,7 +940,7 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
 
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
-        await buffer.append(frames: [Float](repeating: 0.5, count: 16_000), hasSpeech: true)
+        await buffer.append(frames: [Float](repeating: 0.5, count: 16_000))
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
 
@@ -956,7 +959,7 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
         // between setting skipSilentChunks and sendChunkIfReady reading it.
         let recorder = StreamingRecorder()
         let buffer = AudioBuffer(sampleRate: 16000)
-        await buffer.append(frames: [Float](repeating: 0.001, count: 240_000), hasSpeech: false)
+        await buffer.append(frames: [Float](repeating: 0.001, count: 240_000))
         recorder._testInjectAudioBuffer(buffer)
         recorder._testSetIsRecording(true)
 

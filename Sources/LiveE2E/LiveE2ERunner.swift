@@ -12,6 +12,11 @@ enum NoiseType: String, CaseIterable {
     case brownNoise    // Low rumble (traffic, HVAC)
     case officeAmbient // Pink noise + 120 Hz hum
     case breathing     // Periodic low-amplitude bursts (simulates breathing)
+    // Task 1: Volume gate regression test
+    // Periodic short bursts (~10ms each) of moderate amplitude separated by silence.
+    // Simulates keyboard typing: RMS of each burst ~0.003–0.005, smoothed RMS < 0.001.
+    // The volume gate (minVolumeForSpeech=0.008) must block these from triggering speech.
+    case keyboardNoise // Periodic transient clicks (keyboard/typing simulation)
 }
 
 /// A speech segment followed by optional silence.
@@ -128,6 +133,37 @@ func generateNoiseSamples(type: NoiseType, count: Int) -> [Float] {
             }
             return b
         }
+
+    case .keyboardNoise:
+        // Simulate keyboard typing: periodic short transient bursts (~10ms = 160 samples)
+        // separated by silence (~300–500ms between keystrokes).
+        //
+        // WHY THIS NOISE TYPE: The volume gate (Task 1) is designed to block these
+        // from triggering false speechStart events. Each burst has RMS ~0.003–0.005
+        // (burst amplitude ~0.005–0.009). After exponential smoothing (factor=0.2),
+        // a single 10ms burst at 0.007 amplitude → smoothed ≈ 0.0014 — far below
+        // minVolumeForSpeech=0.008. Sustained typing (one key per 400ms) keeps
+        // smoothedVolume around 0.0007 — still below the gate threshold.
+        let sampleRate: Float = 16000
+        let burstDurationSamples = Int(0.010 * sampleRate)  // 10ms burst
+        let avgKeystrokeSpacingSamples = Int(0.400 * sampleRate) // ~150 wpm
+        var result = [Float](repeating: 0, count: count)
+        var nextBurstStart = Int.random(in: 0..<avgKeystrokeSpacingSamples / 2)
+        while nextBurstStart < count {
+            let amplitude: Float = Float.random(in: 0.005...0.009)
+            for j in 0..<burstDurationSamples {
+                let idx = nextBurstStart + j
+                guard idx < count else { break }
+                // Short click: sine burst at ~2kHz (simulates key mechanism resonance)
+                let t = Float(j) / sampleRate
+                let envelope = sin(.pi * Float(j) / Float(burstDurationSamples))
+                result[idx] = sin(2.0 * .pi * 2000.0 * t) * amplitude * envelope
+            }
+            // Space to next keystroke (randomised 250–550ms)
+            let spacing = Int.random(in: Int(0.250 * sampleRate)...Int(0.550 * sampleRate))
+            nextBurstStart += spacing
+        }
+        return result
     }
 }
 
@@ -644,6 +680,36 @@ struct SpeakFlowLiveE2E {
             segments: [
                 TextSegment(text: "Finished talking in a noisy office.",
                             silenceAfterSeconds: 8.0, noiseType: .officeAmbient),
+            ],
+            chunkDuration: .minute10,
+            expectedMinChunks: 1, expectedMaxChunks: 1,
+            trailingSeconds: 5, rate: nil, validateTranscript: false,
+            expectAutoEnd: true
+        ),
+
+        // ── Task 1: Volume Gate Regression ──────────────────────────────────────
+        //
+        // Keyboard typing noise followed by auto-end silence.
+        //
+        // WHAT THIS TESTS:
+        // The volume gate (Task 1) must prevent keyboard transients from triggering
+        // false speechStart events. Each keystroke burst has smoothed RMS ~0.001
+        // — well below minVolumeForSpeech=0.008. Without the gate, Silero would
+        // sometimes misclassify the 2kHz click sound as speech, blocking auto-end.
+        //
+        // EXPECTED BEHAVIOR:
+        // 1. The initial speech segment is recognized (1 chunk sent)
+        // 2. During the keyboard noise gap, NO speechStart fires (volume gate blocks it)
+        // 3. After the keyboard noise stops, the session auto-ends correctly
+        //
+        // If this test fails (auto-end does NOT fire), it means keyboard noise is
+        // being misclassified as speech and holding the session open — the exact
+        // bug this task was designed to fix.
+        TestScenario(
+            name: "Task1: speech → 8s keyboard noise → MUST auto-end (volume gate)",
+            segments: [
+                TextSegment(text: "Testing the volume gate feature now.",
+                            silenceAfterSeconds: 8.0, noiseType: .keyboardNoise),
             ],
             chunkDuration: .minute10,
             expectedMinChunks: 1, expectedMaxChunks: 1,

@@ -39,3 +39,52 @@ final class MockStreamingProvider: StreamingTranscriptionProvider, @unchecked Se
         .default
     }
 }
+
+// MARK: - MultiSessionMockProvider
+
+/// A streaming provider that returns different sessions on successive `startSession()` calls.
+///
+/// Used in reconnection tests to simulate:
+/// 1. First call: initial session (which will be "dropped")
+/// 2. Second call: reconnect session (which succeeds or fails depending on test)
+///
+/// This is more realistic than `MockStreamingProvider` for testing reconnection paths,
+/// because reconnection requires a NEW session object.
+final class MultiSessionMockProvider: StreamingTranscriptionProvider, @unchecked Sendable {
+    let id: String = ProviderId.deepgram
+    let displayName = "Multi-Session Mock"
+    let mode: ProviderMode = .streaming
+    var isConfigured: Bool = true
+    var authRequirement: ProviderAuthRequirement { .apiKey(providerId: id) }
+
+    /// Queue of sessions to return. Each `startSession()` call pops the first entry.
+    /// If empty, throws a connection failure.
+    var sessions: [MockStreamingSession] = []
+
+    /// Number of times `startSession()` was called.
+    var startSessionCallCount = 0
+
+    /// Whether the next call should fail (overrides `sessions` queue).
+    var nextCallShouldFail = false
+
+    /// Optional delay before returning from startSession (simulates slow reconnect).
+    var reconnectDelay: TimeInterval = 0
+
+    func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
+        startSessionCallCount += 1
+        if reconnectDelay > 0 {
+            try await Task.sleep(for: .seconds(reconnectDelay))
+        }
+        if nextCallShouldFail {
+            nextCallShouldFail = false  // reset after one failure
+            throw DeepgramError.connectionFailed("Simulated reconnect failure")
+        }
+        guard !sessions.isEmpty else {
+            throw DeepgramError.connectionFailed("No more sessions available")
+        }
+        return sessions.removeFirst()
+    }
+
+    @MainActor
+    func buildSessionConfig() -> StreamingSessionConfig { .default }
+}

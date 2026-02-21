@@ -56,6 +56,45 @@ public final class Statistics {
     public var apiCallCount: Int { data.totalApiCalls }
     public var wordCount: Int { data.totalWords }
 
+    // MARK: - Dirty-flag debounce
+    //
+    // Previous: every mutation called `save()` immediately, performing a
+    //   `JSONEncoder().encode()` + atomic `Data.write()` (two syscalls) per call.
+    //   `Transcription.transcribe()` calls `recordApiCall()` then
+    //   `recordTranscription()` on every chunk — so two disk flushes per chunk.
+    //
+    // Now: mutations mark the data dirty and schedule a 5-second flush Task.
+    // Concurrent mutations within the same 5s window share one flush.
+    // `save()` is called immediately only from `reset()` (to preserve the
+    // zero-state on disk) and from `flushIfDirty()` on app background/terminate.
+    //
+    // Safety: `@MainActor` isolation means no race between `markDirty`,
+    //   `scheduleFlush`, and `flushIfDirty`. The flush Task captures `[weak self]`
+    //   so it doesn't prevent deallocation in tests.
+
+    private var isDirty = false
+    private var flushTask: Task<Void, Never>?
+
+    /// Mark data as needing a flush and arm the debounce timer if not already armed.
+    private func markDirty() {
+        isDirty = true
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            await MainActor.run {
+                self?.flushIfDirty()
+                self?.flushTask = nil
+            }
+        }
+    }
+
+    /// Write to disk if dirty. Called by the debounce timer and at app lifecycle events.
+    public func flushIfDirty() {
+        guard isDirty else { return }
+        isDirty = false
+        save()
+    }
+
     // MARK: - Recording
 
     public func recordTranscription(text: String, audioDurationSeconds: Double) {
@@ -64,17 +103,20 @@ public final class Statistics {
 
         let words = text.split(whereSeparator: { $0.isWhitespace })
         data.totalWords += words.count
-        save()
+        markDirty()
 
         Logger.app.debug("Stats updated: +\(String(format: "%.1f", audioDurationSeconds))s, +\(text.count) chars, +\(words.count) words")
     }
 
     public func recordApiCall() {
         data.totalApiCalls += 1
-        save()
+        markDirty()
     }
 
     public func reset() {
+        flushTask?.cancel()
+        flushTask = nil
+        isDirty = false
         data = Data()
         save()
         Logger.app.info("Statistics reset")

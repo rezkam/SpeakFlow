@@ -8,6 +8,8 @@ final class SpySettings: SettingsProviding {
     var skipSilentChunks: Bool = true
     var vadEnabled: Bool = true
     var vadThreshold: Float = 0.15
+    var vadVolumeGateEnabled: Bool = true
+    var vadMinVolumeForSpeech: Float = 0.008
     var autoEndEnabled: Bool = true
     var autoEndSilenceDuration: Double = 5.0
     var minSpeechRatio: Float = 0.01

@@ -125,6 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RecordingController.shared.shutdown()
         AuthController.shared.shutdown()
         PermissionController.shared.shutdown()
+        // Flush any pending statistics before the process exits.
+        // The debounce timer won't fire once the run loop stops.
+        Statistics.shared.flushIfDirty()
         if let observer = windowCloseObserver {
             NotificationCenter.default.removeObserver(observer)
         }

@@ -105,6 +105,10 @@ final class RecordingController {
             if self.isRecording || self.isProcessingFinal {
                 self.textInserter.insertText(text + " ")
             }
+            // Update the VAD session controller for thinking-pause detection
+            Task { [weak self] in
+                await self?.recorder?.updateTranscript(self?.fullTranscript ?? "")
+            }
         }
         transcription.queueBridge.onAllComplete = { [weak self] in
             self?.finishIfDone()
