@@ -34,6 +34,9 @@ jobs:
       - name: Build
         run: swift build --build-tests
 
+      - name: Main feature regression suite
+        run: SPEAKFLOW_REGRESSION_SKIP_BUILD=1 ./scripts/test-regression-core.sh
+
       - name: Test
         run: swift test --skip-build
 

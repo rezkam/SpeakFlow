@@ -135,6 +135,19 @@ All settings are in the **Transcription** tab:
 - **Universal text insertion** — transcribed text is typed into the focused app via macOS Accessibility, with per-keystroke focus tracking that pauses if you switch apps and resumes when you return
 - **Launch at login** — runs quietly in the menu bar
 
+## Testing
+
+- **Main feature regression gate:** `make test-regression-core`
+- **Full test suite:** `make test`
+- **Thread-safety sweep:** `make test-tsan`
+- **Live E2E suites (manual/pre-release):** `make test-live-e2e-all`
+
+If local SwiftPM lock contention occurs, run the regression gate with an isolated build path:
+`SPEAKFLOW_SWIFT_SCRATCH_PATH=/tmp/speakflow-regression-build make test-regression-core`
+
+Regression feature mapping is documented in:
+`docs/REGRESSION_TEST_MATRIX.md`
+
 ## Audio Pipeline
 
 ### Streaming (Deepgram)

@@ -38,7 +38,7 @@ echo "  SpeakFlow Check"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 run_step "Build............" swift build
-run_step "Swift tests......" swift test
+run_step "Swift tests......" env SPEAKFLOW_MUTE_SOUNDS=1 swift test
 
 # Optional: SwiftLint (skip if not installed)
 if command -v swiftlint &> /dev/null; then

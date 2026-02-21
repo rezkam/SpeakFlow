@@ -43,7 +43,7 @@ if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 fi
 
-run_step "Swift tests......" swift test
+run_step "Swift tests......" env SPEAKFLOW_MUTE_SOUNDS=1 swift test
 
 if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
