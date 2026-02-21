@@ -579,11 +579,8 @@ public final class StreamingRecorder {
             return false
         }
 
-        // ── Skip check BEFORE draining buffer ──────────────────────────
-        // Previously, the buffer was drained (via takeAll) before the skip
-        // decision, permanently losing audio when a chunk was skipped. Now
-        // we evaluate the speech probability first so that skipped chunks
-        // leave the buffer intact for the next check cycle.
+        // ── Evaluate skip criteria before draining buffer ──────────────────────────
+        // This keeps buffered audio intact when a chunk is skipped.
         let vadActive = state.getVADActive()
         let speechProbability: Float
 
@@ -601,7 +598,7 @@ public final class StreamingRecorder {
         // intermediate chunks. This mirrors the final-chunk protection in stop().
         // Without this, a chunk with mixed speech + silence (e.g. 8s speech + 7s pause)
         // can have an average probability below the threshold, causing the audio to be
-        // silently discarded — the "first chunk lost on long speech" bug.
+        // silently discarded, dropping early chunks in long continuous speech sessions.
         let speechDetectedInSession: Bool
         if let session = sessionController {
             speechDetectedInSession = await session.hasSpoken
@@ -610,16 +607,19 @@ public final class StreamingRecorder {
         }
 
         if skipSilentChunks && speechProbability < skipThreshold && !speechDetectedInSession {
-            // No speech detected in session at all — safe to skip this truly silent chunk.
-            // Buffer is NOT drained, so audio is preserved for the next check cycle.
-            // Reset VAD chunk accumulator even on skip — prevents stale samples from
-            // accumulating across consecutive skipped chunks, which would bloat memory
-            // and skew future speech probability calculations.
+            // No speech detected in session at all — treat as a discarded chunk.
+            // We still drain so periodic checks can advance chunk timing instead of
+            // retrying the same oversized buffer forever.
+            let skippedSamples = await buffer.takeAll()
+            let skippedDuration = Double(skippedSamples.count) / sampleRate
+
             if vadActive {
                 await vadProcessor?.resetChunk()
             }
-            Logger.audio.debug("Skipping silent chunk (\(String(format: "%.0f", speechProbability * 100))% speech, threshold=\(String(format: "%.0f", skipThreshold * 100))%, vadActive=\(vadActive))")
-            return false
+            Logger.audio.debug(
+                "Skipping silent chunk (\(String(format: "%.0f", speechProbability * 100))% speech, threshold=\(String(format: "%.0f", skipThreshold * 100))%, duration=\(String(format: "%.1f", skippedDuration))s, vadActive=\(vadActive))"
+            )
+            return true
         }
 
         // ── Drain buffer and send ──────────────────────────────────────
@@ -755,7 +755,7 @@ public final class StreamingRecorder {
     ///   1. `vDSP_vclip`: clamp to [-1, 1]       — identical to `max(-1, min(1, x))`
     ///   2. `vDSP_vsmul`: multiply by 32767.0     — scale to Int16 range
     ///   3. `vDSP_vfix16`: truncate to Int16      — identical to Swift's `Int16(Float)`
-    /// This produces bit-for-bit identical output to the original scalar loop.
+    /// This produces deterministic Int16 PCM output aligned with Swift truncation semantics.
     private func createWav(from samples: [Float]) -> Data {
         guard !samples.isEmpty else { return Data() }
 
@@ -781,7 +781,7 @@ public final class StreamingRecorder {
         var scale: Float = 32767.0
         vDSP_vsmul(scratch, 1, &scale, &scratch, 1, n)
 
-        // Single pre-allocated output — avoids the 480K per-sample Data allocs of the old forEach loop.
+        // Single pre-allocated output avoids per-sample allocation churn.
         var wav = Data(count: totalBytes)
 
         wav.withUnsafeMutableBytes { raw in
@@ -810,7 +810,7 @@ public final class StreamingRecorder {
             // ── Step 3: truncate scaled floats to Int16 ───────────────────
             //
             // vDSP_vfix16 truncates (matches Swift's `Int16(Float)` truncation semantics),
-            // producing bit-for-bit identical output to the original scalar loop.
+            // producing deterministic output that matches Swift's truncation semantics.
             // The destination pointer is bound directly into the pre-allocated wav buffer,
             // writing all Int16 samples in a single SIMD pass — zero per-sample overhead.
             let dst = (b + 44).bindMemory(to: Int16.self, capacity: sampleCount)
@@ -902,7 +902,7 @@ extension StreamingRecorder {
     }
 
     func _testInvokeSendChunkIfReady(reason: String) async {
-        await sendChunkIfReady(reason: reason)
+        _ = await sendChunkIfReady(reason: reason)
     }
 
     func _testInvokePeriodicCheck() async {

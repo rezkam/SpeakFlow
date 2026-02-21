@@ -25,7 +25,7 @@ public protocol AccessibilityPermissionDelegate: AnyObject {
 public final class AccessibilityPermissionManager {
     private var permissionCheckTask: Task<Void, Never>?
     private var hasShownInitialPrompt = false
-    private var lastKnownPermissionState: Bool?  // P3 Security: Track permission state changes
+    private var lastKnownPermissionState: Bool?  // Track permission state transitions across checks.
     private var pollAttempts = 0
     static let maxPollAttempts = 60  // 60 * 2s = 2 minutes timeout (internal for testing)
     public weak var delegate: AccessibilityPermissionDelegate?
@@ -33,7 +33,7 @@ public final class AccessibilityPermissionManager {
     public init() {}
 
     public func checkAndRequestPermission(showAlertIfNeeded: Bool = true, isAppStart: Bool = false) -> Bool {
-        // P3 Security: Reset prompt flag if permission was revoked since last check
+        // Reset prompt state if permission was revoked since the last check.
         // This allows re-prompting users who removed the app from the Accessibility list
         let currentState = AXIsProcessTrusted()
         if let lastState = lastKnownPermissionState, lastState && !currentState {
@@ -111,7 +111,7 @@ public final class AccessibilityPermissionManager {
 
                 self.pollAttempts += 1
 
-                // P2 Security: Timeout after max attempts to prevent infinite polling
+                // Stop polling after a bounded number of attempts to avoid infinite polling.
                 if self.pollAttempts >= Self.maxPollAttempts {
                     Logger.permissions.warning("Permission polling timed out after \(Self.maxPollAttempts) attempts")
                     self.permissionCheckTask = nil

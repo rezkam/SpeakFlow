@@ -83,10 +83,10 @@ struct TestIsolationTests {
     }
 }
 
-// MARK: - Issue #4: Text insertion goes to wrong app
+// MARK: - Text insertion focus verification
 
-@Suite("Issue #4 — Focus verification before text insertion")
-struct Issue4FocusVerificationRegressionTests {
+@Suite("Focus verification before text insertion")
+struct FocusVerificationTests {
 
     /// Behavioral: CFEqual correctly distinguishes AXUIElements for different PIDs.
     @Test func testCFEqualDistinguishesDifferentAppElements() {
@@ -99,12 +99,12 @@ struct Issue4FocusVerificationRegressionTests {
     }
 }
 
-// MARK: - Hotkey & Concurrency Regression
+// MARK: - Hotkey & Concurrency
 
-@Suite("Hotkey & Concurrency Regression")
-struct HotkeyConcurrencyRegressionTests {
+@Suite("Hotkey & Concurrency")
+struct HotkeyConcurrencyTests {
 
-    /// Issue #19: NumberFormatter cache must be stable across property accesses.
+    /// NumberFormatter cache must be stable across property accesses.
     @Test func testFormatterCacheRemainsStable() async {
         await MainActor.run {
             let stats = Statistics.shared
@@ -124,7 +124,7 @@ struct HotkeyConcurrencyRegressionTests {
         }
     }
 
-    /// Issue #21: Duration formatting must produce expected output.
+    /// Duration formatting must produce expected output.
     @Test func testFormattedDurationUsesExpectedOutput() async {
         await MainActor.run {
             let stats = Statistics.shared
@@ -148,9 +148,9 @@ struct HotkeyConcurrencyRegressionTests {
     }
 }
 
-// MARK: - Regression: Timeout scales with audio duration
+// MARK: - Timeout scaling
 
-@Suite("Timeout scales with data size — source regression")
+@Suite("Timeout scales with data size")
 struct TimeoutScalingSourceTests {
 
     @Test func testTimeoutScalingBehavior() {
@@ -190,7 +190,7 @@ struct TimeoutScalingSourceTests {
     }
 }
 
-// MARK: - Swift 6 Actor-Isolation Regression Tests (Permission Polling)
+// MARK: - Swift 6 Actor-Isolation Tests
 
 @Suite("Swift 6 Actor-Isolation — Permission Polling")
 struct AccessibilityPermissionPollingTests {

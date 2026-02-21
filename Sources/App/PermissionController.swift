@@ -76,7 +76,7 @@ final class PermissionController: AccessibilityPermissionDelegate {
         case .notDetermined:
             checkMicrophonePermission()
         case .denied, .restricted:
-            // Previously denied — OS won't re-prompt, open Settings directly
+            // If denied, the OS won't re-prompt; open Settings directly
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
                 NSWorkspace.shared.open(url)
             }

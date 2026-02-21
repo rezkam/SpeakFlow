@@ -1,8 +1,8 @@
 import Foundation
 
-/// Fixed application configuration constants
+/// Application configuration constants
 public enum Config {
-    // MARK: - Audio Processing (Fixed)
+    // MARK: - Audio Processing
     /// RMS threshold below which audio is considered silence
     public static let silenceThreshold: Float = 0.003
     /// Seconds of silence before triggering chunk send
@@ -13,20 +13,20 @@ public enum Config {
     /// When VAD is active, this replaces minSpeechRatio for skip decisions.
     /// Only skip a chunk if we are ≥80% confident it is pure silence.
     /// VAD probability < 0.20 means the model sees <20% chance of speech,
-    /// so we are 80%+ sure it's silent. Previously 0.30 (only 70% confident).
+    /// so we are 80%+ sure it's silent.
     public static let minVADSpeechProbability: Float = 0.20
 
-    // MARK: - Audio Limits (Fixed)
+    // MARK: - Audio Limits
     /// Sample rate for audio recording (Hz)
     public static let sampleRate: Double = 16000
-    /// Minimum recording duration in milliseconds (matches Codex behavior)
+    /// Minimum recording duration in milliseconds
     public static let minRecordingDurationMs: Int = 250
     /// Maximum audio file size in bytes (25MB - covers ~7 minutes at 16kHz mono 16-bit)
     public static let maxAudioSizeBytes: Int = 25_000_000
-    /// Maximum recording duration when chunking is disabled (1 hour, matches Codex)
+    /// Maximum recording duration when chunking is disabled (1 hour)
     public static let maxFullRecordingDuration: Double = 3600.0
 
-    // MARK: - API Settings (Fixed)
+    // MARK: - API Settings
     /// Minimum seconds between API requests (rate limiting)
     public static let minTimeBetweenRequests: Double = 10.0
     /// Base request timeout in seconds for small audio files (≤ baseTimeoutDataSize).
@@ -43,8 +43,8 @@ public enum Config {
     /// Base delay for exponential backoff (seconds)
     public static let retryBaseDelay: Double = 1.5
 
-    // MARK: - Text Insertion Limits (Fixed)
-    /// P3 Security: Maximum queued text insertions to prevent unbounded task chains
+    // MARK: - Text Insertion Limits
+    /// Maximum queued text insertions to prevent unbounded task chains.
     /// If chunks arrive faster than text can be typed, older insertions are dropped
     public static let maxQueuedTextInsertions: Int = 10
 
@@ -64,7 +64,7 @@ public enum Config {
     public static let autoEndSilenceDuration: Double = 5.0
     public static let autoEndMinSessionDuration: Double = 2.0
 
-    // MARK: - VAD Volume Gate (fixes false speech starts from non-vocal sounds)
+    // MARK: - VAD Volume Gate (filters non-vocal speech starts)
 
     /// Whether the volume gate is enabled by default.
     ///
@@ -98,7 +98,7 @@ public enum Config {
     /// threshold.
     public static let vadVolumeSmoothingFactor: Float = 0.2
 
-    // MARK: - VAD State Reset (fixes probability drift in long sessions)
+    // MARK: - VAD State Reset (controls probability drift in long sessions)
 
     /// How often (seconds) the Silero RNN hidden state is reset during recording.
     ///
@@ -116,8 +116,7 @@ public enum Config {
     /// buffer accumulation that leads to API timeouts and lost transcriptions.
     public static let forceSendChunkMultiplier: Double = 2.0
 
-    // minChunkDurationForPauseSend removed — chunks now respect user's
-    // configured ChunkDuration, not a hardcoded 5s minimum. See shouldSendChunk().
+    // Chunking uses the configured ChunkDuration. See shouldSendChunk().
 }
 
 // MARK: - Chunk Duration Options
@@ -144,7 +143,7 @@ public enum ChunkDuration: Double, CaseIterable, Sendable {
         }
     }
 
-    /// Whether this mode effectively disables chunking (no longer possible — max is 10 min)
+    /// Whether this mode effectively disables chunking
     public var isFullRecording: Bool {
         false
     }
@@ -244,11 +243,6 @@ public final class Settings {
             // Only use stored value if the key actually exists (user explicitly changed it)
             if defaults.object(forKey: Keys.vadThreshold) != nil {
                 let value = defaults.float(forKey: Keys.vadThreshold)
-                // Migrate: if user had old defaults (0.5 or 0.3), use new default (0.15)
-                if value == 0.5 || value == 0.3 {
-                    defaults.removeObject(forKey: Keys.vadThreshold)
-                    return Config.vadThreshold
-                }
                 return value > 0 ? value : Config.vadThreshold
             }
             return Config.vadThreshold

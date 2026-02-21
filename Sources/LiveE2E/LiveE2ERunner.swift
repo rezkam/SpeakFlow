@@ -12,7 +12,7 @@ enum NoiseType: String, CaseIterable {
     case brownNoise    // Low rumble (traffic, HVAC)
     case officeAmbient // Pink noise + 120 Hz hum
     case breathing     // Periodic low-amplitude bursts (simulates breathing)
-    // Task 1: Volume gate regression test
+    // Volume-gate validation scenario
     // Periodic short bursts (~10ms each) of moderate amplitude separated by silence.
     // Simulates keyboard typing: RMS of each burst ~0.003–0.005, smoothed RMS < 0.001.
     // The volume gate (minVolumeForSpeech=0.008) must block these from triggering speech.
@@ -24,7 +24,7 @@ struct TextSegment {
     let text: String
     /// Seconds of silence to insert AFTER this segment's audio.
     let silenceAfterSeconds: Double
-    /// What fills the silence gap. Default is `.digital` (pure zeros) for backward compat.
+    /// What fills the silence gap. Default is `.digital` (pure zeros).
     let noiseType: NoiseType
 
     init(text: String, silenceAfterSeconds: Double, noiseType: NoiseType = .digital) {
@@ -138,7 +138,7 @@ func generateNoiseSamples(type: NoiseType, count: Int) -> [Float] {
         // Simulate keyboard typing: periodic short transient bursts (~10ms = 160 samples)
         // separated by silence (~300–500ms between keystrokes).
         //
-        // WHY THIS NOISE TYPE: The volume gate (Task 1) is designed to block these
+        // WHY THIS NOISE TYPE: The volume gate is designed to block these
         // from triggering false speechStart events. Each burst has RMS ~0.003–0.005
         // (burst amplitude ~0.005–0.009). After exponential smoothing (factor=0.2),
         // a single 10ms burst at 0.007 amplitude → smoothed ≈ 0.0014 — far below
@@ -576,7 +576,7 @@ struct SpeakFlowLiveE2E {
             expectAutoEnd: false
         ),
 
-        // 18–20) 1s pause with noisiest types — the exact bug scenario
+        // 18–20) 1s pause with the noisiest profiles — high-risk edge case
         TestScenario(
             name: "1s pause + pink noise → must NOT auto-end",
             segments: [
@@ -687,12 +687,12 @@ struct SpeakFlowLiveE2E {
             expectAutoEnd: true
         ),
 
-        // ── Task 1: Volume Gate Regression ──────────────────────────────────────
+        // ── Volume Gate Validation ──────────────────────────────────────────────
         //
         // Keyboard typing noise followed by auto-end silence.
         //
         // WHAT THIS TESTS:
-        // The volume gate (Task 1) must prevent keyboard transients from triggering
+        // The volume gate must prevent keyboard transients from triggering
         // false speechStart events. Each keystroke burst has smoothed RMS ~0.001
         // — well below minVolumeForSpeech=0.008. Without the gate, Silero would
         // sometimes misclassify the 2kHz click sound as speech, blocking auto-end.
@@ -702,11 +702,10 @@ struct SpeakFlowLiveE2E {
         // 2. During the keyboard noise gap, NO speechStart fires (volume gate blocks it)
         // 3. After the keyboard noise stops, the session auto-ends correctly
         //
-        // If this test fails (auto-end does NOT fire), it means keyboard noise is
-        // being misclassified as speech and holding the session open — the exact
-        // bug this task was designed to fix.
+        // If this test fails (auto-end does NOT fire), keyboard noise is still
+        // being classified as speech and holding the session open.
         TestScenario(
-            name: "Task1: speech → 8s keyboard noise → MUST auto-end (volume gate)",
+            name: "VolumeGate: speech → 8s keyboard noise → MUST auto-end",
             segments: [
                 TextSegment(text: "Testing the volume gate feature now.",
                             silenceAfterSeconds: 8.0, noiseType: .keyboardNoise),
@@ -969,14 +968,17 @@ struct SpeakFlowLiveE2E {
     }
 }
 
-// Entry point — dispatchMain() pumps the main queue so @MainActor tasks can execute.
-// (swift-tools-version 6.2 top-level await blocks MainActor)
+// Entry point — RunLoop.main.run() pumps both the RunLoop (for Timer callbacks) and
+// GCD's main queue (for @MainActor Tasks). Using dispatchMain() instead would only pump
+// GCD, causing Timer.scheduledTimer callbacks to never fire — which breaks periodicCheck()
+// and processQueuedSamples() in StreamingRecorder.
 @main
 enum LiveE2EEntry {
     static func main() {
         Task {
             await SpeakFlowLiveE2E.main()
+            exit(0)
         }
-        dispatchMain()
+        RunLoop.main.run()
     }
 }

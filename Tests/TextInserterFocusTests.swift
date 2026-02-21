@@ -201,7 +201,7 @@ struct TextInserterPidFocusTests {
                 "With no PID set, isTargetAppFrontmost should return true")
     }
 
-    /// This is the test that would have caught the CFEqual bug.
+    /// This test protects the CFEqual-based focus comparison path.
     /// It simulates a cross-app scenario by setting targetPid to a
     /// non-matching PID, verifying that focus check correctly detects
     /// the user is in a different app.
@@ -437,5 +437,25 @@ struct TextInserterPidFocusTests {
                 "After restoring PID, isTargetAppFrontmost must return true again")
 
         inserter.cancelAndReset()
+    }
+}
+
+@Suite("TextInserter Queue Guard")
+struct TextInserterQueueGuardTests {
+    @MainActor @Test
+    func deleteCharsRespectsQueueCap() {
+        let inserter = TextInserter.shared
+        inserter.cancelAndReset()
+        defer { inserter.cancelAndReset() }
+
+        let attempts = Config.maxQueuedTextInsertions + 25
+        for _ in 0..<attempts {
+            inserter.deleteChars(1)
+        }
+
+        #expect(
+            inserter._testQueuedInsertionCount == Config.maxQueuedTextInsertions,
+            "deleteChars must honor maxQueuedTextInsertions just like insertText"
+        )
     }
 }

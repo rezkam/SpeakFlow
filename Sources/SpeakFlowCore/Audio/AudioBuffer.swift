@@ -7,18 +7,10 @@ import OSLog
 /// drained atomically by `takeAll()` when a chunk is ready to send to the
 /// transcription API.
 ///
-/// **Why `speechFrameCount`/`speechRatio` were removed:**
-/// The original `append(frames:hasSpeech:)` signature tracked an energy-based
-/// `speechRatio` derived from the audio tap's RMS check (`hasSpeech = rms > 0.003`).
-/// However, the skip-silent-chunk decision in `StreamingRecorder.sendChunkIfReady()`
-/// uses `VADProcessor.averageSpeechProbability` (the Silero neural model's opinion),
-/// not `AudioBuffer.speechRatio`. The energy-based ratio was never read in any
-/// decision path — it was dead code.
-///
-/// With the volume gate now integrated into `VADProcessor`, the Silero probability
-/// is the single authoritative speech signal. The buffer's job is purely to hold
-/// samples reliably. Simplifying the API removes the confusion between two
-/// disconnected "speech" metrics and reduces per-frame overhead.
+/// The buffer intentionally stores raw samples only.
+/// Speech confidence decisions are computed in `VADProcessor` and consumed by
+/// `StreamingRecorder`; this actor is responsible only for reliable append/drain
+/// behavior with bounded memory usage.
 public actor AudioBuffer {
     private var samples: [Float] = []
     private let sampleRate: Double

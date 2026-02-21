@@ -8,10 +8,10 @@ import Testing
 //
 // ## What these tests cover
 //
-// Six specific performance regressions identified during the Feb 2026 review.
+// Six specific performance-sensitive paths identified during the Feb 2026 review.
 // Each test is structured as: GIVEN the hot path → WHEN exercised → THEN
 // the output is byte-identical to the reference implementation AND the
-// allocation or O(n) behaviour we fixed cannot silently regress.
+// allocation or O(n) behavior remains stable over time.
 //
 // Tests are grouped by finding number from the review document.
 //
@@ -30,15 +30,14 @@ import Testing
 // MARK: - Finding 1: createWav — pre-allocated Data + vDSP_vfixr16
 
 // Test helpers that expose the internal createWav implementation via the
-// debug extension already on StreamingRecorder.
+// test extension already on StreamingRecorder.
 
 @Suite("F1 — createWav: zero-allocation WAV encoding")
 struct CreateWavTests {
 
     // MARK: Helpers
 
-    /// Reference implementation: the original scalar forEach loop.
-    /// Kept here as a ground-truth oracle so we can verify bit-for-bit equality.
+    /// Scalar reference implementation used as a ground-truth oracle for output checks.
     private func createWavReference(from samples: [Float], sampleRate: Double) -> Data {
         guard !samples.isEmpty else { return Data() }
         let int16 = samples.map { Int16(max(-1, min(1, $0)) * 32767) }
@@ -315,7 +314,7 @@ struct ProcessQueuedSamplesTests {
 @Suite("F3 — LiveStreamingController tap: vDSP_vfixr16 PCM conversion")
 struct LiveStreamingPCMConversionTests {
 
-    /// Reference scalar conversion matching the old tap loop.
+    /// Scalar reference conversion used for output equivalence checks.
     private func scalarConvert(_ frames: [Float]) -> Data {
         var data = Data(capacity: frames.count * 2)
         for sample in frames {
@@ -664,7 +663,7 @@ struct StatisticsDebouncedFlushTests {
         stats.reset()
         defer { stats.reset() }
 
-        // 5 mutations — each previously would have been 1 disk write
+        // 5 mutations are accumulated in memory before a flush
         for _ in 0..<5 { stats.recordApiCall() }
         stats.recordTranscription(text: "one two three", audioDurationSeconds: 3.0)
 
@@ -678,10 +677,10 @@ struct StatisticsDebouncedFlushTests {
     }
 }
 
-// MARK: - Cross-finding regression: WAV output is valid for all chunk sizes
+// MARK: - Cross-finding: WAV output is valid for all chunk sizes
 
-@Suite("Regression — createWav valid output across all ChunkDuration settings")
-struct WavChunkDurationRegressionTests {
+@Suite("Validate createWav valid output across all ChunkDuration settings")
+struct WavChunkDurationTests {
 
     @MainActor
     private func makeRecorder() -> StreamingRecorder {

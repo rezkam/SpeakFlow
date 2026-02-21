@@ -4,7 +4,7 @@ import Testing
 
 // MARK: - Statistics Formatter Tests
 
-struct StatisticsFormatterTests {
+struct StatisticsFormatterCachingTests {
     @Test func testFormattedCountsMatchDecimalFormatterOutput() async {
         await MainActor.run {
             let expected = NumberFormatter.localizedString(from: NSNumber(value: 1_234_567), number: .decimal)
@@ -25,7 +25,7 @@ struct StatisticsFormatterTests {
     }
 }
 
-struct StatisticsFormatterRegressionTests {
+struct StatisticsFormatterTests {
     @Test func testCachedFormatterProducesConsistentResultsAfterRepeatedUse() async {
         await MainActor.run {
             let baselineId = Statistics._testFormatterIdentity
@@ -61,9 +61,9 @@ struct StatisticsFormatterRegressionTests {
     }
 }
 
-// MARK: - Statistics Duration Regression Tests
+// MARK: - Statistics Duration Tests
 
-struct StatisticsDurationRegressionTests {
+struct StatisticsDurationTests {
     @Test func testFormattedDurationMatchesDateComponentsFormatter() async {
         await MainActor.run {
             let stats = Statistics.shared
@@ -97,7 +97,7 @@ struct StatisticsDurationRegressionTests {
 
 // MARK: - Statistics Formatter Isolation Tests
 
-@Suite("P2 — Statistics formatter explicit @MainActor isolation")
+@Suite("Statistics formatter explicit @MainActor isolation")
 struct StatisticsFormatterIsolationTests {
 
     /// Behavioral: formatters remain stable after explicit @MainActor annotation.

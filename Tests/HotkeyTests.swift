@@ -4,7 +4,7 @@ import Testing
 
 // MARK: - Hotkey Listener Cleanup Tests
 
-struct HotkeyListenerCleanupTests {
+struct HotkeyListenerDeinitCleanupTests {
     @Test func testStopIsIdempotent() async {
         await MainActor.run {
             var stopCalls = 0
@@ -19,7 +19,7 @@ struct HotkeyListenerCleanupTests {
     }
 }
 
-struct HotkeyListenerCleanupRegressionTests {
+struct HotkeyListenerCleanupTests {
     @Test func testDeinitInvokesStopCleanup() async {
         await MainActor.run {
             var stopCalls = 0

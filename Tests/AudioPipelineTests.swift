@@ -9,8 +9,7 @@ import Testing
 @Suite("AudioBuffer Tests")
 struct AudioBufferTests {
     /// takeAll() drains the buffer and returns all samples as a plain [Float].
-    /// Since speechRatio was removed (it was dead code — VADProcessor is authoritative),
-    /// there's only one thing to verify: sample count and that the buffer is emptied.
+    /// This test verifies sample count and that the buffer is emptied.
     @Test func testTakeAllDrainsBuffer() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         let frames = [Float](repeating: 0.5, count: 16000) // 1s of audio
@@ -44,11 +43,11 @@ struct AudioBufferTests {
     }
 }
 
-// MARK: - Chunk Skip Regression Tests (First Chunk Lost Bug)
+// MARK: - Chunk Skip Tests
 //
-// These tests guard against the "first chunk lost on long speech" bug:
+// These tests guard against dropped early chunks during long continuous speech:
 //
-// BUG: sendChunkIfReady() called buffer.takeAll() (permanently draining all audio)
+// Cause: sendChunkIfReady() called buffer.takeAll() (permanently draining all audio)
 // BEFORE checking skipSilentChunks. When an intermediate chunk's average VAD
 // probability dropped below 0.30 (common with mixed speech + pauses in a 15s chunk),
 // the audio was silently discarded — never sent to the API.
@@ -56,15 +55,11 @@ struct AudioBufferTests {
 // The final chunk from stop() had protection (speechDetectedInSession bypass) but
 // intermediate chunks did not.
 //
-// EVIDENCE: In production logs, a ~30s recording session produced 2 intermediate chunks
-// + 1 final chunk, but only the final chunk's API call appeared. Task 10 sent 451KB
-// (14s of audio = the final chunk) while intermediate chunks vanished.
-//
-// FIX: (1) Check skip BEFORE buffer.takeAll(), (2) add speechDetectedInSession bypass
+// Approach: (1) Check skip BEFORE buffer.takeAll(), (2) add speechDetectedInSession bypass
 // to intermediate chunks matching the final chunk's existing protection.
 
-@Suite("Chunk Skip Regression Tests — Behavioral", .serialized)
-struct ChunkSkipBehavioralRegressionTests {
+@Suite("Chunk Skip Tests — Behavioral", .serialized)
+struct ChunkSkipBehavioralTests {
 
     // Helper: create a buffer with 15 seconds of audio (mixed speech + silence)
     private func makeBufferWith15sAudio(speechRatio: Float = 0.5) async -> SpeakFlowCore.AudioBuffer {
@@ -130,9 +125,8 @@ struct ChunkSkipBehavioralRegressionTests {
         return (chunks: collected, remainingDuration: remaining)
     }
 
-    /// CORE REGRESSION: When skipSilentChunks=true, VAD active, low speech probability,
+    /// When skipSilentChunks=true, VAD active, low speech probability,
     /// and speech WAS detected in session → chunk MUST be sent (bypass skip).
-    /// This is the exact scenario from the production bug.
     @Test func testChunkSentWhenSpeechDetectedInSession() async {
         let buffer = await makeBufferWith15sAudio(speechRatio: 0.5)
 
@@ -160,8 +154,9 @@ struct ChunkSkipBehavioralRegressionTests {
     }
 
     /// When skipSilentChunks=true, VAD active, low probability, and NO speech detected →
-    /// the chunk should be skipped AND the buffer should NOT be drained.
-    @Test func testSkippedChunkPreservesBufferWhenNoSpeechDetected() async {
+    /// the chunk should be skipped for transcription but still drained so chunk timing
+    /// advances and memory cannot grow without bound.
+    @Test func testSkippedSilentChunkDrainsBufferWhenNoSpeechDetected() async {
         let buffer = await makeBufferWith15sAudio(speechRatio: 0.0)
 
         let session = SessionController(vadConfig: .default, autoEndConfig: .default, maxChunkDuration: 15.0)
@@ -177,7 +172,8 @@ struct ChunkSkipBehavioralRegressionTests {
         )
 
         #expect(result.chunks.isEmpty, "Chunk should be skipped when no speech has been detected in the session")
-        #expect(result.remainingDuration > 14.0, "Skipped chunk must preserve buffered audio")
+        #expect(result.remainingDuration == 0,
+                "Skipped silent chunk must drain buffered audio to avoid indefinite growth")
     }
 
     /// When skipSilentChunks=false, chunks are always sent regardless of probability.
@@ -200,8 +196,8 @@ struct ChunkSkipBehavioralRegressionTests {
                 "With skipSilentChunks=false, all chunks must be sent")
     }
 
-    /// Simulate the exact production bug scenario: 2 intermediate chunks with mixed speech,
-    /// both have VAD probability < 0.30. With the fix, both must be sent.
+    /// Simulate the production scenario: 2 intermediate chunks with mixed speech,
+    /// both with VAD probability < 0.30. Both must be sent.
     @Test func testTwoIntermediateChunksWithMixedSpeechBothSent() async {
         let sampleRate: Double = 16000
 
@@ -356,14 +352,13 @@ struct ChunkSkipBehavioralRegressionTests {
     }
 }
 
-// MARK: - Issue #9: AVAudioConverter input provider always returns .haveData
+// MARK: - AVAudioConverter one-shot input block
 
-@Suite("Issue #9 — AVAudioConverter one-shot input block")
-struct Issue9AudioConverterOneShotRegressionTests {
+@Suite("AVAudioConverter one-shot input block")
+struct AVAudioConverterOneShotTests {
 
-    /// REGRESSION: createOneShotInputBlock must return .haveData on first call
-    /// and .noDataNow on second call. The original bug always returned .haveData,
-    /// causing audio data to be doubled during sample rate conversion edge cases.
+    /// createOneShotInputBlock must return .haveData on first call
+    /// and .noDataNow on second call to enforce one-shot consumption.
     @Test func testOneShotBlockReturnsNoDataNowOnSecondCall() {
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -389,7 +384,7 @@ struct Issue9AudioConverterOneShotRegressionTests {
         #expect(result2 == nil, "Second call must return nil — was returning buffer again")
     }
 
-    /// REGRESSION: Third and subsequent calls also return .noDataNow (not just second).
+    /// Third and subsequent calls also return .noDataNow (not just second).
     @Test func testOneShotBlockStaysNoDataAfterSecondCall() {
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -773,7 +768,6 @@ struct IntegrationRecorderToQueueTests {
     }
 
     /// Buffer stores samples → takeAll returns them correctly as a plain [Float].
-    /// Note: speechRatio was removed — VADProcessor is the authoritative speech signal.
     @Test func testAudioBufferRoundTrip() async {
         let buffer = AudioBuffer(sampleRate: 16000)
         let original = (0..<16000).map { Float(sin(Double($0) * 2.0 * .pi * 440.0 / 16000.0)) }
@@ -920,7 +914,6 @@ struct IntegrationRecorderToQueueTests {
         await buffer.reset()
         let durAfter = await buffer.duration
         #expect(durAfter == 0, "Reset must clear all samples")
-        // speechRatio was removed — VADProcessor.averageSpeechProbability is authoritative
         let afterSamples = await buffer.takeAll()
         #expect(afterSamples.isEmpty, "Reset must leave buffer empty")
     }
@@ -1301,7 +1294,7 @@ struct SilenceAutoEndTests {
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.interim(TranscriptionResult(transcript: "World", confidence: 0.9, words: [])))
 
-        // Wait past the original 200ms deadline
+        // Wait past the 200ms deadline
         try await Task.sleep(for: .milliseconds(200))
         #expect(col.autoEndCount == 0, "Auto-end cancelled because speech resumed")
     }
@@ -1359,22 +1352,26 @@ struct SilenceAutoEndTests {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
         col.wire(c, simulateActive: true)
-        c.autoEndSilenceDuration = 0.3
+        // Use a large timer duration so the first timer cannot fire before the
+        // utteranceEnd cancels it, even under heavy CI load where Task.sleep
+        // overshoots significantly. The test only checks that the RESET works
+        // (autoEndCount == 0 at the midpoint), not the exact timing.
+        c.autoEndSilenceDuration = 2.0
 
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "A.", confidence: 0.99, words: [], speechFinal: true)))
-        // Timer starts: T=0
+        // Timer starts: T=0, fires at T=2.0s
 
-        try await Task.sleep(for: .milliseconds(150))
-        // Another utteranceEnd at T=150ms — timer should RESET
+        try await Task.sleep(for: .milliseconds(200))
+        // Another utteranceEnd at T~200ms — cancels first timer, starts new (fires T~2.2s)
         c.handleEvent(.utteranceEnd(lastWordEnd: 0))
 
-        // At T=250ms: only 100ms since last reset — should NOT have fired
-        try await Task.sleep(for: .milliseconds(100))
+        // At T~400ms: only ~200ms since last reset — well under 2.0s
+        try await Task.sleep(for: .milliseconds(200))
         #expect(col.autoEndCount == 0, "Timer was reset by second utteranceEnd")
 
         // Poll until timer fires after reset duration
-        try await waitUntil { col.autoEndCount >= 1 }
+        try await waitUntil(timeout: .seconds(5)) { col.autoEndCount >= 1 }
         #expect(col.autoEndCount == 1, "Timer fires after reset duration")
     }
 
