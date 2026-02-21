@@ -37,13 +37,16 @@ struct VADModelCacheTests {
     }
 
     @Test func testGetManagerReturnsSameInstance() async throws {
-        // Two calls to getManager should return the same cached VadManager.
+        // Two sequential calls with the same threshold must return the identical
+        // cached instance. Uses a private cache to avoid interference from other
+        // suites that touch VADModelCache.shared with different thresholds.
         guard VADProcessor.isAvailable else { return }
+        let cache = VADModelCache()
         let m1: VadManager
         let m2: VadManager
         do {
-            m1 = try await VADModelCache.shared.getManager(threshold: 0.5)
-            m2 = try await VADModelCache.shared.getManager(threshold: 0.5)
+            m1 = try await cache.getManager(threshold: 0.5)
+            m2 = try await cache.getManager(threshold: 0.5)
         } catch let error as NSError where error.domain == NSURLErrorDomain
             && (error.code == NSURLErrorCancelled || error.code == NSURLErrorNotConnectedToInternet) {
             return

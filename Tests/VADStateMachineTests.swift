@@ -25,8 +25,8 @@ import Testing
 // 3. REPRODUCIBILITY: The same frame sequence always produces the same result.
 //    Real Silero output varies with model version, hardware, and accumulated state.
 //
-// 4. REGRESSION POWER: `VADScenario.longSessionDrift()` encodes the EXACT condition
-//    that triggered the Task 1 bug (post-5min drift). We cannot reproduce that with
+// 4. BEHAVIORAL COVERAGE: `VADScenario.longSessionDrift()` encodes the exact
+//    post-5min drift condition. We cannot reproduce that with
 //    a 3-second synthetic audio clip fed to real Silero.
 //
 // **What these tests DO NOT test:**
@@ -166,16 +166,15 @@ struct VADBasicEventTests {
 @Suite("VAD State Machine — Volume Gate")
 struct VADVolumeGateTests {
 
-    /// **Core Task 1 regression: keyboard clicks must NOT trigger speech.**
+    /// **Core behavior: keyboard clicks must NOT trigger speech.**
     ///
     /// VADScenario.keyboardTyping(): 40 silence + 20 keyboard clicks + 40 silence.
     /// Keyboard frames: prob=0.25, isSpeaking=false, rms=0.003.
     /// Gate threshold: minVolumeForSpeech=0.008.
     /// Smoothed RMS after 20 clicks: ≈0.003 (still below 0.008).
     ///
-    /// This test encodes the exact bug that Task 1 was designed to fix:
-    /// keyboard typing used to produce false speechStart events because the
-    /// volume check was missing.
+    /// This test verifies that low-volume keyboard transients never cross the
+    /// dual gate (`probability` + `smoothedVolume`) into speechStart events.
     @Test func testVolumeGateBlocksKeyboardClicks() async throws {
         let config = VADConfiguration(
             threshold: 0.15,
@@ -427,7 +426,7 @@ struct VADVolumeSmoothingTests {
 // In the REAL Silero path, `stateResetInterval` prevents LSTM drift by calling
 // `manager.makeStreamState()` periodically. With the mock backend, there is no
 // LSTM — the mock injects probabilities directly. So the state reset doesn't
-// "fix" the drift frames in mock mode.
+// "correct" the drift frames in mock mode.
 //
 // Instead, the volume gate (Feature 3) handles the drift frames: they have
 // rms=0.003 < minVolumeForSpeech=0.008, so the gate blocks them.
@@ -439,7 +438,7 @@ struct VADVolumeSmoothingTests {
 @Suite("VAD State Machine — Long Session Drift Protection")
 struct VADLongSessionDriftTests {
 
-    /// **The Task 1 regression: post-5min drift frames must not produce speech events.**
+    /// **Post-5min drift frames must not produce speech events.**
     ///
     /// VADScenario.longSessionDrift():
     ///   5990 silence frames (prob=0.02, rms=0.0005) +
@@ -483,10 +482,10 @@ struct VADLongSessionDriftTests {
 
     /// Without the volume gate, drift frames WOULD produce false speech events.
     ///
-    /// This is the "what went wrong before Task 1" test. With gate OFF and
+    /// This documents behavior when volume gate is disabled. With gate OFF and
     /// high-prob drift frames (isSpeaking=true in this scenario), events fire.
     ///
-    /// This test DOCUMENTS the pre-fix behavior to make the regression visible.
+    /// This test documents the ungated behavior to keep the contrast explicit.
     @Test func testWithoutVolumeGateDriftFramesProduceEvents() async throws {
         let config = VADConfiguration(
             threshold: 0.15,
@@ -503,7 +502,7 @@ struct VADLongSessionDriftTests {
         let (starts, _, _) = try await runScenario(driftFrames, config: config)
 
         #expect(starts > 0,
-                "Without volume gate, drift frames with isSpeaking=true fire events (pre-Task-1 bug, got \(starts))")
+                "Without volume gate, drift frames with isSpeaking=true fire events (got \(starts))")
     }
 
     /// Ambient noise over 30s must produce zero events with the gate enabled.

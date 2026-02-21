@@ -58,7 +58,7 @@ public struct VADFrame: Sendable {
 
     /// Long-session drift: probability just above threshold, but RMS is ambient noise.
     ///
-    /// Models the condition that motivated Task 1 (state reset): after 5+ minutes of
+    /// Models a long-session state-reset condition: after 5+ minutes of
     /// continuous LSTM operation, Silero's hidden state drifts so that ambient noise
     /// (fan, HVAC) starts producing probabilities just above our 0.15 threshold.
     ///
@@ -66,7 +66,7 @@ public struct VADFrame: Sendable {
     /// Default RMS 0.003: fan/HVAC noise level — below `minVolumeForSpeech` (0.008).
     ///
     /// With volume gate ON:  gate blocks → no speechStart (correct)
-    /// With volume gate OFF: false speechStart fires (the pre-Task-1 bug)
+    /// With volume gate OFF: a false speechStart can fire.
     public static func drift(_ probability: Float = 0.18, rms: Float = 0.003) -> VADFrame {
         VADFrame(probability: probability, isSpeaking: false, instantRMS: rms)
     }
@@ -124,7 +124,7 @@ public struct VADFrame: Sendable {
 /// tests deterministic and independent of the real Silero model output.
 ///
 /// ```swift
-/// // Example: encode the long-session-drift bug as a test scenario
+/// // Example: encode a long-session-drift scenario
 /// let backend = MockVADBackend(VADScenario.longSessionDrift())
 /// await vad._testInjectBackend(backend)
 /// // ... processChunk() will see the scripted drift frames, not Silero output

@@ -343,13 +343,13 @@ public actor SessionController {
         }
         let extended = autoEndConfig.silenceDuration + autoEndConfig.thinkingPauseExtensionSeconds
         if let pattern = ThinkingPauseDetector.incompletePattern(lastTranscript) {
-            logger.debug("Thinking pause detected: pattern='\(pattern, privacy: .public)' extending silence to \(String(format: "%.1f", extended), privacy: .public)s")
+            logger.debug("Thinking pause detected: pattern='\(pattern, privacy: .private(mask: .hash))' extending silence to \(String(format: "%.1f", extended), privacy: .public)s")
         }
         return extended
     }
 }
 
-// MARK: - Debug / Test Helpers
+// MARK: - Test Helpers
 
 #if DEBUG
 extension SessionController {

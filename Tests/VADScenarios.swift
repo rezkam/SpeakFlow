@@ -71,7 +71,7 @@ enum VADScenario {
 
     // MARK: - Feature 1: State Reset (Long Session Drift)
 
-    /// **The bug that motivated Task 1: long-session probability drift.**
+    /// **Long-session probability drift scenario.**
     ///
     /// After 5+ minutes of continuous Silero LSTM operation, the hidden state
     /// accumulates environmental noise context. The model starts assigning
@@ -82,7 +82,7 @@ enum VADScenario {
     /// - 5990 frames (≈5 min) of clean silence (prob=0.02)
     /// - 10 frames of "drift" (prob=0.18, just above threshold=0.15, rms=0.003)
     ///
-    /// **Expected behavior WITH state reset (Task 1 fix):**
+    /// **Expected behavior with periodic state reset enabled:**
     ///   The periodic state reset (every 5s) clears the LSTM context, so the
     ///   probability never drifts. With the mock backend, the state reset only
     ///   matters for our OWN state machine — the drift frames still arrive, but

@@ -232,15 +232,8 @@ struct SessionControllerTests {
 
         // Wait 3s more (total 5s > 4s)
         try? await Task.sleep(for: .seconds(3))
-        // Should trigger fallback ONLY if VAD is in weird state where isSpeaking=false but lastEnd=nil
-        // But onSpeechEvent(.started) sets isSpeaking=true
-        // And guard !isUserSpeaking blocks fallback
-        // So fallback only triggers if isSpeaking=false WITHOUT end event?
-        // This state is impossible via public API unless startSession() -> ... -> somehow isSpeaking=false without ended?
-        // Actually, fallback logic in code handles `lastSpeechEndTime == nil`.
-        // If isSpeaking=false AND lastSpeechEndTime=nil -> means speech never started?
-        // But requireSpeechFirst=true prevents that.
-        // So fallback is dead code unless requireSpeechFirst=false?
+        // With requireSpeechFirst=true, auto-end requires a completed speech cycle.
+        // This means fallback paths that rely on `lastSpeechEndTime == nil` are gated.
 
         // Let's test with requireSpeechFirst=false
         let cfg2 = AutoEndConfiguration(enabled: true, silenceDuration: 3.0, minSessionDuration: 1.0, requireSpeechFirst: false)
@@ -299,9 +292,9 @@ struct SessionControllerTests {
 // These tests verify the core invariant: auto-end ONLY fires after the configured
 // silence duration (default 5.0s) has elapsed since the last speech-end event.
 //
-// BUG CONTEXT: Users report that thinking pauses of ~2 seconds sometimes end the
+// Context: users report that thinking pauses of ~2 seconds sometimes end the
 // entire recording turn. These parameterized tests systematically cover every
-// duration around the threshold to catch any regression.
+// duration around the threshold to catch boundary failures.
 
 @Suite("Silence Duration Boundary — Auto-End Must Not Fire Below Threshold")
 struct SilenceBelowThresholdTests {
@@ -487,12 +480,12 @@ struct MultiplePausesAccumulationTests {
     }
 }
 
-// MARK: - Issue #2: Stale transcription results bleed across sessions
+// MARK: - Cross-session result bleeding
 
-@Suite("Issue #2 — Stale results: session generation prevents cross-session bleeding")
-struct Issue2StaleResultsRegressionTests {
+@Suite("Session generation prevents cross-session bleeding")
+struct CrossSessionBleedingTests {
 
-    /// REGRESSION: reset() must increment sessionGeneration so that stale tickets
+    /// reset() must increment sessionGeneration so that stale tickets
     /// from session N are rejected when submitted to session N+1.
     @Test func testResetIncrementsSessionGeneration() async {
         let queue = TranscriptionQueue()
@@ -506,7 +499,7 @@ struct Issue2StaleResultsRegressionTests {
         #expect(gen2 == gen0 &+ 2, "Second reset should increment again")
     }
 
-    /// REGRESSION: The exact bug scenario — late-arriving result from session N submitted
+    /// Exact stale-result scenario — late-arriving result from session N submitted
     /// after reset() for session N+1. The seq numbers collide because reset zeroes the counter.
     @Test func testStaleTicketWithCollidingSeqNumberIsRejected() async {
         let queue = TranscriptionQueue()
@@ -537,7 +530,7 @@ struct Issue2StaleResultsRegressionTests {
         #expect(pendingAfter == 0, "Valid result should clear pending")
     }
 
-    /// REGRESSION: TranscriptionTicket must carry both session and seq fields.
+    /// TranscriptionTicket must carry both session and seq fields.
     @Test func testTranscriptionTicketCarriesSessionAndSeq() {
         let ticket = TranscriptionTicket(session: 42, seq: 7)
         #expect(ticket.session == 42)
@@ -546,7 +539,7 @@ struct Issue2StaleResultsRegressionTests {
         #expect(ticket != TranscriptionTicket(session: 43, seq: 7), "Different session ≠ equal")
     }
 
-    /// REGRESSION: markFailed with a stale ticket must also be silently discarded.
+    /// markFailed with a stale ticket must also be silently discarded.
     @Test func testStaleMarkFailedIsDiscarded() async {
         let queue = TranscriptionQueue()
         let staleTicket = await queue.nextSequence()
@@ -564,12 +557,12 @@ struct Issue2StaleResultsRegressionTests {
     }
 }
 
-// MARK: - Issue #7: Recorder start failure silently swallowed
+// MARK: - Recorder start failure cleanup
 
-@Suite("Issue #7 — Recorder start failure cleans up state")
-struct Issue7RecorderStartFailureRegressionTests {
+@Suite("Recorder start failure cleans up state")
+struct RecorderStartFailureTests {
 
-    /// REGRESSION: start() result must match recorder state.
+    /// start() result must match recorder state.
     @Test func testStartResultMatchesRecorderState() async {
         let outcome: (started: Bool, isRecordingAfterStart: Bool) = await withCheckedContinuation { cont in
             Task { @MainActor in
@@ -584,14 +577,14 @@ struct Issue7RecorderStartFailureRegressionTests {
                 "start() must only report success when recorder is actually in recording state")
     }
 
-    /// REGRESSION: After a failed start (simulated), all state must be rolled back —
+    /// After a failed start (simulated), all state must be rolled back —
     /// no orphan timers, no stale isRecording flag.
     @Test func testFailedStartCleansUpAllState() async {
         await MainActor.run {
             let recorder = StreamingRecorder()
 
             // Simulate: the recorder was partially set up, then engine.start() failed.
-            // The fix rolls back isRecording, clears engine/buffer/timers.
+            // Roll back isRecording and clear engine/buffer/timers.
             recorder._testSetIsRecording(true) // as if start() set it
             recorder._testSetIsRecording(false) // as if failure rolled it back
 
@@ -602,7 +595,7 @@ struct Issue7RecorderStartFailureRegressionTests {
         }
     }
 
-    /// REGRESSION: cancel() on a never-started recorder must be safe (no crash).
+    /// cancel() on a never-started recorder must be safe (no crash).
     @Test func testCancelOnNeverStartedRecorderIsSafe() async {
         await MainActor.run {
             let recorder = StreamingRecorder()

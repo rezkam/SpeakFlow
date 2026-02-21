@@ -99,7 +99,7 @@ public actor VADModelCache {
 /// This processor wraps FluidAudio's `VadManager` with three additional reliability
 /// features:
 ///
-/// **1. Periodic Silero State Reset** (fixes drift in long sessions)
+/// **1. Periodic Silero State Reset** (prevents drift in long sessions)
 ///   Silero's LSTM hidden state accumulates context indefinitely. In sessions longer
 ///   than ~5 min, this causes probability drift. We reset the model's hidden state
 ///   every 5 seconds while preserving the segmentation state machine.
@@ -156,8 +156,8 @@ public actor VADProcessor {
     /// Running exponentially-smoothed RMS of the audio signal.
     ///
     /// Starts at 0 at session start and converges to the true ambient level within
-    /// ~15–20 frames (~750ms–1s). Resets to 0 on `resetSession()` so a new
-    /// recording session does not inherit volume state from the previous one.
+    /// ~15–20 frames (~750ms–1s). Resets to 0 on `resetSession()` so each
+    /// recording session starts from a clean volume baseline.
     ///
     /// WHY: Raw per-frame RMS spikes on transients (clicks, pops, keyboard sounds).
     /// Smoothing with factor 0.2 means a single spike contributes only 20% to this
@@ -174,6 +174,10 @@ public actor VADProcessor {
     /// WHY: We track this to implement periodic resets. The actor isolation means
     /// Date() reads happen synchronously in the actor's serial executor — no race.
     private var lastStreamStateRefresh: Date = Date()
+
+    /// Whether the last reset attempt was deferred (triggered=true). Used to log
+    /// the deferral once instead of on every frame while the interval is overdue.
+    private var resetDeferralLogged = false
 
     // MARK: - Init
 
@@ -254,31 +258,48 @@ public actor VADProcessor {
             // SOLUTION: Reset the LSTM hidden state every `stateResetInterval`
             // seconds (default 5s) while PRESERVING the segmentation state.
             //
-            // IMPORTANT: We must only reset `modelState` (LSTM h/c vectors), NOT
-            // `triggered`, `tempEndSample`, or `processedSamples`. Those fields
-            // belong to FluidAudio's segmentation state machine — resetting them
-            // during active speech would:
-            //   - Re-arm start detection → duplicate speechStart events
-            //   - Lose in-progress silence tracking → unstable auto-end timing
-            //   - Reset processedSamples → mis-aligned event timestamps
+            // IMPORTANT: Only reset LSTM hidden state when NOT in triggered
+            // (speech-active) state. Resetting during active speech causes the
+            // model to lose context about the current utterance, and the fresh
+            // LSTM h/c vectors can produce high probabilities on silence frames
+            // during "warm-up". This clears `tempEndSample` (the in-progress
+            // silence tracker), preventing speechEnd from ever firing — the
+            // session gets stuck in isUserSpeaking=true permanently.
             //
-            // Previously we called `makeStreamState()` which returns a fully
-            // zeroed `VadStreamState.initial()`, wiping everything. Now we only
-            // replace the `modelState` field, preserving the rest.
+            // When triggered=false (confirmed silence), resetting is safe and
+            // prevents long-session drift. The next speech onset starts with a
+            // clean model state that hasn't accumulated ambient noise patterns.
+            //
+            // processedSamples is always preserved to maintain event timestamp
+            // alignment. When triggered=true, the full reset is deferred —
+            // it will happen on the first interval check after speechEnd fires.
             guard var currentState = streamState else { throw VADError.notInitialized }
 
             let now = Date()
             if now.timeIntervalSince(lastStreamStateRefresh) >= config.stateResetInterval {
-                let freshModelState = VadState.initial()
-                currentState = VadStreamState(
-                    modelState: freshModelState,
-                    triggered: currentState.triggered,
-                    tempEndSample: currentState.tempEndSample,
-                    processedSamples: currentState.processedSamples
-                )
-                streamState = currentState
-                lastStreamStateRefresh = now
-                logger.debug("VAD model state reset (periodic \(self.config.stateResetInterval, privacy: .public)s interval, segmentation preserved: triggered=\(currentState.triggered, privacy: .public))")
+                if !currentState.triggered {
+                    // Safe to reset: no active speech detection in progress.
+                    // Reset modelState + tempEndSample (no silence tracking to preserve).
+                    let freshModelState = VadState.initial()
+                    currentState = VadStreamState(
+                        modelState: freshModelState,
+                        triggered: false,
+                        tempEndSample: nil,
+                        processedSamples: currentState.processedSamples
+                    )
+                    streamState = currentState
+                    lastStreamStateRefresh = now
+                    resetDeferralLogged = false
+                    logger.debug("VAD model state reset (periodic \(self.config.stateResetInterval, privacy: .public)s interval, triggered=false → full reset)")
+                } else if !resetDeferralLogged {
+                    // Speech active: defer reset to avoid breaking speechEnd detection.
+                    // Do NOT advance lastStreamStateRefresh — the reset must fire on
+                    // the very first check after triggered goes false. Advancing the
+                    // timestamp would restart the interval, potentially postponing the
+                    // reset indefinitely in long dictation with short pauses.
+                    resetDeferralLogged = true
+                    logger.debug("VAD model state reset DEFERRED (triggered=true, speech in progress)")
+                }
             }
 
             // ── Feature 2: Exponential Volume Smoothing ───────────────────────
@@ -434,8 +455,7 @@ public actor VADProcessor {
     ///
     /// Resets speech probability accumulators, speaking state, and the Silero
     /// hidden state (via makeStreamState). Also resets smoothedVolume to 0 so
-    /// the new session starts with a clean volume baseline — it would be wrong
-    /// to inherit the previous session's ambient noise level.
+    /// each session starts from a clean volume baseline.
     public func resetSession() async {
         await resetChunk()
         isSpeaking = false
@@ -449,6 +469,7 @@ public actor VADProcessor {
         if let manager = vadManager {
             streamState = await manager.makeStreamState()
             lastStreamStateRefresh = Date()
+            resetDeferralLogged = false
         }
     }
 
@@ -536,7 +557,7 @@ extension VADProcessor {
     }
 }
 
-// MARK: - Debug Helpers
+// MARK: - Test Support
 
 extension VADProcessor {
     // swiftlint:disable:next identifier_name

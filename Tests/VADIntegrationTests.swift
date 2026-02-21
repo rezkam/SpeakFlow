@@ -297,8 +297,8 @@ struct VADIntegrationTests {
                 "Volume gate must suppress all speechStart events from very quiet noise (got \(speechStartCount))")
     }
 
-    /// When the volume gate is DISABLED, behavior should be equivalent to
-    /// the pre-Task-1 code: only Silero's probability determines events.
+    /// When the volume gate is DISABLED, event decisions are driven by
+    /// Silero probability and speaking state only.
     ///
     /// We feed quiet noise with gate disabled. We don't assert that events
     /// fire (Silero is nondeterministic on pure noise), but we assert that
@@ -460,8 +460,7 @@ struct VADIntegrationTests {
 
     // MARK: - resetSession() behavior
 
-    /// `resetSession()` must reset smoothedVolume to 0 so the previous
-    /// session's loudness doesn't carry over to the next.
+    /// `resetSession()` must reset smoothedVolume to 0 so each session starts clean.
     @Test func testResetSessionClearsSmoothedVolume() async throws {
         guard VADProcessor.isAvailable else { return }
 

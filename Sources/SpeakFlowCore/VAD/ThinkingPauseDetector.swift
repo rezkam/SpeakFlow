@@ -144,13 +144,9 @@ public enum ThinkingPauseDetector {
     ///
     /// ## Performance
     ///
-    /// Previous implementation built this `CharacterSet` from scratch on every
-    /// `normalize()` call using 6 `formUnion` operations — allocating and copying
-    /// an 8 KB bitmap 7 times per invocation. `normalize()` is called every 0.5s
-    /// (from `shouldAutoEndSession()`) and every 2s (from `diagnosticSummary`).
-    ///
     /// `static let` initialises once at first use and is shared for the lifetime
     /// of the process — zero allocation on every subsequent call.
+    /// `normalize()` is called frequently (every 0.5s), so avoiding allocation is critical.
     private static let trailingPunctuation: CharacterSet = {
         CharacterSet(charactersIn:
             ".,;:?!"                                    // common sentence terminators
@@ -163,10 +159,6 @@ public enum ThinkingPauseDetector {
     /// Multi-word thinking phrases grouped by their last word for O(1) pre-filter.
     ///
     /// ## Performance
-    ///
-    /// Previous implementation linearly scanned `thinkingPhrases` (22 entries) on
-    /// every `isLikelyIncomplete()` call, calling `hasSuffix` on each. `hasSuffix`
-    /// is O(|phrase|) Unicode-scalar comparison.
     ///
     /// With this dictionary, the lookup path becomes:
     ///   1. O(1) dictionary lookup by last word  (0 `hasSuffix` calls on miss)
@@ -303,10 +295,5 @@ public enum ThinkingPauseDetector {
         }
 
         return result
-    }
-
-    /// Legacy entry point kept for any call sites that only need the normalised string.
-    private static func normalize(_ text: String) -> String {
-        normalizeWithWords(text).normalized
     }
 }

@@ -48,7 +48,7 @@ public struct VADConfiguration: Sendable {
     /// falls back to pure time-based chunking (no silence detection).
     public var enabled: Bool
 
-    // MARK: - Volume Gate (Problem 2 fix)
+    // MARK: - Volume Gate
 
     /// When true, requires audio to exceed `minVolumeForSpeech` (smoothed RMS)
     /// before a `speechStart` event is allowed through.
@@ -107,7 +107,7 @@ public struct VADConfiguration: Sendable {
     ///
     public var volumeSmoothingFactor: Float
 
-    // MARK: - Silero State Reset (Problem 1 fix)
+    // MARK: - Silero State Reset
 
     /// How often (seconds) to reset the Silero RNN hidden state during recording.
     ///

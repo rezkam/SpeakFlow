@@ -11,10 +11,10 @@ import Testing
 //
 //   (A) Patterns explicitly listed in ThinkingPauseDetector's word lists
 //   (B) Naturally-occurring speech from dictation scenarios
-//   (C) Edge cases that historically caused false positives/negatives in rule-based systems
+//   (C) Edge cases that commonly cause false positives/negatives in rule-based systems
 //
 // Each test documents WHY the expected result is what it is, so future maintainers
-// can distinguish "this is a known trade-off" from "this is a bug".
+// can distinguish "this is a known trade-off" from "this is an implementation limit".
 //
 // ## Testing philosophy (continued)
 //
