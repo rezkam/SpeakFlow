@@ -10,6 +10,9 @@ public final class Transcription {
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
     private let statistics: any StatisticsProviding
     private let service: any TranscriptionServiceProviding
+#if DEBUG
+    private var testErrorSoundPlayCount = 0
+#endif
 
     var queue: TranscriptionQueueBridge { queueBridge }
 
@@ -23,7 +26,7 @@ public final class Transcription {
     }
 
     public func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk) {
-        // P1 Security: Use UUID to track and clean up tasks to prevent memory leak
+        // Use stable task IDs so each async task is removed from tracking on completion.
         let taskId = UUID()
         let task = Task { [weak self] in
             defer {
@@ -51,10 +54,20 @@ public final class Transcription {
                 // AFTER onTextReady delivers the text, ensuring the completion sound
                 // only plays after all text has been queued for insertion.
             } catch {
+                if Self.isCancellation(error) {
+                    Logger.transcription.debug("Chunk #\(ticket.seq) cancelled")
+                    await self?.queueBridge.markFailed(ticket: ticket)
+                    await self?.queueBridge.checkCompletion()
+                    return
+                }
+
                 Logger.transcription.error("Chunk #\(ticket.seq) failed: \(error.localizedDescription)")
                 await self?.queueBridge.markFailed(ticket: ticket)
 
                 // Play error sound to notify user that transcription failed
+#if DEBUG
+                self?.testErrorSoundPlayCount &+= 1
+#endif
                 SoundEffect.error.play()
 
                 // Failed chunks don't yield text to the stream, so check completion
@@ -74,6 +87,23 @@ public final class Transcription {
         // Cancelling them above is sufficient — the underlying URLSession requests
         // will be cancelled via cooperative Task cancellation.
     }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        if let transcriptionError = error as? TranscriptionError,
+           case .cancelled = transcriptionError {
+            return true
+        }
+        return false
+    }
 }
 
 extension Transcription: TranscriptionCoordinating {}
+
+#if DEBUG
+extension Transcription {
+    var _testErrorSoundPlayCount: Int { testErrorSoundPlayCount }
+}
+#endif

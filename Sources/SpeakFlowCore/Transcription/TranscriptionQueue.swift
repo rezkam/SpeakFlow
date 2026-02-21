@@ -27,7 +27,11 @@ public actor TranscriptionQueue {
 
     // Continuations for async streaming
     private var textContinuation: AsyncStream<String>.Continuation?
-    private var completionContinuation: CheckedContinuation<Void, Never>?
+    private struct CompletionWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
+    private var completionWaiters: [CompletionWaiter] = []
 
     /// Lazily-initialized text stream. Only one consumer is supported.
     /// Accessing this property multiple times returns the same stream;
@@ -120,8 +124,7 @@ public actor TranscriptionQueue {
         }
 
         if pendingResults.isEmpty && currentSeq == nextSeqToOutput && currentSeq > 0 {
-            completionContinuation?.resume()
-            completionContinuation = nil
+            resumeAllCompletionWaiters()
         }
     }
 
@@ -132,31 +135,61 @@ public actor TranscriptionQueue {
             return
         }
 
+        let waiterId = UUID()
+
         // Schedule a timeout to prevent indefinite hang if flushReady() never fires
         let timeoutTask = Task {
             try await Task.sleep(for: .seconds(Self.completionTimeoutSeconds))
-            if self.completionContinuation != nil {
-                Logger.transcription.warning("waitForCompletion timed out after \(Self.completionTimeoutSeconds)s")
-                self.completionContinuation?.resume()
-                self.completionContinuation = nil
-            }
+            self.resumeCompletionWaiter(waiterId, timedOut: true)
         }
 
         await withCheckedContinuation { continuation in
-            self.completionContinuation = continuation
+            if pendingResults.isEmpty && currentSeq == nextSeqToOutput && currentSeq > 0 {
+                continuation.resume()
+                return
+            }
+            completionWaiters.append(CompletionWaiter(id: waiterId, continuation: continuation))
         }
 
         timeoutTask.cancel()
     }
 
     func finishStream() {
-        // P2 Security: Resume completion continuation before clearing to prevent caller hang
-        completionContinuation?.resume()
-        completionContinuation = nil
+        // Resume completion before cleanup so awaiters cannot get stuck waiting.
+        resumeAllCompletionWaiters()
         textContinuation?.finish()
         textContinuation = nil
     }
+
+    private func resumeCompletionWaiter(_ waiterId: UUID, timedOut: Bool) {
+        guard let index = completionWaiters.firstIndex(where: { $0.id == waiterId }) else {
+            return
+        }
+
+        let waiter = completionWaiters.remove(at: index)
+        if timedOut {
+            Logger.transcription.warning("waitForCompletion timed out after \(Self.completionTimeoutSeconds)s")
+        }
+        waiter.continuation.resume()
+    }
+
+    private func resumeAllCompletionWaiters() {
+        let waiters = completionWaiters
+        completionWaiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume()
+        }
+    }
 }
+
+#if DEBUG
+extension TranscriptionQueue {
+    // swiftlint:disable:next identifier_name
+    func _testCompletionWaiterCount() -> Int {
+        completionWaiters.count
+    }
+}
+#endif
 
 // MARK: - Callback Bridge
 

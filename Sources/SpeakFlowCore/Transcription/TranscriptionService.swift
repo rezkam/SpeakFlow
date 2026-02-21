@@ -10,7 +10,7 @@ struct TranscriptionResponse: Decodable {
 public actor TranscriptionService {
     public static let shared = TranscriptionService()
 
-    /// P2 Security: Truncate error body Data before converting to String
+    /// Truncate error response bytes before converting to a String.
     /// This prevents loading multi-megabyte error responses into memory
     public static func truncateErrorBody(_ data: Data, maxBytes: Int = 200) -> String {
         if data.count <= maxBytes {
@@ -125,7 +125,7 @@ public actor TranscriptionService {
 
         // Validate status code
         guard (200...299).contains(httpResponse.statusCode) else {
-            // P2 Security: Truncate error body at Data level to prevent loading
+            // Truncate at the Data level to avoid materializing large error payloads.
             // multi-megabyte responses into memory before truncation
             let body = Self.truncateErrorBody(data, maxBytes: 200)
             throw TranscriptionError.httpError(statusCode: httpResponse.statusCode, body: body.isEmpty ? nil : body)
@@ -136,18 +136,13 @@ public actor TranscriptionService {
             let transcriptionResponse = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
             return transcriptionResponse.text
         } catch let decodingError as DecodingError {
-            // Try legacy format (plain JSON object with "text" key)
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let text = json["text"] as? String {
-                return text
-            }
             throw TranscriptionError.decodingFailed(underlying: decodingError)
         }
     }
 
     /// Build the multipart form request
     private func buildRequest(audio: Data, credentials: AuthCredentials, timeout: Double = Config.timeout) throws -> URLRequest {
-        // P0 Security: Validate audio size to prevent memory exhaustion and DoS
+        // Enforce a hard audio-size cap to avoid memory pressure from oversized uploads.
         guard audio.count <= Config.maxAudioSizeBytes else {
             let sizeMB = Double(audio.count) / 1_000_000
             let maxMB = Double(Config.maxAudioSizeBytes) / 1_000_000

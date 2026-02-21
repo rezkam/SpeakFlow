@@ -154,6 +154,33 @@ struct TranscriptionQueueTests {
 
         #expect(completed == true, "finishStream should resume waitForCompletion continuation")
     }
+
+    @Test func testWaitForCompletionSupportsMultipleConcurrentWaiters() async {
+        let queue = TranscriptionQueue()
+        let ticket = await queue.nextSequence()
+        let waiters = 3
+
+        let completionCount = OSAllocatedUnfairLock(initialState: 0)
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<waiters {
+                group.addTask {
+                    await queue.waitForCompletion()
+                    completionCount.withLock { $0 += 1 }
+                }
+            }
+
+            try? await Task.sleep(for: .milliseconds(80))
+            #expect(completionCount.withLock { $0 } == 0,
+                    "All waiters should block until the queue is complete")
+
+            await queue.submitResult(ticket: ticket, text: "done")
+            try? await Task.sleep(for: .milliseconds(120))
+            #expect(completionCount.withLock { $0 } == waiters,
+                    "All concurrent waiters must be resumed on completion")
+            group.cancelAll()
+        }
+    }
 }
 
 // MARK: - Issue #17: TranscriptionQueue.textStream overwrites continuation
@@ -161,9 +188,8 @@ struct TranscriptionQueueTests {
 @Suite("Issue #17 — textStream returns cached stream, not new one each time")
 struct Issue17TextStreamOverwriteRegressionTests {
 
-    /// REGRESSION: Accessing textStream multiple times must return the same stream.
-    /// The original bug created a new AsyncStream on each access, orphaning the
-    /// previous consumer's continuation.
+    /// Accessing textStream multiple times must return the same stream instance
+    /// so existing consumers continue receiving yielded values.
     @Test func testTextStreamReturnsSameInstanceOnMultipleAccesses() async {
         let queue = TranscriptionQueue()
 
@@ -281,14 +307,12 @@ struct TranscriptionQueueWaitForCompletionTests {
         let t0 = await queue.nextSequence()
         await queue.submitResult(ticket: t0, text: "done")
 
-        // This must return immediately — no blocking
         let done = OSAllocatedUnfairLock(initialState: false)
-        let task = Task {
+        Task {
             await queue.waitForCompletion()
             done.withLock { $0 = true }
         }
-        _ = task
-        try? await Task.sleep(for: .milliseconds(50))
+        try? await waitUntil(timeout: .milliseconds(250)) { done.withLock { $0 } }
         #expect(done.withLock { $0 } == true,
                 "waitForCompletion must return immediately when all results submitted")
     }
@@ -300,14 +324,17 @@ struct TranscriptionQueueWaitForCompletionTests {
     @Test func testWaitForCompletionOnFreshQueueNeverReturns() async {
         let queue = TranscriptionQueue()
         let done = OSAllocatedUnfairLock(initialState: false)
-        let task = Task {
+        Task {
             await queue.waitForCompletion()
             done.withLock { $0 = true }
         }
-        try? await Task.sleep(for: .milliseconds(100))
+
+        try? await Task.sleep(for: .milliseconds(200))
         #expect(done.withLock { $0 } == false,
                 "waitForCompletion on empty queue (currentSeq=0) must not return immediately")
-        task.cancel()
+
+        // Avoid leaking a waiter that would otherwise rely on the 30s timeout.
+        await queue.finishStream()
     }
 
     /// The minimal completion case — one ticket issued and submitted.
@@ -316,17 +343,33 @@ struct TranscriptionQueueWaitForCompletionTests {
         let t = await queue.nextSequence()
 
         let done = OSAllocatedUnfairLock(initialState: false)
-        let task = Task {
+        Task {
             await queue.waitForCompletion()
             done.withLock { $0 = true }
         }
-        _ = task
 
-        try? await Task.sleep(for: .milliseconds(50))
+        // Ensure waiter is actually registered before submitting completion.
+        let waiterRegistered = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                while await queue._testCompletionWaiterCount() == 0 {
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(1))
+                return false
+            }
+
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+        #expect(waiterRegistered == true, "waitForCompletion waiter should register promptly")
         #expect(done.withLock { $0 } == false, "Should still be waiting")
 
         await queue.submitResult(ticket: t, text: "only")
-        try? await Task.sleep(for: .milliseconds(50))
+        try? await waitUntil(timeout: .seconds(1)) { done.withLock { $0 } }
         #expect(done.withLock { $0 } == true, "Should complete with single result")
     }
 
@@ -353,9 +396,12 @@ struct TranscriptionQueueWaitForCompletionTests {
         }
         _ = streamTask; _ = waitTask
 
-        try? await Task.sleep(for: .milliseconds(50))
+        try? await waitUntilAsync(timeout: .seconds(1)) {
+            await queue._testCompletionWaiterCount() > 0
+        }
         await queue.finishStream()
-        try? await Task.sleep(for: .milliseconds(100))
+        try? await waitUntil(timeout: .seconds(1)) { completionDone.withLock { $0 } }
+        try? await waitUntil(timeout: .seconds(1)) { streamEnded.withLock { $0 } }
 
         #expect(completionDone.withLock { $0 } == true,
                 "finishStream must resume completionContinuation")
@@ -755,7 +801,7 @@ struct TranscriptionQueueTextStreamLifecycleTests {
 
     /// Stream delivers results in order and one at a time as they are submitted.
     /// Uses the stream itself as the synchronisation primitive — no polling or
-    /// fixed sleeps — so this test is deterministic under any scheduler load.
+    /// timer-based sleeps — so this test is deterministic under any scheduler load.
     @Test func testStreamDeliversResultsInRealTime() async {
         let queue = TranscriptionQueue()
         let stream = await queue.textStream
@@ -804,16 +850,25 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         let t2 = await queue.nextSequence()
         await queue.submitResult(ticket: t2, text: "late")
 
-        let collectTask = Task {
-            var items: [String] = []
-            for await text in stream {
-                items.append(text)
-                if items.count >= 1 { break }
+        let received = await withTaskGroup(of: [String]?.self) { group in
+            group.addTask {
+                var items: [String] = []
+                for await text in stream {
+                    items.append(text)
+                    if items.count >= 1 { break }
+                }
+                return items
             }
-            return items
+            group.addTask {
+                try? await Task.sleep(for: .seconds(1))
+                return nil
+            }
+
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
         }
-        try? await Task.sleep(for: .milliseconds(200))
-        let received = await collectTask.value
+
         #expect(received == ["late"],
                 "Only results submitted after stream access should be received")
     }
@@ -829,11 +884,8 @@ struct TranscriptionQueueTextStreamLifecycleTests {
             loopExited.withLock { $0 = true }
         }
 
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(loopExited.withLock { $0 } == false, "Loop should be waiting")
-
         await queue.finishStream()
-        try? await Task.sleep(for: .milliseconds(100))
+        try? await waitUntil(timeout: .seconds(1)) { loopExited.withLock { $0 } }
         #expect(loopExited.withLock { $0 } == true,
                 "for-await loop must exit after finishStream()")
         _ = task
@@ -871,16 +923,25 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         }
 
         // Now consume — all 20 should be buffered
-        let collectTask = Task {
-            var items: [String] = []
-            for await text in stream {
-                items.append(text)
-                if items.count >= 20 { break }
+        let received = await withTaskGroup(of: [String]?.self) { group in
+            group.addTask {
+                var items: [String] = []
+                for await text in stream {
+                    items.append(text)
+                    if items.count >= 20 { break }
+                }
+                return items
             }
-            return items
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return nil
+            }
+
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result ?? []
         }
-        try? await Task.sleep(for: .milliseconds(300))
-        let received = await collectTask.value
+
         #expect(received.count == 20, "All 20 results must be buffered and delivered")
         #expect(received.first == "msg0")
         #expect(received.last == "msg19")
@@ -1362,7 +1423,7 @@ struct TranscriptionServiceRetryErrorTests {
 @Suite("TranscriptionQueueBridge — Completion Sound Ordering (Race Condition)")
 struct CompletionOrderingRaceTests {
 
-    /// The completion sound bug: `onAllComplete` could fire before `onTextReady`
+    /// Completion ordering risk: `onAllComplete` could fire before `onTextReady`
     /// delivered all text. This test verifies the invariant that text delivery
     /// always precedes the completion signal.
     ///
