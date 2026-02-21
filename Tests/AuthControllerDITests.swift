@@ -75,7 +75,7 @@ struct AuthControllerDITests {
 
     @Test @MainActor
     func removeSharedKeyFallsBackWhenBatchVariantIsActive() {
-        // Bug scenario: active = mistralBatch, remove key for mistral.
+        // Scenario: active = mistralBatch, remove key for mistral.
         // Both providers share the same key, so removing "mistral" deconfigures "mistral-batch" too.
         let spyPS = SpyProviderSettings()
         spyPS.activeProviderId = ProviderId.mistralBatch

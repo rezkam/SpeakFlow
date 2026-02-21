@@ -117,6 +117,13 @@ public final class OpenAICodexAuth {
         get { _httpProviderLock.withLock { $0 } }
         set { _httpProviderLock.withLock { $0 = newValue } }
     }
+
+    private static let secureRandomProvider: @Sendable (Int, UnsafeMutableRawPointer) -> Int32 = { count, pointer in
+        SecRandomCopyBytes(kSecRandomDefault, count, pointer)
+    }
+    private static let _randomProviderLock = OSAllocatedUnfairLock<@Sendable (Int, UnsafeMutableRawPointer) -> Int32>(
+        initialState: secureRandomProvider
+    )
     
     private static let storage = UnifiedAuthStorage.shared
     
@@ -127,10 +134,10 @@ public final class OpenAICodexAuth {
         let challenge: String
     }
     
-    private static func generatePKCE() -> PKCE {
+    private static func generatePKCE() throws -> PKCE {
         // Generate 32 random bytes for verifier
         var verifierBytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, verifierBytes.count, &verifierBytes)
+        try fillSecureRandomBytes(&verifierBytes)
         let verifier = base64URLEncode(Data(verifierBytes))
         
         // SHA-256 hash for challenge
@@ -150,10 +157,23 @@ public final class OpenAICodexAuth {
     
     // MARK: - State
     
-    private static func generateState() -> String {
+    private static func generateState() throws -> String {
         var stateBytes = [UInt8](repeating: 0, count: 16)
-        _ = SecRandomCopyBytes(kSecRandomDefault, stateBytes.count, &stateBytes)
+        try fillSecureRandomBytes(&stateBytes)
         return stateBytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func fillSecureRandomBytes(_ bytes: inout [UInt8]) throws {
+        let status = bytes.withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return errSecParam }
+            let provider = _randomProviderLock.withLock { $0 }
+            return provider(rawBuffer.count, baseAddress)
+        }
+
+        guard status == errSecSuccess else {
+            Logger.auth.error("Secure random generation failed with status \(status)")
+            throw AuthError.randomGenerationFailed
+        }
     }
     
     // MARK: - Authorization URL
@@ -164,9 +184,9 @@ public final class OpenAICodexAuth {
         public let state: String
     }
     
-    public static func createAuthorizationFlow() -> AuthorizationFlow {
-        let pkce = generatePKCE()
-        let state = generateState()
+    public static func createAuthorizationFlow() throws -> AuthorizationFlow {
+        let pkce = try generatePKCE()
+        let state = try generateState()
 
         var components = authorizeComponents
         components.queryItems = [
@@ -192,6 +212,18 @@ public final class OpenAICodexAuth {
             state: state
         )
     }
+
+#if DEBUG
+    static func _testSetRandomBytesProvider(
+        _ provider: @escaping @Sendable (Int, UnsafeMutableRawPointer) -> Int32
+    ) {
+        _randomProviderLock.withLock { $0 = provider }
+    }
+
+    static func _testResetRandomBytesProvider() {
+        _randomProviderLock.withLock { $0 = secureRandomProvider }
+    }
+#endif
     
     // MARK: - Form Encoding
 
@@ -410,6 +442,7 @@ public enum AuthError: LocalizedError {
     case missingAccountId
     case stateMismatch
     case missingCode
+    case randomGenerationFailed
     
     public var errorDescription: String? {
         switch self {
@@ -425,7 +458,8 @@ public enum AuthError: LocalizedError {
             return String(localized: "OAuth state mismatch - possible security issue")
         case .missingCode:
             return String(localized: "Missing authorization code")
+        case .randomGenerationFailed:
+            return String(localized: "Failed to generate secure random bytes for OAuth flow")
         }
     }
 }
-

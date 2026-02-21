@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import os
 import Testing
@@ -62,9 +63,9 @@ struct RateLimiterTests {
     }
 }
 
-// MARK: - Rate Limiter Regression Tests
+// MARK: - Rate Limiter Concurrency
 
-struct RateLimiterRegressionTests {
+struct RateLimiterConcurrencyTests {
     @Test func testConcurrentRequestsReserveDistinctSlots() async throws {
         let interval = 0.10
         let limiter = RateLimiter(minimumInterval: interval)
@@ -220,11 +221,11 @@ struct TokenRefreshCoordinatorTests {
     }
 }
 
-// MARK: - HTTPDataProvider / Testability Tests (Issue #22)
+// MARK: - HTTPDataProvider / Testability Tests
 
 @Suite(.serialized) struct HTTPDataProviderTestabilityTests {
     @Test func testMockProviderCanBeInjected() async throws {
-        // Save original
+        // Save current provider
         let original = OpenAICodexAuth.httpProvider
         defer { OpenAICodexAuth.httpProvider = original }
 
@@ -288,7 +289,7 @@ struct OAuthFormEncodingTests {
     }
 }
 
-struct OAuthFormEncodingRegressionTests {
+struct OAuthFormEncodingScenarioTests {
     @Test func testOpaqueTokenRoundTripsThroughFormBody() {
         let opaqueToken = "r3fr3sh+token=abc&scope=openid profile"
         let bodyData = OpenAICodexAuth.formURLEncodedBody([
@@ -306,8 +307,54 @@ struct OAuthFormEncodingRegressionTests {
     }
 }
 
+@Suite(.serialized)
+struct OAuthAuthorizationFlowRandomnessTests {
+    @Test func testCreateAuthorizationFlowThrowsWhenSecureRandomFails() {
+        OpenAICodexAuth._testSetRandomBytesProvider { _, _ in -1 }
+        defer { OpenAICodexAuth._testResetRandomBytesProvider() }
+
+        do {
+            _ = try OpenAICodexAuth.createAuthorizationFlow()
+            Issue.record("Expected randomGenerationFailed when secure RNG fails")
+        } catch let error as AuthError {
+            guard case .randomGenerationFailed = error else {
+                Issue.record("Expected randomGenerationFailed, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected AuthError.randomGenerationFailed, got \(error)")
+        }
+    }
+
+    @Test func testCreateAuthorizationFlowReadsRandomBytesForStateAndPKCE() throws {
+        let callCount = OSAllocatedUnfairLock(initialState: 0)
+
+        OpenAICodexAuth._testSetRandomBytesProvider { count, rawPointer in
+            let invocation = callCount.withLock { value in
+                value &+= 1
+                return value
+            }
+            let bytes = rawPointer.assumingMemoryBound(to: UInt8.self)
+            for i in 0..<count {
+                bytes[i] = UInt8((invocation + i) & 0xFF)
+            }
+            return errSecSuccess
+        }
+        defer { OpenAICodexAuth._testResetRandomBytesProvider() }
+
+        let flow = try OpenAICodexAuth.createAuthorizationFlow()
+        #expect(!flow.state.isEmpty)
+        #expect(!flow.verifier.isEmpty)
+        #expect(callCount.withLock { $0 } == 2,
+                "OAuth flow should request secure random bytes for verifier and state")
+    }
+}
+
 // MARK: - OAuth Callback Server Tests
 
+/// Serialized: these tests bind to localhost ports and concurrent port allocation
+/// can cause races where an HTTP client hits a stale/wrong server under load.
+@Suite(.serialized)
 struct OAuthCallbackServerTests {
     @Test func testValidCallbackReturnsAuthorizationCode() async throws {
         let port = randomOAuthTestPort()
@@ -349,9 +396,34 @@ struct OAuthCallbackServerTests {
         #expect(httpStatus == 400)
         #expect(receivedCode == nil)
     }
+
+    @Test func testFragmentedRequestStillParsesStateAndCode() async throws {
+        let port = randomOAuthTestPort()
+        let expectedState = "frag-state"
+        let expectedCode = "frag-code"
+        let server = OAuthCallbackServer(expectedState: expectedState, port: port)
+
+        #expect(server.prepareForCallback())
+
+        // Split mid-query to simulate partial TCP reads.
+        let query = "code=\(expectedCode)&state=\(expectedState)"
+        let split = max(1, query.count / 2)
+
+        async let code = server.waitForPreparedCallback(timeout: 5.0)
+        async let status = hitOAuthCallbackFragmented(
+            port: port,
+            query: query,
+            splitAt: 18 + split // include path prefix in split point
+        )
+
+        let (receivedCode, httpStatus) = try await (code, status)
+        #expect(httpStatus == 200)
+        #expect(receivedCode == expectedCode)
+    }
 }
 
-struct OAuthCallbackServerRegressionTests {
+@Suite(.serialized)
+struct OAuthCallbackServerConcurrentTests {
     @Test func testConcurrentStopOnlyResumesOnce() async {
         let port = randomOAuthTestPort()
         let server = OAuthCallbackServer(expectedState: "state", port: port)
@@ -398,12 +470,33 @@ struct OAuthCallbackServerRegressionTests {
         let result = await server.waitForPreparedCallback(timeout: 0.2)
         #expect(result == nil)
     }
+
+    @Test func testPartialClientRequestDoesNotBlockPastDeadline() async throws {
+        let port = randomOAuthTestPort()
+        let server = OAuthCallbackServer(expectedState: "state", port: port)
+        #expect(server.prepareForCallback())
+
+        let waitTask = Task { await server.waitForPreparedCallback(timeout: 1.5) }
+        try await Task.sleep(for: .milliseconds(50))
+
+        let partial = "GET /auth/callback?code=abc&st"
+        let socket = try openOAuthPartialConnection(port: port, partialRequest: partial)
+        defer { Darwin.close(socket) }
+
+        let start = Date()
+        let result = await waitTask.value
+        let elapsed = Date().timeIntervalSince(start)
+
+        #expect(result == nil)
+        #expect(elapsed < 8.0,
+                "Partial client requests should hit the read deadline, not block indefinitely")
+    }
 }
 
-// MARK: - Issue #3 Regression: OAuthCallbackServer data-race guard
+// MARK: - OAuthCallbackServer synchronization
 
-@Suite("Issue #3 — OAuthCallbackServer synchronization guards")
-struct Issue3OAuthCallbackServerSourceTests {
+@Suite("OAuthCallbackServer synchronization guards")
+struct OAuthCallbackServerSynchronizationTests {
 
     /// Behavioral: cancelling during active wait returns nil promptly (< 1s).
     @Test func testCancellationDuringWaitReturnsNilPromptly() async throws {
@@ -431,10 +524,10 @@ struct Issue3OAuthCallbackServerSourceTests {
     }
 }
 
-// MARK: - Issue #5 Regression: TokenRefreshCoordinator edge cases
+// MARK: - TokenRefreshCoordinator edge cases
 
-@Suite("Issue #5 — TokenRefreshCoordinator additional edge cases")
-struct Issue5TokenRefreshEdgeCaseTests {
+@Suite("TokenRefreshCoordinator additional edge cases")
+struct TokenRefreshEdgeCaseTests {
 
     private static func makeCreds() -> OAuthCredentials {
         OAuthCredentials(
@@ -511,10 +604,10 @@ struct Issue5TokenRefreshEdgeCaseTests {
     }
 }
 
-// MARK: - Issue #6 Regression: Rate limiter atomic reservation (additional)
+// MARK: - Rate limiter atomic reservation (additional)
 
-@Suite("Issue #6 — Rate limiter atomic slot reservation (additional)")
-struct Issue6RateLimiterAtomicTests {
+@Suite("Rate limiter atomic slot reservation (additional)")
+struct RateLimiterAtomicTests {
 
     /// 6 concurrent callers must each get a distinct slot — verify via aggregate span.
     @Test func testFiveConcurrentCallersGetFiveDistinctSlots() async throws {
@@ -561,10 +654,10 @@ struct Issue6RateLimiterAtomicTests {
     }
 }
 
-// MARK: - Issue #15 Regression: Form encoding RFC 3986 compliance (additional)
+// MARK: - Form encoding RFC 3986 compliance
 
-@Suite("Issue #15 — Form encoding edge cases (RFC 3986)")
-struct Issue15FormEncodingEdgeCaseTests {
+@Suite("Form encoding edge cases (RFC 3986)")
+struct FormEncodingRFC3986Tests {
 
     /// Percent sign in values must be double-encoded to %25.
     /// A token containing literal `%20` must not be misinterpreted as a space.
@@ -638,9 +731,9 @@ struct Issue15FormEncodingEdgeCaseTests {
     }
 }
 
-// MARK: - AuthError Localization Regression Tests (Issue #20)
+// MARK: - AuthError Localization Tests
 
-@Suite("Issue #20 — AuthError Localization")
+@Suite("AuthError Localization")
 struct AuthErrorLocalizationTests {
 
     /// AuthError runtime values should be non-empty.
@@ -671,9 +764,9 @@ struct AuthErrorLocalizationTests {
     }
 }
 
-// MARK: - P2 Fix: TokenRefreshCoordinator deduplication
+// MARK: - TokenRefreshCoordinator deduplication behavior
 
-@Suite("P2 — TokenRefreshCoordinator shared _refreshCore")
+@Suite("TokenRefreshCoordinator shared _refreshCore")
 struct TokenRefreshDeduplicationTests {
 
     /// Behavioral: both entry points coalesce concurrent callers identically.

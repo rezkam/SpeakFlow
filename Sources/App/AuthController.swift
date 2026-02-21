@@ -43,7 +43,14 @@ final class AuthController {
     }
 
     func startLoginFlow() {
-        let flow = OpenAICodexAuth.createAuthorizationFlow()
+        let flow: OpenAICodexAuth.AuthorizationFlow
+        do {
+            flow = try OpenAICodexAuth.createAuthorizationFlow()
+        } catch {
+            Logger.auth.error("Failed to create OAuth authorization flow: \(error.localizedDescription)")
+            appState.showBanner("Login failed — could not initialize secure OAuth flow", style: .error)
+            return
+        }
         let server = OAuthCallbackServer(expectedState: flow.state)
 
         // Bind/listen before opening the browser to avoid a startup race where

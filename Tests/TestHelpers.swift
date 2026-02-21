@@ -1,4 +1,6 @@
+import Darwin
 import Foundation
+import os
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
@@ -35,7 +37,7 @@ final class MockDateProvider: @unchecked Sendable {
     func date() -> Date { now }
 }
 
-// MARK: - HTTPDataProvider / Testability Tests (Issue #22)
+// MARK: - HTTPDataProvider / Testability Tests
 
 /// A mock HTTP data provider that returns canned responses.
 final class MockHTTPProvider: HTTPDataProvider, @unchecked Sendable {
@@ -65,8 +67,16 @@ final class MockHTTPProvider: HTTPDataProvider, @unchecked Sendable {
 
 // MARK: - OAuth Callback Server Tests
 
+/// Assigns unique ports to each OAuth test to prevent bind collisions when tests
+/// run concurrently. An atomic counter offsets from a random base so different
+/// test processes also avoid colliding.
+private let oauthPortCounter = OSAllocatedUnfairLock(initialState: UInt16.random(in: 20_000...50_000))
 func randomOAuthTestPort() -> UInt16 {
-    UInt16.random(in: 20_000...59_999)
+    oauthPortCounter.withLock { counter in
+        let port = counter
+        counter &+= 1
+        return port
+    }
 }
 
 func hitOAuthCallback(port: UInt16, query: String) async throws -> Int {
@@ -83,6 +93,97 @@ func hitOAuthCallback(port: UInt16, query: String) async throws -> Int {
     // Final attempt — let it throw on failure.
     let (_, response) = try await URLSession.shared.data(from: url)
     return (response as? HTTPURLResponse)?.statusCode ?? -1
+}
+
+/// Sends a raw HTTP callback in two writes to simulate packet fragmentation.
+/// Used to validate that OAuthCallbackServer handles partial request reads.
+func hitOAuthCallbackFragmented(port: UInt16, query: String, splitAt: Int) async throws -> Int {
+    try await Task.detached(priority: .userInitiated) {
+        let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { throw URLError(.cannotCreateFile) }
+        defer { Darwin.close(sock) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+        // Retry connect briefly while server accept loop comes up.
+        var connected = false
+        for _ in 0..<20 {
+            let result = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            if result == 0 {
+                connected = true
+                break
+            }
+            usleep(50_000)
+        }
+        guard connected else { throw URLError(.cannotConnectToHost) }
+
+        let request = "GET /auth/callback?\(query) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\n\r\n"
+        let bytes = Array(request.utf8)
+        let split = max(1, min(splitAt, bytes.count - 1))
+
+        _ = bytes[..<split].withUnsafeBytes { ptr in
+            Darwin.write(sock, ptr.baseAddress, split)
+        }
+        usleep(20_000)
+        _ = bytes[split...].withUnsafeBytes { ptr in
+            Darwin.write(sock, ptr.baseAddress, bytes.count - split)
+        }
+
+        var response = [UInt8](repeating: 0, count: 512)
+        let n = Darwin.read(sock, &response, response.count)
+        guard n > 0,
+              let text = String(bytes: response.prefix(n), encoding: .utf8),
+              let firstLine = text.split(separator: "\r\n").first,
+              let statusToken = firstLine.split(separator: " ").dropFirst().first,
+              let status = Int(statusToken) else {
+            return -1
+        }
+        return status
+    }.value
+}
+
+/// Opens a localhost OAuth callback socket and sends a partial HTTP request without
+/// terminating headers. Caller owns the returned socket and should close it.
+func openOAuthPartialConnection(port: UInt16, partialRequest: String) throws -> Int32 {
+    let socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+    guard socket >= 0 else { throw URLError(.cannotCreateFile) }
+
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+    var connected = false
+    for _ in 0..<20 {
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(socket, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if result == 0 {
+            connected = true
+            break
+        }
+        usleep(50_000)
+    }
+
+    guard connected else {
+        Darwin.close(socket)
+        throw URLError(.cannotConnectToHost)
+    }
+
+    let bytes = Array(partialRequest.utf8)
+    _ = bytes.withUnsafeBytes { ptr in
+        Darwin.write(socket, ptr.baseAddress, bytes.count)
+    }
+    return socket
 }
 
 /// Thread-safe box for collecting chunks across actor boundaries.
@@ -152,7 +253,7 @@ final class TextUpdateCollector {
 // MARK: - Polling Assertion
 
 /// Polls a condition until it becomes true, or times out.
-/// Use this instead of fixed `Task.sleep` for timer-based assertions
+/// Use this instead of direct `Task.sleep` for timer-based assertions
 /// where main-actor contention can delay Task continuations.
 @MainActor
 func waitUntil(
@@ -163,6 +264,19 @@ func waitUntil(
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
         if condition() { return }
+        try await Task.sleep(for: interval)
+    }
+}
+
+/// Async variant of `waitUntil` for conditions that require `await`.
+func waitUntilAsync(
+    timeout: Duration = .seconds(3),
+    interval: Duration = .milliseconds(50),
+    condition: @escaping @Sendable () async -> Bool
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await condition() { return }
         try await Task.sleep(for: interval)
     }
 }

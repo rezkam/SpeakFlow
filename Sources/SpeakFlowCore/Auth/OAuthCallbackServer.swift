@@ -182,9 +182,10 @@ public final class OAuthCallbackServer: @unchecked Sendable {
             return
         }
 
-        let flags = fcntl(currentSocket, F_GETFL, 0)
-        if flags >= 0 {
-            _ = fcntl(currentSocket, F_SETFL, flags | O_NONBLOCK)
+        guard setNonBlocking(currentSocket) else {
+            Logger.auth.error("Failed to set listener socket non-blocking")
+            resumeOnce(returning: nil)
+            return
         }
 
         while Date() < deadline {
@@ -206,6 +207,12 @@ public final class OAuthCallbackServer: @unchecked Sendable {
             }
 
             if clientSocket >= 0 {
+                guard setNonBlocking(clientSocket) else {
+                    Logger.auth.error("Failed to set accepted client socket non-blocking")
+                    Darwin.close(clientSocket)
+                    resumeOnce(returning: nil)
+                    return
+                }
                 handleClient(clientSocket)
                 Darwin.close(clientSocket)
                 return
@@ -219,18 +226,48 @@ public final class OAuthCallbackServer: @unchecked Sendable {
     }
 
     private func handleClient(_ clientSocket: Int32) {
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        let bytesRead = Darwin.read(clientSocket, &buffer, buffer.count)
+        // Robustly read until end-of-headers. A single `read` is not guaranteed to
+        // return the full HTTP request line; under load we can receive a partial
+        // first packet (e.g. truncated query string), which causes false
+        // state-mismatch 400 responses in OAuth tests and real callbacks.
+        var requestData = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        let headerTerminator = Data("\r\n\r\n".utf8)
+        let maxHeaderBytes = 16 * 1024
 
-        guard bytesRead > 0 else {
-            sendResponse(clientSocket, status: "400 Bad Request", body: "No data received")
+        let readDeadline = Date().addingTimeInterval(1.0)
+        while requestData.count < maxHeaderBytes, Date() < readDeadline {
+            let bytesRead = Darwin.read(clientSocket, &buffer, buffer.count)
+
+            if bytesRead > 0 {
+                requestData.append(contentsOf: buffer.prefix(bytesRead))
+                if requestData.range(of: headerTerminator) != nil {
+                    break
+                }
+                continue
+            }
+
+            if bytesRead == 0 {
+                break
+            }
+
+            if errno == EINTR {
+                continue
+            }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                // Non-blocking socket may not have full headers yet.
+                usleep(1_000)
+                continue
+            }
+
+            sendResponse(clientSocket, status: "400 Bad Request", body: "Read error")
             resumeOnce(returning: nil)
             return
         }
 
-        let request = String(bytes: buffer.prefix(bytesRead), encoding: .utf8) ?? ""
-
-        guard let firstLine = request.split(separator: "\r\n").first,
+        guard !requestData.isEmpty,
+              let request = String(data: requestData, encoding: .utf8),
+              let firstLine = request.split(separator: "\r\n").first,
               let pathPart = firstLine.split(separator: " ").dropFirst().first else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Invalid request")
             resumeOnce(returning: nil)
@@ -297,6 +334,12 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         _ = response.withCString { ptr in
             Darwin.write(socket, ptr, strlen(ptr))
         }
+    }
+
+    private func setNonBlocking(_ socket: Int32) -> Bool {
+        let flags = fcntl(socket, F_GETFL, 0)
+        guard flags >= 0 else { return false }
+        return fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0
     }
 
     public func stop() {
