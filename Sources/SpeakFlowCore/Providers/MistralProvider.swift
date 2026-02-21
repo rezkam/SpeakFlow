@@ -153,6 +153,9 @@ public actor MistralStreamingSession: StreamingSession {
     private var isConnected = false
     private var receiveTask: Task<Void, Never>?
     private var sawTranscriptionDone = false
+#if DEBUG
+    private var testDidInvalidateURLSession = false
+#endif
 
     /// Accumulates `transcription.text.delta` fragments between segment boundaries.
     /// Reset when a `transcription.segment` or `transcription.done` arrives.
@@ -300,7 +303,7 @@ public actor MistralStreamingSession: StreamingSession {
     }
 
     public func close() async throws {
-        guard isConnected else { return }
+        let wasConnected = isConnected
         isConnected = false
 
         // Flush any remaining delta text as a final result
@@ -314,12 +317,17 @@ public actor MistralStreamingSession: StreamingSession {
             pendingDeltaText = ""
         }
 
-        webSocketTask?.cancel(with: .normalClosure, reason: nil)
-        logger.info("WebSocket closed")
+        if wasConnected {
+            webSocketTask?.cancel(with: .normalClosure, reason: nil)
+            logger.info("WebSocket closed")
+        } else {
+            webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        }
 
         receiveTask?.cancel()
         receiveTask = nil
         eventContinuation?.finish()
+        invalidateURLSession()
     }
 
     public func keepAlive() async throws {
@@ -440,7 +448,9 @@ public actor MistralStreamingSession: StreamingSession {
                 speechFinal: false
             )
             eventContinuation?.yield(.interim(result))
-            logger.debug("delta: \(text, privacy: .public) → accumulated: \(self.pendingDeltaText, privacy: .public)")
+            logger.debug(
+                "delta: \(text, privacy: .private(mask: .hash)) → accumulated: \(self.pendingDeltaText, privacy: .private(mask: .hash))"
+            )
 
         // --- transcription.segment ---
         // Completed segment with timing. This is the "final" result for the segment.
@@ -465,7 +475,9 @@ public actor MistralStreamingSession: StreamingSession {
                     speechFinal: true
                 )
                 eventContinuation?.yield(.finalResult(result))
-                logger.info("SEGMENT [\(String(format: "%.1f", start))–\(String(format: "%.1f", start + duration))s]: \(segmentText, privacy: .public)")
+                logger.info(
+                    "SEGMENT [\(String(format: "%.1f", start))–\(String(format: "%.1f", start + duration))s]: \(segmentText, privacy: .private(mask: .hash))"
+                )
             }
 
             // Reset delta accumulator for next segment
@@ -549,11 +561,28 @@ public actor MistralStreamingSession: StreamingSession {
         return (message, code)
     }
 
+    private func invalidateURLSession() {
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
+        webSocketTask = nil
+#if DEBUG
+        testDidInvalidateURLSession = true
+#endif
+    }
+
 #if DEBUG
     /// Test seam: mark the session as connected without a real WebSocket,
     /// so close() will execute its flush path.
     func _testSetConnected(_ connected: Bool) {
         isConnected = connected
+    }
+
+    func _testSetURLSession(_ session: URLSession?) {
+        urlSession = session
+    }
+
+    func _testDidInvalidateURLSession() -> Bool {
+        testDidInvalidateURLSession
     }
 
     /// Test seam: expose isNormalClose for unit testing the error classification logic.

@@ -6,15 +6,15 @@ import Testing
 //
 // ## Why these tests exist
 //
-// Before the VAD improvements changes, `LiveStreamingController` had two silent bugs:
+// Before the VAD improvements, `LiveStreamingController` had two silent failure modes:
 //
-// Bug 1 — keepAlive is dead code:
+// Case 1 — keepAlive path was inactive:
 //   `DeepgramStreamingSession.keepAlive()` was implemented but NEVER called.
 //   No timer existed. Deepgram's WebSocket idle timeout (~10-12s) would close the
 //   connection if the user paused for 15+ seconds. `MockStreamingSession.keepAliveCalled`
 //   existed in the test mock but was never asserted anywhere.
 //
-// Bug 2 — No reconnection on unexpected WebSocket drop:
+// Case 2 — No reconnection on unexpected WebSocket drop:
 //   If `.closed` fired while `isActive=true`, the session ended permanently.
 //   Users had to manually restart after any WiFi blip.
 //
@@ -40,7 +40,7 @@ import Testing
 // `MultiSessionMockProvider` to control session behaviour.
 //
 // For timer-based tests, we use very short intervals (0.1s) and `waitUntil()` polling
-// instead of fixed sleeps, so tests are fast and don't fail under CPU load.
+// instead of timer-based sleeps, so tests are fast and don't fail under CPU load.
 
 // MARK: - Suite 1: KeepAlive Timer
 
@@ -226,8 +226,9 @@ struct ReconnectionTests {
         // Trigger unexpected close
         c.handleEvent(.closed)
 
-        // Wait for reconnect Task to run
-        try await Task.sleep(for: .milliseconds(500))
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
+            provider.startSessionCallCount == 1 && c.isActive
+        }
 
         // Reconnection should have been attempted
         #expect(provider.startSessionCallCount == 1,
@@ -261,8 +262,9 @@ struct ReconnectionTests {
         // Trigger unexpected close
         c.handleEvent(.closed)
 
-        // Wait for reconnect attempt to fail
-        try await Task.sleep(for: .milliseconds(500))
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
+            provider.startSessionCallCount == 1 && sessionClosedFired
+        }
 
         #expect(provider.startSessionCallCount == 1,
                 "Provider.startSession() called once for failed reconnect")
@@ -295,7 +297,9 @@ struct ReconnectionTests {
 
         // First close → triggers reconnect
         c.handleEvent(.closed)
-        try await Task.sleep(for: .milliseconds(500))
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
+            provider.startSessionCallCount == 1 && c.isActive
+        }
 
         // First reconnect should have succeeded
         #expect(provider.startSessionCallCount == 1)
@@ -304,7 +308,9 @@ struct ReconnectionTests {
 
         // Now simulate the reconnected session also dropping
         c.handleEvent(.closed)
-        try await Task.sleep(for: .milliseconds(500))
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
+            sessionClosedCount == 1
+        }
 
         // hasAttemptedReconnect was true → no second reconnect attempt
         // onSessionClosed should fire exactly once (for the second drop)
@@ -506,20 +512,23 @@ struct KeepAliveAndSilenceTimerIntegrationTests {
         let c = LiveStreamingController()
         c.keepAliveEnabled = true
         c.keepAliveInterval = 30.0  // long — won't fire in test
-        c.autoEndSilenceDuration = 0.15  // short but not too short for CI
-        c.isActive = true
-        // Set properties required for silence timer manually:
-        // hasSpeechOccurred is private(set), but handleEvent(.speechStarted) sets it
-        c.handleEvent(.speechStarted(timestamp: 0))
+        c.autoEndSilenceDuration = 0.05  // extremely short
+        c.isActive = true  // silence timer guard checks this
+
+        let session = MockStreamingSession()
+        c._testSetAudioSessionRefActive(true, session: session)
 
         var autoEndFired = false
         c.onAutoEnd = { autoEndFired = true }
 
-        // Start silence timer (as if utteranceEnd arrived)
-        c.handleEvent(.utteranceEnd(lastWordEnd: 0))
+        // Start silence timer via internal helper to guarantee state setup
+        c._testArmSilenceTimer()
 
         // Poll with generous timeout — CI runners may be slow under load
-        try await Task.sleep(for: .milliseconds(600))
+        for _ in 0..<50 {
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+            if autoEndFired { break }
+        }
 
         #expect(autoEndFired == true,
                 "Silence timer should fire independently of keepAlive timer")

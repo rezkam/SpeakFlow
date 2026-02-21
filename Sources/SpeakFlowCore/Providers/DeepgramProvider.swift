@@ -120,6 +120,9 @@ public actor DeepgramStreamingSession: StreamingSession {
     private let _events: AsyncStream<TranscriptionEvent>
     private var isConnected = false
     private var receiveTask: Task<Void, Never>?
+#if DEBUG
+    private var testDidInvalidateURLSession = false
+#endif
 
     public nonisolated var events: AsyncStream<TranscriptionEvent> {
         _events
@@ -178,19 +181,22 @@ public actor DeepgramStreamingSession: StreamingSession {
     }
 
     public func close() async throws {
-        guard isConnected else { return }
+        let wasConnected = isConnected
         isConnected = false
 
-        if let ws = webSocketTask {
+        if wasConnected, let ws = webSocketTask {
             let msg = #"{"type":"CloseStream"}"#
             try? await ws.send(.string(msg))
             ws.cancel(with: .normalClosure, reason: nil)
             logger.info("WebSocket closed")
+        } else {
+            webSocketTask?.cancel(with: .normalClosure, reason: nil)
         }
 
         receiveTask?.cancel()
         receiveTask = nil
         eventContinuation?.finish()
+        invalidateURLSession()
     }
 
     public func keepAlive() async throws {
@@ -283,12 +289,12 @@ public actor DeepgramStreamingSession: StreamingSession {
                 if msg.isFinal == true {
                     eventContinuation?.yield(.finalResult(result))
                     if !alt.transcript.isEmpty {
-                        logger.info("FINAL: \(alt.transcript, privacy: .public)")
+                        logger.info("FINAL: \(alt.transcript, privacy: .private(mask: .hash))")
                     }
                 } else {
                     eventContinuation?.yield(.interim(result))
                     if !alt.transcript.isEmpty {
-                        logger.debug("interim: \(alt.transcript, privacy: .public)")
+                        logger.debug("interim: \(alt.transcript, privacy: .private(mask: .hash))")
                     }
                 }
 
@@ -314,6 +320,29 @@ public actor DeepgramStreamingSession: StreamingSession {
             logger.error("Failed to parse message: \(error.localizedDescription)")
         }
     }
+
+    private func invalidateURLSession() {
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
+        webSocketTask = nil
+#if DEBUG
+        testDidInvalidateURLSession = true
+#endif
+    }
+
+#if DEBUG
+    func _testSetConnected(_ connected: Bool) {
+        isConnected = connected
+    }
+
+    func _testSetURLSession(_ session: URLSession?) {
+        urlSession = session
+    }
+
+    func _testDidInvalidateURLSession() -> Bool {
+        testDidInvalidateURLSession
+    }
+#endif
 }
 
 // MARK: - Deepgram JSON Models

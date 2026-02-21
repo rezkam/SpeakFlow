@@ -115,6 +115,10 @@ public final class LiveStreamingController {
     /// interrupt an ongoing reconnect attempt.
     internal var reconnectTask: Task<Void, Never>?
 
+    /// Suppress `onSessionClosed` when shutdown was explicitly user-initiated
+    /// (stop/cancel). Cleared on (re)activation.
+    internal var suppressSessionClosedCallback = false
+
     // Callbacks
     /// Called when new text should be inserted.
     /// - `textToType`: the characters to type (may be just a suffix if smart-diff applies)
@@ -146,30 +150,123 @@ public final class LiveStreamingController {
         private struct State {
             var session: StreamingSession?
             var active: Bool = false
+            var pendingAudio: ArraySlice<Data> = []
+            var pendingBytes = 0
+            var droppedChunks = 0
         }
+
+        private static let maxBufferedAudioBytes = 1_000_000
+        private let logger = Logger(subsystem: "SpeakFlow", category: "LiveStreamingAudio")
         private let state = OSAllocatedUnfairLock(initialState: State())
+        private let sendSignalContinuation: AsyncStream<Void>.Continuation
+        private let sendSignalStream: AsyncStream<Void>
+        private var senderTask: Task<Void, Never>?
+
+        init() {
+            var continuation: AsyncStream<Void>.Continuation!
+            self.sendSignalStream = AsyncStream<Void> { c in
+                continuation = c
+            }
+            self.sendSignalContinuation = continuation
+            self.senderTask = Task.detached(priority: .userInitiated) { [weak self] in
+                await self?.runSenderLoop()
+            }
+        }
+
+        deinit {
+            senderTask?.cancel()
+            sendSignalContinuation.finish()
+        }
 
         var isActive: Bool {
             state.withLock { $0.active }
         }
 
+        var pendingChunkCount: Int {
+            state.withLock { $0.pendingAudio.count }
+        }
+
+        var droppedChunkCount: Int {
+            state.withLock { $0.droppedChunks }
+        }
+
         func set(session: StreamingSession?, active: Bool) {
-            state.withLock {
-                $0.session = session
-                $0.active = active
+            let shouldSignal = state.withLock { state in
+                state.session = session
+                state.active = active
+                return active && session != nil && !state.pendingAudio.isEmpty
+            }
+            if shouldSignal {
+                sendSignalContinuation.yield(())
             }
         }
 
-        func sendAudio(_ data: Data) async throws {
-            let (s, a) = state.withLock { ($0.session, $0.active) }
-            guard a, let s else { return }
-            try await s.sendAudio(data)
+        func enqueueAudio(_ data: Data) {
+            guard !data.isEmpty else { return }
+            let shouldSignal = state.withLock { state in
+                if data.count > Self.maxBufferedAudioBytes {
+                    state.droppedChunks &+= 1
+                    return false
+                }
+
+                while state.pendingBytes + data.count > Self.maxBufferedAudioBytes,
+                      !state.pendingAudio.isEmpty {
+                    let dropped = state.pendingAudio.removeFirst()
+                    state.pendingBytes -= dropped.count
+                    state.droppedChunks &+= 1
+                }
+
+                state.pendingAudio.append(data)
+                state.pendingBytes += data.count
+                return state.active && state.session != nil
+            }
+            if shouldSignal {
+                sendSignalContinuation.yield(())
+            }
+        }
+
+        func deactivatePreservingBuffer() {
+            state.withLock {
+                $0.session = nil
+                $0.active = false
+            }
         }
 
         func clear() {
             state.withLock {
                 $0.session = nil
                 $0.active = false
+                $0.pendingAudio.removeAll()
+                $0.pendingBytes = 0
+            }
+        }
+
+        private func runSenderLoop() async {
+            for await _ in sendSignalStream {
+                while let (session, frame) = dequeueFrameIfActive() {
+                    do {
+                        try await session.sendAudio(frame)
+                    } catch {
+                        logger.warning("Audio send failed: \(error.localizedDescription, privacy: .public)")
+                        state.withLock { $0.active = false }
+                        break
+                    }
+                }
+
+                if Task.isCancelled {
+                    break
+                }
+            }
+        }
+
+        private func dequeueFrameIfActive() -> (StreamingSession, Data)? {
+            state.withLock { state in
+                guard state.active,
+                      let session = state.session,
+                      !state.pendingAudio.isEmpty else { return nil }
+                let frame = state.pendingAudio.removeFirst()
+                state.pendingBytes -= frame.count
+                return (session, frame)
             }
         }
     }
@@ -184,6 +281,9 @@ public final class LiveStreamingController {
             logger.warning("Already streaming")
             return false
         }
+
+        // New session lifecycle begins; unexpected close callbacks are allowed again.
+        suppressSessionClosedCallback = false
 
         // Store for reconnection 
         reconnectProvider = provider
@@ -222,8 +322,6 @@ public final class LiveStreamingController {
             // Must NOT capture self or any @MainActor state — Swift 6 inserts
             // isolation checks that crash on the audio thread.
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { @Sendable buffer, _ in
-                guard sessionRef.isActive else { return }
-
                 let inputSampleRate = inputFormat.sampleRate
                 let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * sampleRate / inputSampleRate)
                 guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
@@ -261,7 +359,7 @@ public final class LiveStreamingController {
                 //
                 // NOTE: vDSP_vfixr16 (rounds instead of truncates) is NOT used here —
                 // it would collapse [-1,1] to {-1,0,1} without a pre-scale step.
-                // The 3-step pipeline is byte-identical to the old scalar loop.
+                // The 3-step pipeline keeps conversion deterministic and allocation-free.
                 let n = vDSP_Length(frames)
                 // `UnsafeBufferPointer` → mutable scratch. channelData is owned by
                 // convertedBuffer which lives for the full closure scope.
@@ -272,10 +370,7 @@ public final class LiveStreamingController {
                 var int16Buffer = [Int16](repeating: 0, count: frames)
                 vDSP_vfix16(scratch, 1, &int16Buffer, 1, n)
                 let pcmData = int16Buffer.withUnsafeBytes { Data($0) }
-
-                Task {
-                    try? await sessionRef.sendAudio(pcmData)
-                }
+                sessionRef.enqueueAudio(pcmData)
             }
 
             try engine.start()
@@ -310,6 +405,9 @@ public final class LiveStreamingController {
 
     /// Stop streaming: close mic, finalize and close provider session.
     public func stop() async {
+        // Explicit user action: suppress onSessionClosed for this shutdown path.
+        suppressSessionClosedCallback = true
+
         // Cancel any in-flight reconnection attempt so it doesn't resume after we stop.
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -324,7 +422,8 @@ public final class LiveStreamingController {
         audioEngine = nil
         audioSessionRef.clear()
 
-        guard isActive else { return }
+        // It is possible we're already inactive (e.g. during a reconnect window).
+        // But we still need to tear down the session and timers.
         isActive = false
         cancelSilenceTimer()
         cancelKeepAliveTimer()
@@ -356,6 +455,9 @@ public final class LiveStreamingController {
 
     /// Cancel without waiting for final results.
     public func cancel() async {
+        // Explicit user action: suppress onSessionClosed for this shutdown path.
+        suppressSessionClosedCallback = true
+
         // Cancel any in-flight reconnection attempt so it doesn't resume after we cancel.
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -366,7 +468,7 @@ public final class LiveStreamingController {
         audioEngine = nil
         audioSessionRef.clear()
 
-        guard isActive else { return }
+        // Just like stop(), tear down the rest even if already inactive.
         isActive = false
         cancelSilenceTimer()
         cancelKeepAliveTimer()
@@ -422,7 +524,7 @@ public final class LiveStreamingController {
                 cancelSilenceTimer()
             }
 
-            // Smart diff: only fix what changed from the last interim
+            // Smart diff: update only what changed from the last interim
             let (charsToDelete, suffixToType) = diffFromEnd(
                 old: lastInterimText, new: newText
             )
@@ -433,7 +535,7 @@ public final class LiveStreamingController {
 
             if !newText.isEmpty {
                 if charsToDelete > 0 || !suffixToType.isEmpty {
-                    // Text differs from interim — fix the tail
+                    // Text differs from interim — update only the tail
                     onTextUpdate?(suffixToType, charsToDelete, true, newText)
                 } else {
                     // Identical to interim — just commit (no keystrokes needed)
@@ -527,7 +629,11 @@ public final class LiveStreamingController {
                             // Genuine reconnection failure — surface to consumers.
                             self.logger.error("Reconnection failed — surfacing session closed")
                             await self.cleanup()
-                            self.onSessionClosed?()
+
+                            // If user stop/cancel raced with reconnect failure, suppress callback.
+                            if !Task.isCancelled && !self.suppressSessionClosedCallback {
+                                self.onSessionClosed?()
+                            }
                         }
                     }
                 } else {
@@ -536,9 +642,17 @@ public final class LiveStreamingController {
                         logger.warning("Second close event after reconnect attempt — giving up")
                     }
                     isActive = false
-                    Task { @MainActor in
-                        await cleanup()
-                        onSessionClosed?()
+                    Task { @MainActor [weak self] in
+                        guard let self = self else { return }
+                        
+                        // User might have explicitly stopped/cancelled right as close arrived.
+                        if self.suppressSessionClosedCallback {
+                            await self.cleanup()
+                            return
+                        }
+                        
+                        await self.cleanup()
+                        self.onSessionClosed?()
                     }
                 }
             }
@@ -602,6 +716,7 @@ public final class LiveStreamingController {
     ///
     /// Also starts the keepAlive timer.
     private func activateSession(_ streamSession: StreamingSession) {
+        suppressSessionClosedCallback = false
         isActive = true
         audioSessionRef.set(session: streamSession, active: true)
         lastInterimText = ""
@@ -725,7 +840,7 @@ public final class LiveStreamingController {
     /// `activateSession()` re-arms the ref when the new session is ready.
     private func cleanupSessionOnly() async {
         cancelKeepAliveTimer()
-        audioSessionRef.clear()
+        audioSessionRef.deactivatePreservingBuffer()
         do { try await session?.close() }
         catch { logger.debug("Session close during reconnect: \(error.localizedDescription)") }
         session = nil
@@ -734,7 +849,7 @@ public final class LiveStreamingController {
     }
 }
 
-// MARK: - Debug / Test Helpers
+// MARK: - Test Helpers
 
 #if DEBUG
 extension LiveStreamingController {
@@ -766,6 +881,26 @@ extension LiveStreamingController {
         } else {
             audioSessionRef.clear()
         }
+    }
+
+    // swiftlint:disable:next identifier_name
+    public func _testEnqueueAudioFrame(_ data: Data) {
+        audioSessionRef.enqueueAudio(data)
+    }
+
+    // swiftlint:disable:next identifier_name
+    public var _testPendingAudioChunkCount: Int {
+        audioSessionRef.pendingChunkCount
+    }
+
+    // swiftlint:disable:next identifier_name
+    public var _testDroppedAudioChunkCount: Int {
+        audioSessionRef.droppedChunkCount
+    }
+
+    public func _testArmSilenceTimer() {
+        self.hasSpeechOccurred = true
+        self.startSilenceTimer()
     }
 }
 #endif

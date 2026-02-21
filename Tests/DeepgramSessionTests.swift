@@ -224,3 +224,32 @@ struct DeepgramParseMessageTests {
         // If we get here without crash, the test passes
     }
 }
+
+@Suite("DeepgramStreamingSession — close() resource cleanup")
+struct DeepgramCloseCleanupTests {
+    @Test
+    func closeInvalidatesURLSessionEvenWhenNotConnected() async throws {
+        let session = DeepgramStreamingSession(apiKey: "test-key", config: .default)
+        await session._testSetConnected(false)
+        await session._testSetURLSession(URLSession(configuration: .ephemeral))
+
+        try await session.close()
+
+        #expect(await session._testDidInvalidateURLSession(),
+                "close() must invalidate URLSession even when isConnected=false")
+    }
+}
+
+@Suite("DeepgramStreamingSession — transcript log privacy")
+struct DeepgramTranscriptPrivacySourceTests {
+    @Test
+    func transcriptLogsAreNotPublic() throws {
+        let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let repoRoot = testsDir.deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent("Sources/SpeakFlowCore/Providers/DeepgramProvider.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(!source.contains("FINAL: \\(alt.transcript, privacy: .public)"))
+        #expect(!source.contains("interim: \\(alt.transcript, privacy: .public)"))
+    }
+}

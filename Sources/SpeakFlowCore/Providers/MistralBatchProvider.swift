@@ -185,7 +185,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         // Handle errors
         guard (200...299).contains(http.statusCode) else {
             let bodyText = String(data: data.prefix(500), encoding: .utf8) ?? ""
-            logger.error("Mistral API error HTTP \(http.statusCode): \(bodyText, privacy: .public)")
+            logger.error("Mistral API error HTTP \(http.statusCode): \(bodyText, privacy: .private(mask: .hash))")
 
             if http.statusCode == 429 {
                 throw MistralBatchError.rateLimited
@@ -196,7 +196,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         // Parse response — Python SDK model: TranscriptionResponse { text, model, usage, language }
         do {
             let result = try JSONDecoder().decode(MistralTranscriptionResponse.self, from: data)
-            logger.info("Transcription complete: \(result.text.prefix(80), privacy: .public)...")
+            logger.info("Transcription complete: \(result.text.prefix(80), privacy: .private(mask: .hash))...")
             return result.text
         } catch {
             // Fallback: try extracting "text" from raw JSON

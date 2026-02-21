@@ -3,19 +3,16 @@ import Testing
 @testable import SpeakFlowCore
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MARK: - Regression: Mistral realtime stops immediately after hotkey
+// MARK: - Mistral Realtime Close-Event Behavior
 //
-// Root cause: MistralStreamingSession.receiveLoop() was emitting
-// .error(webSocketError(...)) for every WebSocket close — including
-// normal server-initiated closes that follow transcription.done.
-// RecordingController.onError unconditionally calls stopRecording(),
-// so any live Mistral session would die the moment the server sent
-// a close frame. This made recordings appear to stop immediately.
+// These tests define the close-event contract for live Mistral sessions:
+// normal WebSocket closes must be classified as `.closed` (not `.error`),
+// while real transport failures must still surface as errors.
 //
-// Fix: receiveLoop now calls isNormalClose() to distinguish a clean
-// remote close (NSURLErrorNetworkConnectionLost, NSURLErrorCancelled,
-// CancellationError, ECONNRESET) from a genuine network failure.
-// Normal closes skip the .error yield and go straight to .closed.
+// Why this matters:
+// `RecordingController` stops recording when `onError` fires. Correct close
+// classification keeps normal server close frames from terminating active
+// sessions as failures.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 // MARK: - isNormalClose classification
@@ -101,7 +98,7 @@ struct MistralNormalCloseDoesNotStopRecordingTests {
         return (c, errors, closes)
     }
 
-    /// The regression case: server closes WebSocket normally after transcription.done.
+    /// Scenario: server closes WebSocket normally after transcription.done.
     /// This reaches LiveStreamingController as .closed, NOT .error.
     /// onError must NOT be called; onSessionClosed must be called.
     @MainActor @Test
@@ -112,7 +109,7 @@ struct MistralNormalCloseDoesNotStopRecordingTests {
         try await Task.sleep(for: .milliseconds(200))
 
         #expect(errors.count == 0,
-                "Normal WebSocket close must never call onError (was the hotkey-stop regression)")
+                "Normal WebSocket close must never call onError")
         #expect(closes.count == 1,
                 "Normal WebSocket close must call onSessionClosed")
     }
@@ -171,9 +168,9 @@ struct MistralNormalCloseDoesNotStopRecordingTests {
     }
 }
 
-// MARK: - MistralBatchProvider — API compatibility with Mistral docs
+// MARK: - MistralBatchProvider — API schema conformance
 //
-// Regression: ensure the multipart request fields match the documented API spec.
+// Ensure the multipart request fields match the documented API spec.
 // If Mistral changes field names we want a fast-failing test, not a silent 4xx.
 
 @Suite("MistralBatchProvider — API Spec Compliance")

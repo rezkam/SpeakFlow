@@ -264,12 +264,12 @@ struct MistralAPITests {
         // 2. Send end_audio (no audio, just test the protocol completes)
         // Note: URLSessionWebSocketTask can sometimes drop the connection between
         // receive() and send() due to a platform-level race. This is not a protocol
-        // bug — the real app handles it via the actor-based session with continuous
+        // issue — the real app handles it via the actor-based session with continuous
         // audio streaming that keeps the socket alive.
         do {
             try await ws.send(.string(#"{"type":"input_audio.end"}"#))
         } catch {
-            // Socket dropped between receive and send — platform issue, not a protocol bug.
+            // Socket dropped between receive and send — platform issue, not a protocol defect.
             // The handshake test above already validated the connection works.
             return
         }

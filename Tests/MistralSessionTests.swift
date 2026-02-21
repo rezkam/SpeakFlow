@@ -718,3 +718,46 @@ struct MistralSettingsTests {
         #expect(settings.mistralDiarize == true)
     }
 }
+
+@Suite("MistralStreamingSession — close() resource cleanup")
+struct MistralCloseCleanupTests {
+    @Test
+    func closeInvalidatesURLSessionEvenWhenNotConnected() async throws {
+        let session = MistralStreamingSession(apiKey: "test-key", config: .default)
+        await session._testSetConnected(false)
+        await session._testSetURLSession(URLSession(configuration: .ephemeral))
+
+        try await session.close()
+
+        #expect(await session._testDidInvalidateURLSession(),
+                "close() must invalidate URLSession even when isConnected=false")
+    }
+}
+
+@Suite("MistralStreamingSession — transcript log privacy")
+struct MistralTranscriptPrivacySourceTests {
+    @Test
+    func transcriptLogsAreNotPublic() throws {
+        let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let repoRoot = testsDir.deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent("Sources/SpeakFlowCore/Providers/MistralProvider.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(!source.contains("logger.debug(\"delta: \\(text, privacy: .public)"))
+        #expect(!source.contains("\\(segmentText, privacy: .public)"))
+    }
+}
+
+@Suite("MistralBatchProvider — transcript log privacy")
+struct MistralBatchTranscriptPrivacySourceTests {
+    @Test
+    func transcriptLogsAreNotPublic() throws {
+        let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let repoRoot = testsDir.deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent("Sources/SpeakFlowCore/Providers/MistralBatchProvider.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(!source.contains("\\(result.text.prefix(80), privacy: .public)"))
+        #expect(!source.contains("\\(bodyText, privacy: .public)"))
+    }
+}
