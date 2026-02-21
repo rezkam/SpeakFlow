@@ -72,6 +72,10 @@ final class RecordingController {
         self.keyInterceptor.onEscapePressed = { [weak self] in self?.cancelRecording() }
         self.keyInterceptor.onEnterPressed = { [weak self] in
             guard let self else { return }
+            // Enter submit contract:
+            // 1) First Enter while recording requests submit and stops capture.
+            // 2) Additional Enters during processing-final only keep the request armed.
+            // 3) Actual Enter key synthesis happens once, after pending insertions finish.
             if self.isRecording { self.stopRecordingAndSubmit() }
             else if self.isProcessingFinal { self.shouldPressEnterOnComplete = true }
         }
@@ -295,8 +299,11 @@ final class RecordingController {
                 self.shouldPressEnterOnComplete = false
                 self.keyInterceptor.stop()
                 self.isProcessingFinal = false
+                if enterRequested {
+                    self.textInserter.pressEnterKey()
+                    await self.textInserter.waitForPendingInsertions()
+                }
                 self.textInserter.reset()
-                if enterRequested { self.textInserter.pressEnterKey() }
             }
         } else {
             isProcessingFinal = true; SoundEffect.stop.play()
@@ -334,11 +341,11 @@ final class RecordingController {
             keyInterceptor.stop(); isProcessingFinal = false
             textInserter.reset(); return
         }
-        Task {
+        Task { @MainActor in
             let pending = await self.transcription.queueBridge.getPendingCount()
             if pending > 0 {
                 try? await Task.sleep(for: .seconds(2))
-                await MainActor.run { self.finishIfDone(attempt: attempt + 1) }
+                self.finishIfDone(attempt: attempt + 1)
                 return
             }
             // Brief pause to let the stream consumer deliver any remaining text
@@ -347,16 +354,23 @@ final class RecordingController {
             // waitForPendingInsertions would return before all text is queued.
             try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
             await self.textInserter.waitForPendingInsertions()
-            await MainActor.run {
-                self.keyInterceptor.stop(); self.isProcessingFinal = false
+
+            self.keyInterceptor.stop()
+            self.isProcessingFinal = false
+
+            guard !self.fullTranscript.isEmpty, !self.hasPlayedCompletionSound else {
                 self.textInserter.reset()
-                guard !self.fullTranscript.isEmpty, !self.hasPlayedCompletionSound else { return }
-                self.hasPlayedCompletionSound = true
-                SoundEffect.complete.play()
-                if self.shouldPressEnterOnComplete {
-                    self.shouldPressEnterOnComplete = false; self.textInserter.pressEnterKey()
-                }
+                return
             }
+
+            self.hasPlayedCompletionSound = true
+            SoundEffect.complete.play()
+            if self.shouldPressEnterOnComplete {
+                self.shouldPressEnterOnComplete = false
+                self.textInserter.pressEnterKey()
+                await self.textInserter.waitForPendingInsertions()
+            }
+            self.textInserter.reset()
         }
     }
 

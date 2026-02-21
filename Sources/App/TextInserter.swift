@@ -18,7 +18,7 @@ import SpeakFlowCore
 /// `focusWaitTimeout`, pending operations are discarded to avoid blocking forever.
 ///
 /// **Thread Safety:** All public methods are `@MainActor` and maintain a serial task queue.
-/// Each operation awaits the previous task before executing, ensuring text appears in order.
+/// Each operation awaits the queue tail before executing, ensuring ordered text output.
 @MainActor
 final class TextInserter: TextInserting {
     static let shared = TextInserter()
@@ -199,7 +199,7 @@ final class TextInserter: TextInserting {
     ///
     /// - Parameter count: Number of characters to delete. Must be > 0.
     func deleteChars(_ count: Int) {
-        guard count > 0 else { return }
+        guard count > 0, queuedInsertionCount < Config.maxQueuedTextInsertions else { return }
 
         let previousTask = textInsertionTask
         queuedInsertionCount += 1
@@ -434,11 +434,8 @@ final class TextInserter: TextInserting {
     ///    yielding to the run-loop between batches so mouse clicks, CGEvent tap
     ///    callbacks, and SwiftUI updates remain responsive
     ///
-    /// **Why batching matters:** The previous per-character focus + modifier polling
-    /// starved the main run-loop for seconds during long transcriptions. When the
-    /// CGEvent tap (which ran on the main run-loop at the time) couldn't process
-    /// events, macOS queued ALL keyboard and mouse click events system-wide —
-    /// the user experienced a complete input freeze.
+    /// **Why batching matters:** Batching keeps run-loop time available for event taps
+    /// and UI updates during long transcriptions, preventing global input stalls.
     ///
     /// - Parameter text: The sanitized text to type. Should not contain control characters.
     private func typeTextAsync(_ text: String) async {
@@ -544,3 +541,10 @@ final class TextInserter: TextInserting {
         // Timeout: proceed despite modifiers still being held
     }
 }
+
+#if DEBUG
+extension TextInserter {
+    // swiftlint:disable:next identifier_name
+    var _testQueuedInsertionCount: Int { queuedInsertionCount }
+}
+#endif
