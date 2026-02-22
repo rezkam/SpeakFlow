@@ -8,12 +8,16 @@ private final class TestStatistics: StatisticsProviding {
     var totalCharacters: Int = 0
     var totalWords: Int = 0
     var totalApiCalls: Int = 0
+    var recordedLatencies: [TimeInterval] = []
     var apiCallCount: Int { totalApiCalls }
     var wordCount: Int { totalWords }
     var formattedDuration: String { "0s" }
     var formattedCharacters: String { "0" }
     var formattedWords: String { "0" }
     var formattedApiCalls: String { "0" }
+    var sttLatencyP50Ms: Double { 0 }
+    var sttLatencyP95Ms: Double { 0 }
+    var sttLatencyP99Ms: Double { 0 }
 
     func recordTranscription(text: String, audioDurationSeconds: Double) {
         totalSecondsTranscribed += audioDurationSeconds
@@ -23,6 +27,10 @@ private final class TestStatistics: StatisticsProviding {
 
     func recordApiCall() {
         totalApiCalls += 1
+    }
+
+    func recordSTTLatency(seconds: TimeInterval) {
+        recordedLatencies.append(seconds)
     }
 
     func reset() {
@@ -93,6 +101,8 @@ struct TranscriptionCancellationBehaviorTests {
         #expect(await transcription.queueBridge.getPendingCount() == 0)
         #expect(transcription._testErrorSoundPlayCount == 0,
                 "Cancellation should not trigger error UX sound")
+        #expect(stats.recordedLatencies.isEmpty,
+                "Cancelled transcriptions should not be recorded as STT latency")
     }
 
     @MainActor
@@ -119,5 +129,7 @@ struct TranscriptionCancellationBehaviorTests {
 
         #expect(transcription._testErrorSoundPlayCount == 1,
                 "True transcription failures should still play one error sound")
+        #expect(stats.recordedLatencies.count == 1,
+                "Failed requests should still record observed STT latency")
     }
 }

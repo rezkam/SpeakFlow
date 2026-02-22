@@ -13,7 +13,11 @@ public protocol StatisticsProviding: AnyObject {
     var formattedCharacters: String { get }
     var formattedWords: String { get }
     var formattedApiCalls: String { get }
+    var sttLatencyP50Ms: Double { get }
+    var sttLatencyP95Ms: Double { get }
+    var sttLatencyP99Ms: Double { get }
     func recordTranscription(text: String, audioDurationSeconds: Double)
     func recordApiCall()
+    func recordSTTLatency(seconds: TimeInterval)
     func reset()
 }

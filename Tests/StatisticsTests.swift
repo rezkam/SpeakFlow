@@ -95,6 +95,27 @@ struct StatisticsDurationTests {
     }
 }
 
+// MARK: - STT Latency Tests
+
+struct StatisticsLatencyTests {
+    @Test func testLatencyPercentilesTrackRecordedSamples() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+            defer { stats.reset() }
+
+            stats.recordSTTLatency(seconds: 0.10) // 100ms
+            stats.recordSTTLatency(seconds: 0.20) // 200ms
+            stats.recordSTTLatency(seconds: 0.50) // 500ms
+            stats.recordSTTLatency(seconds: 1.00) // 1000ms
+
+            #expect(stats.sttLatencyP50Ms >= 200 && stats.sttLatencyP50Ms <= 500)
+            #expect(stats.sttLatencyP95Ms >= 500)
+            #expect(stats.sttLatencyP99Ms >= stats.sttLatencyP95Ms)
+        }
+    }
+}
+
 // MARK: - Statistics Formatter Isolation Tests
 
 @Suite("Statistics formatter explicit @MainActor isolation")

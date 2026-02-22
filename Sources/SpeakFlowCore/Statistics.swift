@@ -17,9 +17,30 @@ public final class Statistics {
         var totalCharacters: Int = 0
         var totalWords: Int = 0
         var totalApiCalls: Int = 0
+        var sttLatencyMs: [Double] = []
+
+        private enum CodingKeys: String, CodingKey {
+            case totalSecondsTranscribed
+            case totalCharacters
+            case totalWords
+            case totalApiCalls
+            case sttLatencyMs
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            totalSecondsTranscribed = try container.decodeIfPresent(Double.self, forKey: .totalSecondsTranscribed) ?? 0
+            totalCharacters = try container.decodeIfPresent(Int.self, forKey: .totalCharacters) ?? 0
+            totalWords = try container.decodeIfPresent(Int.self, forKey: .totalWords) ?? 0
+            totalApiCalls = try container.decodeIfPresent(Int.self, forKey: .totalApiCalls) ?? 0
+            sttLatencyMs = try container.decodeIfPresent([Double].self, forKey: .sttLatencyMs) ?? []
+        }
     }
 
     private var data: Data
+    private static let sttLatencySampleCapacity = 100
 
     private static let storageURL: URL = {
         let base: URL
@@ -51,6 +72,9 @@ public final class Statistics {
     public var totalCharacters: Int { data.totalCharacters }
     public var totalWords: Int { data.totalWords }
     public var totalApiCalls: Int { data.totalApiCalls }
+    public var sttLatencyP50Ms: Double { percentile(data.sttLatencyMs, 0.50) }
+    public var sttLatencyP95Ms: Double { percentile(data.sttLatencyMs, 0.95) }
+    public var sttLatencyP99Ms: Double { percentile(data.sttLatencyMs, 0.99) }
 
     /// Convenience aliases for automation/testing.
     public var apiCallCount: Int { data.totalApiCalls }
@@ -113,6 +137,18 @@ public final class Statistics {
         markDirty()
     }
 
+    /// Record STT request latency in seconds (stored internally as milliseconds).
+    public func recordSTTLatency(seconds: TimeInterval) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        let milliseconds = seconds * 1000
+
+        if data.sttLatencyMs.count >= Self.sttLatencySampleCapacity {
+            data.sttLatencyMs.removeFirst()
+        }
+        data.sttLatencyMs.append(milliseconds)
+        markDirty()
+    }
+
     public func reset() {
         flushTask?.cancel()
         flushTask = nil
@@ -166,6 +202,14 @@ public final class Statistics {
 #endif
 
     // MARK: - Persistence
+
+    private func percentile(_ values: [Double], _ percentile: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let clamped = min(max(percentile, 0), 1)
+        let index = Int(Double(sorted.count - 1) * clamped)
+        return sorted[index]
+    }
 
     private func save() {
         do {

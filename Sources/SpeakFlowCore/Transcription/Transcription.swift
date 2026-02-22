@@ -10,6 +10,7 @@ public final class Transcription {
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
     private let statistics: any StatisticsProviding
     private let service: any TranscriptionServiceProviding
+    private var metricsSessionId: UUID?
 #if DEBUG
     private var testErrorSoundPlayCount = 0
 #endif
@@ -29,8 +30,9 @@ public final class Transcription {
         // Use stable task IDs so each async task is removed from tracking on completion.
         let taskId = UUID()
         let task = Task { [weak self] in
+            guard let self else { return }
             defer {
-                self?.processingTasks.removeValue(forKey: taskId)
+                self.processingTasks.removeValue(forKey: taskId)
             }
 
             let effectiveTimeout = TranscriptionService.timeout(forDataSize: chunk.wavData.count)
@@ -40,39 +42,64 @@ public final class Transcription {
             Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) duration=\(duration)s size=\(chunk.wavData.count)B (timeout: \(timeout)s)")
 
             // Track API call attempt
-            self?.statistics.recordApiCall()
+            statistics.recordApiCall()
+            let metricsId = metricsSessionId
+            if let metricsId {
+                await SessionMetricsStore.shared.incrementChunkSubmitted(sessionId: metricsId)
+            }
+
+            let latencyStart = ContinuousClock.now
 
             do {
-                let text = try await self?.service.transcribe(audio: chunk.wavData) ?? ""
+                let text = try await service.transcribe(audio: chunk.wavData)
+                let latencySeconds = Self.elapsedSeconds(since: latencyStart)
+                statistics.recordSTTLatency(seconds: latencySeconds)
+                if let metricsId {
+                    await SessionMetricsStore.shared.recordSTTLatency(
+                        sessionId: metricsId,
+                        milliseconds: latencySeconds * 1000
+                    )
+                    await SessionMetricsStore.shared.incrementChunkSucceeded(sessionId: metricsId)
+                }
                 Logger.transcription.info("Chunk #\(ticket.seq) success: \(text, privacy: .private)")
 
                 // Track successful transcription statistics
-                self?.statistics.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
+                statistics.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
 
-                await self?.queueBridge.submitResult(ticket: ticket, text: text)
+                await queueBridge.submitResult(ticket: ticket, text: text)
                 // Note: checkCompletion is called from the stream consumer (startListening)
                 // AFTER onTextReady delivers the text, ensuring the completion sound
                 // only plays after all text has been queued for insertion.
             } catch {
                 if Self.isCancellation(error) {
                     Logger.transcription.debug("Chunk #\(ticket.seq) cancelled")
-                    await self?.queueBridge.markFailed(ticket: ticket)
-                    await self?.queueBridge.checkCompletion()
+                    await queueBridge.markFailed(ticket: ticket)
+                    await queueBridge.checkCompletion()
                     return
                 }
 
+                let latencySeconds = Self.elapsedSeconds(since: latencyStart)
+                statistics.recordSTTLatency(seconds: latencySeconds)
+                if let metricsId {
+                    await SessionMetricsStore.shared.recordSTTLatency(
+                        sessionId: metricsId,
+                        milliseconds: latencySeconds * 1000
+                    )
+                    await SessionMetricsStore.shared.incrementChunkFailed(sessionId: metricsId)
+                }
+
                 Logger.transcription.error("Chunk #\(ticket.seq) failed: \(error.localizedDescription)")
-                await self?.queueBridge.markFailed(ticket: ticket)
+                await queueBridge.markFailed(ticket: ticket)
 
                 // Play error sound to notify user that transcription failed
 #if DEBUG
-                self?.testErrorSoundPlayCount &+= 1
+                testErrorSoundPlayCount &+= 1
 #endif
                 SoundEffect.error.play()
 
                 // Failed chunks don't yield text to the stream, so check completion
                 // here — the stream consumer won't see this chunk.
-                await self?.queueBridge.checkCompletion()
+                await queueBridge.checkCompletion()
             }
         }
         processingTasks[taskId] = task
@@ -97,6 +124,16 @@ public final class Transcription {
             return true
         }
         return false
+    }
+
+    public func setMetricsSession(_ sessionId: UUID?) {
+        metricsSessionId = sessionId
+    }
+
+    private static func elapsedSeconds(since start: ContinuousClock.Instant) -> TimeInterval {
+        let elapsed = ContinuousClock.now - start
+        return TimeInterval(elapsed.components.seconds)
+            + TimeInterval(elapsed.components.attoseconds) / 1_000_000_000_000_000_000
     }
 }
 
