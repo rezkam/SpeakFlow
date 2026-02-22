@@ -32,6 +32,10 @@ import Foundation
 /// | `maxContinuousSpeechDuration` | `180.0s` | Safety: force-clear stuck speaking state |
 /// | `thinkingPauseEnabled` | `true` | Extend silence threshold when mid-thought detected |
 /// | `thinkingPauseExtensionSeconds` | `5.0s` | Extra seconds to allow for thinking pauses |
+/// | `turnClassifierEnabled` | `false` | Enable SmartTurn-style completion gating |
+/// | `turnClassifierMinimumSilence` | `1.5s` | Minimum silence before classifier evaluation |
+/// | `turnClassifierIncompleteExtensionSeconds` | `3.0s` | Extra wait when classifier predicts incomplete |
+/// | `turnClassifierThreshold` | `0.5` | Completion probability threshold |
 public struct AutoEndConfiguration: Sendable {
 
     // MARK: - Core auto-end fields
@@ -106,6 +110,20 @@ public struct AutoEndConfiguration: Sendable {
     /// Default: 5.0s. Increase for deliberate speakers; decrease for quick-note users.
     public var thinkingPauseExtensionSeconds: TimeInterval
 
+    // MARK: - Turn completion classifier
+
+    /// Enables SmartTurn-style turn completion gating in ``SessionController``.
+    public var turnClassifierEnabled: Bool
+
+    /// Minimum silence after speech end before classifier output is considered.
+    public var turnClassifierMinimumSilence: TimeInterval
+
+    /// Extra silence allowance when the classifier predicts an incomplete turn.
+    public var turnClassifierIncompleteExtensionSeconds: TimeInterval
+
+    /// Completion threshold in [0,1]. Probabilities below this are treated as incomplete.
+    public var turnClassifierThreshold: Float
+
     // MARK: - Init
 
     public init(
@@ -116,7 +134,11 @@ public struct AutoEndConfiguration: Sendable {
         noSpeechTimeout: TimeInterval = 10.0,
         maxContinuousSpeechDuration: TimeInterval = 180.0,
         thinkingPauseEnabled: Bool = true,
-        thinkingPauseExtensionSeconds: TimeInterval = 5.0
+        thinkingPauseExtensionSeconds: TimeInterval = 5.0,
+        turnClassifierEnabled: Bool = false,
+        turnClassifierMinimumSilence: TimeInterval = 1.5,
+        turnClassifierIncompleteExtensionSeconds: TimeInterval = 3.0,
+        turnClassifierThreshold: Float = 0.5
     ) {
         self.enabled = enabled
         self.silenceDuration = silenceDuration
@@ -126,6 +148,10 @@ public struct AutoEndConfiguration: Sendable {
         self.maxContinuousSpeechDuration = maxContinuousSpeechDuration
         self.thinkingPauseEnabled = thinkingPauseEnabled
         self.thinkingPauseExtensionSeconds = thinkingPauseExtensionSeconds
+        self.turnClassifierEnabled = turnClassifierEnabled
+        self.turnClassifierMinimumSilence = turnClassifierMinimumSilence
+        self.turnClassifierIncompleteExtensionSeconds = turnClassifierIncompleteExtensionSeconds
+        self.turnClassifierThreshold = turnClassifierThreshold
     }
 
     // MARK: - Presets

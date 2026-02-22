@@ -75,6 +75,13 @@ public actor SessionController {
     /// `ThinkingPauseDetector` to determine if the user is mid-thought.
     public var lastTranscript: String = ""
 
+    // MARK: - Turn completion classifier state
+
+    /// Latest completion probability for the current post-speech silence window.
+    private var lastTurnCompletionProbability: Float?
+    /// Tracks which speech-end boundary has already been evaluated.
+    private var lastTurnCompletionEvaluatedSpeechEnd: Date?
+
     /// Update the transcript text. Called by StreamingRecorder when new transcription
     /// results arrive (both interim and final). Actor-isolated, safe to call from any task.
     public func set(lastTranscript text: String) {
@@ -114,6 +121,8 @@ public actor SessionController {
         lastSpeechEndTime = nil
         speakingStartTime = nil
         lastTranscript = ""
+        lastTurnCompletionProbability = nil
+        lastTurnCompletionEvaluatedSpeechEnd = nil
 
         let silence = String(format: "%.1f", autoEndConfig.silenceDuration)
         let minSess = String(format: "%.1f", autoEndConfig.minSessionDuration)
@@ -122,8 +131,11 @@ public actor SessionController {
         let maxSpeak = String(format: "%.1f", autoEndConfig.maxContinuousSpeechDuration)
         let thinking = autoEndConfig.thinkingPauseEnabled
         let thinkExt = String(format: "%.1f", autoEndConfig.thinkingPauseExtensionSeconds)
+        let turnClassifier = autoEndConfig.turnClassifierEnabled
+        let turnClassifierSil = String(format: "%.1f", autoEndConfig.turnClassifierMinimumSilence)
+        let turnClassifierExt = String(format: "%.1f", autoEndConfig.turnClassifierIncompleteExtensionSeconds)
         // swiftlint:disable:next line_length
-        logger.info("SESSION START: autoEnd=\(self.autoEndConfig.enabled, privacy: .public) silence=\(silence, privacy: .public)s minSession=\(minSess, privacy: .public)s requireSpeech=\(self.autoEndConfig.requireSpeechFirst, privacy: .public) noSpeechTimeout=\(noSpeech, privacy: .public)s maxChunk=\(maxChunk, privacy: .public)s maxSpeak=\(maxSpeak, privacy: .public)s thinkingPause=\(thinking, privacy: .public)(+\(thinkExt, privacy: .public)s)")
+        logger.info("SESSION START: autoEnd=\(self.autoEndConfig.enabled, privacy: .public) silence=\(silence, privacy: .public)s minSession=\(minSess, privacy: .public)s requireSpeech=\(self.autoEndConfig.requireSpeechFirst, privacy: .public) noSpeechTimeout=\(noSpeech, privacy: .public)s maxChunk=\(maxChunk, privacy: .public)s maxSpeak=\(maxSpeak, privacy: .public)s thinkingPause=\(thinking, privacy: .public)(+\(thinkExt, privacy: .public)s) turnClassifier=\(turnClassifier, privacy: .public) minSil=\(turnClassifierSil, privacy: .public)s ext=\(turnClassifierExt, privacy: .public)s")
     }
 
     // MARK: - Speech events
@@ -139,6 +151,8 @@ public actor SessionController {
             isUserSpeaking = true
             hasSpeechOccurredInSession = true
             speakingStartTime = dateProvider()                  // ← Safety timeout tracking
+            lastTurnCompletionProbability = nil
+            lastTurnCompletionEvaluatedSpeechEnd = nil
             if chunkStartTime == nil { chunkStartTime = dateProvider() }
             logger.info("🎤 SPEECH START: sessionDur=\(String(format: "%.1f", self.currentSessionDuration), privacy: .public)s")
 
@@ -146,6 +160,8 @@ public actor SessionController {
             isUserSpeaking = false
             speakingStartTime = nil                            // ← Clear safety timeout tracker
             lastSpeechEndTime = dateProvider()
+            lastTurnCompletionProbability = nil
+            lastTurnCompletionEvaluatedSpeechEnd = nil
             logger.info("🔇 SPEECH END: sessionDur=\(String(format: "%.1f", self.currentSessionDuration), privacy: .public)s")
         }
     }
@@ -264,13 +280,19 @@ public actor SessionController {
             // the silence threshold to avoid cutting off mid-thought utterances.
             let effectiveSilenceThreshold = effectiveSilenceDuration()
             let thinkingDetected = effectiveSilenceThreshold > autoEndConfig.silenceDuration
+            let classifierExtendedThreshold = turnClassifierExtendedThreshold(
+                baseThreshold: effectiveSilenceThreshold
+            )
+            let classifierActive = classifierExtendedThreshold > effectiveSilenceThreshold
 
-            if silenceSoFar >= effectiveSilenceThreshold {
-                logger.warning("🛑 AUTO-END NORMAL: silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s >= threshold=\(String(format: "%.1f", effectiveSilenceThreshold), privacy: .public)s (thinkingPauseExtended=\(thinkingDetected, privacy: .public))")
+            if silenceSoFar >= classifierExtendedThreshold {
+                logger.warning("🛑 AUTO-END NORMAL: silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s >= threshold=\(String(format: "%.1f", classifierExtendedThreshold), privacy: .public)s (thinkingPauseExtended=\(thinkingDetected, privacy: .public) turnClassifierExtended=\(classifierActive, privacy: .public))")
                 return true
             }
 
-            if thinkingDetected {
+            if classifierActive {
+                logger.debug("autoEnd: TURN CLASSIFIER HOLD (silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s / extended=\(String(format: "%.1f", classifierExtendedThreshold), privacy: .public)s prob=\(String(format: "%.2f", self.lastTurnCompletionProbability ?? -1), privacy: .public))")
+            } else if thinkingDetected {
                 logger.debug("autoEnd: THINKING PAUSE (silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s / extended=\(String(format: "%.1f", effectiveSilenceThreshold), privacy: .public)s)")
             } else {
                 logger.debug("autoEnd: WAITING (silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s / required=\(String(format: "%.1f", self.autoEndConfig.silenceDuration), privacy: .public)s)")
@@ -346,6 +368,39 @@ public actor SessionController {
             logger.debug("Thinking pause detected: pattern='\(pattern, privacy: .private(mask: .hash))' extending silence to \(String(format: "%.1f", extended), privacy: .public)s")
         }
         return extended
+    }
+
+    private func turnClassifierExtendedThreshold(baseThreshold: TimeInterval) -> TimeInterval {
+        guard autoEndConfig.turnClassifierEnabled,
+              let probability = lastTurnCompletionProbability,
+              probability < autoEndConfig.turnClassifierThreshold else {
+            return baseThreshold
+        }
+        return max(
+            baseThreshold,
+            autoEndConfig.silenceDuration + autoEndConfig.turnClassifierIncompleteExtensionSeconds
+        )
+    }
+
+    /// Whether turn completion should be evaluated for the current speech-end boundary.
+    public func shouldEvaluateTurnCompletion() -> Bool {
+        guard autoEndConfig.turnClassifierEnabled,
+              let lastEnd = lastSpeechEndTime else {
+            return false
+        }
+        guard lastTurnCompletionEvaluatedSpeechEnd != lastEnd else { return false }
+        let silence = dateProvider().timeIntervalSince(lastEnd)
+        return silence >= autoEndConfig.turnClassifierMinimumSilence
+    }
+
+    /// Store classifier output for current boundary.
+    public func setTurnCompletionProbability(_ probability: Float?) {
+        lastTurnCompletionProbability = probability
+    }
+
+    /// Mark current speech-end as evaluated to avoid re-running classifier repeatedly.
+    public func markTurnCompletionEvaluated() {
+        lastTurnCompletionEvaluatedSpeechEnd = lastSpeechEndTime
     }
 }
 

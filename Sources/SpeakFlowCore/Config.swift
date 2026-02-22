@@ -16,6 +16,14 @@ public enum Config {
     /// so we are 80%+ sure it's silent.
     public static let minVADSpeechProbability: Float = 0.20
 
+    // MARK: - Pre-VAD Audio Filter
+    /// Enables the lightweight noise gate before VAD and chunk buffering.
+    /// Keeps the default behavior conservative: only near-silence is zeroed.
+    public static let audioNoiseGateEnabled: Bool = true
+    /// RMS threshold (0-1) for the pre-VAD noise gate.
+    /// Frames below this value are replaced with silence.
+    public static let audioNoiseGateRmsThreshold: Float = 0.002
+
     // MARK: - Audio Limits
     /// Sample rate for audio recording (Hz)
     public static let sampleRate: Double = 16000
@@ -63,6 +71,26 @@ public enum Config {
     public static let vadMinSpeechDuration: Double = 0.25
     public static let autoEndSilenceDuration: Double = 5.0
     public static let autoEndMinSessionDuration: Double = 2.0
+
+    // MARK: - Idle Nudge (pre auto-end)
+    /// When enabled, auto-end is preceded by progressive nudges.
+    public static let idleNudgeEnabled: Bool = false
+    /// Delay before the first nudge once auto-end condition is reached.
+    public static let idleNudgeInitialDelay: Double = 0.0
+    /// Interval between nudges.
+    public static let idleNudgeInterval: Double = 3.0
+    /// Number of nudges before expiration callback fires.
+    public static let idleNudgeMaxCount: Int = 2
+
+    // MARK: - Turn completion classifier (SmartTurn-style)
+    /// Master switch for classifier-assisted auto-end gating.
+    public static let turnClassifierEnabled: Bool = false
+    /// Minimum silence after speech end before evaluating turn completion.
+    public static let turnClassifierMinimumSilence: Double = 1.5
+    /// Extra silence allowance when the classifier predicts an incomplete turn.
+    public static let turnClassifierIncompleteExtensionSeconds: Double = 3.0
+    /// Completion probability threshold.
+    public static let turnClassifierThreshold: Float = 0.5
 
     // MARK: - VAD Volume Gate (filters non-vocal speech starts)
 

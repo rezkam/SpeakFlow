@@ -168,6 +168,9 @@ public final class StreamingRecorder {
     // VAD Components
     private var vadProcessor: VADProcessor?
     private var sessionController: SessionController?
+    private var audioFilter: (any AudioFilter)?
+    private var idleNudgeController: IdleNudgeController?
+    private var turnClassifier: TurnClassifier?
 
     /// When this recording session started (for diagnostic logging)
     public private(set) var sessionStartDate: Date?
@@ -241,6 +244,12 @@ public final class StreamingRecorder {
         audioBuffer = AudioBuffer(sampleRate: sampleRate)
         state.setRecording(true)
         state.setLastSoundTime(Date())
+        setupIdleNudgeController()
+        setupTurnClassifier()
+        audioFilter = Config.audioNoiseGateEnabled
+            ? NoiseGateFilter(rmsThreshold: Config.audioNoiseGateRmsThreshold)
+            : nil
+        await audioFilter?.start(sampleRate: sampleRate)
 
         // Initialize VAD BEFORE starting audio capture to avoid race condition
         await initializeVAD()
@@ -250,6 +259,11 @@ public final class StreamingRecorder {
         // Without this guard, we'd install orphan taps/timers after the user stopped.
         guard state.getRecording() else {
             Logger.audio.info("Recording cancelled during VAD initialization, aborting start")
+            await audioFilter?.stop()
+            audioFilter = nil
+            idleNudgeController?.stopMonitoring()
+            idleNudgeController = nil
+            turnClassifier = nil
             audioEngine = nil
             audioBuffer = nil
             return false
@@ -305,6 +319,11 @@ public final class StreamingRecorder {
             audioEngine = nil
             audioBuffer = nil
             state.setRecording(false)
+            await audioFilter?.stop()
+            audioFilter = nil
+            idleNudgeController?.stopMonitoring()
+            idleNudgeController = nil
+            turnClassifier = nil
             vadProcessor = nil
             sessionController = nil
             sessionStartDate = nil
@@ -330,8 +349,12 @@ public final class StreamingRecorder {
             accumulated.append(contentsOf: batch)
         }
 
+        // Optional pre-VAD filter stage (noise gate).
+        // VAD and chunk buffering must observe the same filtered signal.
+        let filteredSamples = audioFilter?.filter(accumulated) ?? accumulated
+
         // Single actor hop into AudioBuffer
-        await audioBuffer?.append(frames: accumulated)
+        await audioBuffer?.append(frames: filteredSamples)
 
         // ── VAD inference in model-sized chunks ───────────────────────────────────
         //
@@ -357,9 +380,9 @@ public final class StreamingRecorder {
 
         let maxChunkSize = 4096
         var offset = 0
-        while offset < accumulated.count {
-            let end = min(offset + maxChunkSize, accumulated.count)
-            let chunk = Array(accumulated[offset..<end])
+        while offset < filteredSamples.count {
+            let end = min(offset + maxChunkSize, filteredSamples.count)
+            let chunk = Array(filteredSamples[offset..<end])
             await processWithVAD(samples: chunk)
             offset = end
         }
@@ -401,7 +424,11 @@ public final class StreamingRecorder {
                 enabled: settings.autoEndEnabled,
                 silenceDuration: settings.autoEndSilenceDuration,
                 minSessionDuration: Config.autoEndMinSessionDuration,
-                requireSpeechFirst: true
+                requireSpeechFirst: true,
+                turnClassifierEnabled: Config.turnClassifierEnabled,
+                turnClassifierMinimumSilence: Config.turnClassifierMinimumSilence,
+                turnClassifierIncompleteExtensionSeconds: Config.turnClassifierIncompleteExtensionSeconds,
+                turnClassifierThreshold: Config.turnClassifierThreshold
             )
 
             vadProcessor = VADProcessor(config: vadConfig)
@@ -483,6 +510,8 @@ public final class StreamingRecorder {
                             }
                         }
                     }
+                } else if case .started = event {
+                    idleNudgeController?.stopMonitoring()
                 }
             }
         } catch {
@@ -512,6 +541,7 @@ public final class StreamingRecorder {
         }
 
         if state.getVADActive(), let session = sessionController {
+            await maybeEvaluateTurnCompletion(session: session)
             let isSpeaking = await vadProcessor?.isSpeaking ?? false
             let silenceDur = await session.currentSilenceDuration
             let sessionDur = await session.currentSessionDuration
@@ -530,6 +560,10 @@ public final class StreamingRecorder {
 
             let shouldAutoEnd = await session.shouldAutoEndSession()
             if shouldAutoEnd {
+                if let idleNudgeController {
+                    idleNudgeController.startMonitoring(afterDelay: Config.idleNudgeInitialDelay)
+                    return
+                }
                 let dur = String(format: "%.1f", duration)
                 let sess = String(format: "%.1f", sessionDur)
                 let sil = String(format: "%.1f", silenceDur ?? -1)
@@ -537,6 +571,8 @@ public final class StreamingRecorder {
                 Logger.audio.error("AUTO-END TRIGGERED: duration=\(dur, privacy: .public)s sessionDur=\(sess, privacy: .public)s isSpeaking=\(isSpeaking, privacy: .public) silence=\(sil, privacy: .public)s hasSpoken=\(hasSpoken, privacy: .public)")
                 onAutoEnd?()
                 return
+            } else {
+                idleNudgeController?.stopMonitoring()
             }
 
             if duration >= self.settings.maxChunkDuration {
@@ -650,16 +686,23 @@ public final class StreamingRecorder {
         processingTimer = nil
 
         state.setRecording(false)
+        idleNudgeController?.stopMonitoring()
+        turnClassifier = nil
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
 
         let hadVADActive = state.getVADActive()
+        let filter = audioFilter
+        audioFilter = nil
 
         let wasCancelled = isCancelled
         isCancelled = false
 
         Task { [self] in
+            await filter?.stop()
+            idleNudgeController = nil
+            turnClassifier = nil
             defer { self.state.setVADActive(false) }
             guard let buffer = self.audioBuffer else { return }
 
@@ -732,92 +775,10 @@ public final class StreamingRecorder {
 
     /// Encode PCM Float32 samples as a WAV file.
     ///
-    /// ## Performance
-    ///
-    /// Previous implementation:
-    ///   `samples.map { Int16(...) }` → intermediate `[Int16]` heap array  (~938 KB for 30s)
-    ///   `int16.forEach { wav.append(withUnsafeBytes(of: $0.littleEndian) { Data($0) }) }`
-    ///   → 480,000 individual `Data($0)` heap allocations per 30-second chunk
-    ///
-    /// This implementation:
-    ///   1 `[Float]` scratch buffer (for in-place clip + scale)
-    ///   1 `Data(count: totalBytes)` pre-allocation for the output
-    ///   `vDSP_vclip` + `vDSP_vsmul` + `vDSP_vfix16`: vectorised SIMD clamp → scale → truncate
-    ///   `withUnsafeMutableBytes` storeBytes for header fields — direct pointer writes
-    ///
-    /// Allocation budget: 2 heap objects (down from ~480K + 1 intermediate [Int16])
-    ///
-    /// ## Why vDSP_vclip + vDSP_vsmul + vDSP_vfix16 and not vDSP_vfixr16?
-    ///
-    /// `vDSP_vfixr16` converts float to Int16 by **rounding** without pre-scaling,
-    /// which collapses the full [-1, 1] float range to just {-1, 0, 1} — completely wrong.
-    /// The correct 3-step pipeline:
-    ///   1. `vDSP_vclip`: clamp to [-1, 1]       — identical to `max(-1, min(1, x))`
-    ///   2. `vDSP_vsmul`: multiply by 32767.0     — scale to Int16 range
-    ///   3. `vDSP_vfix16`: truncate to Int16      — identical to Swift's `Int16(Float)`
-    /// This produces deterministic Int16 PCM output aligned with Swift truncation semantics.
+    /// Delegates to shared ``WavEncoder`` so WAV generation remains reusable and
+    /// independently testable across components.
     private func createWav(from samples: [Float]) -> Data {
-        guard !samples.isEmpty else { return Data() }
-
-        let sampleCount = samples.count
-        let n           = vDSP_Length(sampleCount)
-        let dataBytes   = sampleCount * MemoryLayout<Int16>.stride   // 2 bytes per sample
-        let totalBytes  = 44 + dataBytes                              // WAV header is exactly 44 bytes
-
-        // Scratch buffer for in-place clip + scale (avoids mutating the immutable `samples` param)
-        var scratch = [Float](unsafeUninitializedCapacity: sampleCount) { buf, count in
-            samples.withUnsafeBufferPointer { src in
-                buf.baseAddress!.initialize(from: src.baseAddress!, count: sampleCount)
-            }
-            count = sampleCount
-        }
-
-        // Step 1: clip to [-1, 1] (in-place)
-        var low: Float  = -1.0
-        var high: Float =  1.0
-        vDSP_vclip(scratch, 1, &low, &high, &scratch, 1, n)
-
-        // Step 2: scale by 32767 (in-place)
-        var scale: Float = 32767.0
-        vDSP_vsmul(scratch, 1, &scale, &scratch, 1, n)
-
-        // Single pre-allocated output avoids per-sample allocation churn.
-        var wav = Data(count: totalBytes)
-
-        wav.withUnsafeMutableBytes { raw in
-            let b = raw.baseAddress!
-
-            // ── RIFF chunk descriptor ──────────────────────────────────────
-            b.storeBytes(of: 0x46464952 as UInt32, as: UInt32.self)                        // "RIFF"
-            (b + 4).storeBytes(of: UInt32(36 + dataBytes).littleEndian, as: UInt32.self)   // chunk size
-            (b + 8).storeBytes(of: 0x45564157 as UInt32, as: UInt32.self)                  // "WAVE"
-
-            // ── fmt  sub-chunk (16 bytes) ─────────────────────────────────
-            (b + 12).storeBytes(of: 0x20746D66 as UInt32, as: UInt32.self)                 // "fmt "
-            (b + 16).storeBytes(of: UInt32(16).littleEndian, as: UInt32.self)              // sub-chunk size
-            (b + 20).storeBytes(of: UInt16(1).littleEndian,  as: UInt16.self)              // PCM = 1
-            (b + 22).storeBytes(of: UInt16(1).littleEndian,  as: UInt16.self)              // mono
-            let sr = UInt32(sampleRate)
-            (b + 24).storeBytes(of: sr.littleEndian,           as: UInt32.self)            // sample rate
-            (b + 28).storeBytes(of: (sr * 2).littleEndian,     as: UInt32.self)            // byte rate
-            (b + 32).storeBytes(of: UInt16(2).littleEndian,    as: UInt16.self)            // block align
-            (b + 34).storeBytes(of: UInt16(16).littleEndian,   as: UInt16.self)            // bits/sample
-
-            // ── data sub-chunk header ─────────────────────────────────────
-            (b + 36).storeBytes(of: 0x61746164 as UInt32, as: UInt32.self)                 // "data"
-            (b + 40).storeBytes(of: UInt32(dataBytes).littleEndian, as: UInt32.self)       // data size
-
-            // ── Step 3: truncate scaled floats to Int16 ───────────────────
-            //
-            // vDSP_vfix16 truncates (matches Swift's `Int16(Float)` truncation semantics),
-            // producing deterministic output that matches Swift's truncation semantics.
-            // The destination pointer is bound directly into the pre-allocated wav buffer,
-            // writing all Int16 samples in a single SIMD pass — zero per-sample overhead.
-            let dst = (b + 44).bindMemory(to: Int16.self, capacity: sampleCount)
-            vDSP_vfix16(scratch, 1, dst, 1, n)
-        }
-
-        return wav
+        WavEncoder.encode(samples: samples, sampleRate: sampleRate)
     }
 
     /// Start a mock recording session using provided audio data.
@@ -827,10 +788,23 @@ public final class StreamingRecorder {
         audioBuffer = AudioBuffer(sampleRate: sampleRate)
         state.setRecording(true)
         state.setLastSoundTime(Date())
+        setupIdleNudgeController()
+        setupTurnClassifier()
+        audioFilter = Config.audioNoiseGateEnabled
+            ? NoiseGateFilter(rmsThreshold: Config.audioNoiseGateRmsThreshold)
+            : nil
+        await audioFilter?.start(sampleRate: sampleRate)
 
         await initializeVAD()
         
-        guard state.getRecording() else { return }
+        guard state.getRecording() else {
+            await audioFilter?.stop()
+            audioFilter = nil
+            idleNudgeController?.stopMonitoring()
+            idleNudgeController = nil
+            turnClassifier = nil
+            return
+        }
         Logger.audio.info("Starting MOCK recording with \(audioData.count) samples")
         
         // Start timers (same as real recording)
@@ -918,6 +892,8 @@ extension StreamingRecorder {
         return await buffer.duration
     }
 
+    var _testHasIdleNudgeController: Bool { idleNudgeController != nil }
+
     /// Enqueue a sample batch directly into the internal AudioSampleQueue.
     /// Used by tests to bypass the audio tap and inject controlled sample data.
     func _testEnqueueSamples(_ frames: [Float]) {
@@ -937,3 +913,55 @@ extension StreamingRecorder {
 }
 // swiftlint:enable identifier_name
 #endif
+
+@MainActor
+private extension StreamingRecorder {
+    func setupIdleNudgeController() {
+        guard Config.idleNudgeEnabled else {
+            idleNudgeController = nil
+            return
+        }
+        let controller = IdleNudgeController(
+            nudgeInterval: Config.idleNudgeInterval,
+            maxNudges: Config.idleNudgeMaxCount
+        )
+        controller.onNudge = {
+            Logger.audio.info("Idle nudge: user is silent, waiting before auto-end")
+        }
+        controller.onFinalWarning = {
+            Logger.audio.info("Idle final warning before auto-end")
+        }
+        controller.onExpired = { [weak self] in
+            self?.onAutoEnd?()
+        }
+        idleNudgeController = controller
+    }
+
+    func setupTurnClassifier() {
+        guard Config.turnClassifierEnabled else {
+            turnClassifier = nil
+            return
+        }
+        let classifier = TurnClassifier()
+        turnClassifier = classifier
+        Task {
+            await classifier.loadModelIfAvailable()
+        }
+    }
+
+    func maybeEvaluateTurnCompletion(session: SessionController) async {
+        guard let turnClassifier else { return }
+        guard await session.shouldEvaluateTurnCompletion() else { return }
+
+        let transcript = await session.lastTranscript
+        let recentAudio = await audioBuffer?.peekLast(seconds: 8.0) ?? []
+        let probability = await turnClassifier.classify(
+            transcript: transcript,
+            recentAudio: recentAudio,
+            sampleRate: sampleRate
+        )
+        await session.setTurnCompletionProbability(probability)
+        await session.markTurnCompletionEvaluated()
+        Logger.audio.debug("Turn classifier probability=\(String(format: "%.2f", probability), privacy: .public)")
+    }
+}

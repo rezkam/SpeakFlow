@@ -101,6 +101,19 @@ public final class LiveStreamingController {
     /// Defaults to `true`. Covers WiFi glitches, sleep/wake, brief connectivity loss.
     public var reconnectEnabled: Bool = true
 
+    // MARK: - Final Result Commit Guard
+
+    /// Minimum number of lexical words required before committing a non-`speechFinal`
+    /// final result to the text field.
+    ///
+    /// Short one-word non-terminal finals (for example "uh") are often revised by
+    /// subsequent streaming updates. Treating them as interim reduces noisy commits.
+    ///
+    /// Guard rails:
+    /// - `speechFinal=true` always commits (utterance boundary).
+    /// - Text with terminal punctuation commits even if short (e.g. "Yes.").
+    public var minimumFinalWordCount: Int = 1
+
     /// Stored provider reference for reconnection. Set when `start()` is called.
     internal var reconnectProvider: (any StreamingTranscriptionProvider)?
 
@@ -133,6 +146,15 @@ public final class LiveStreamingController {
     /// Called when speech starts (provider-detected).
     public var onSpeechStarted: (() -> Void)?
 
+    /// Called once per turn when configured start strategy is satisfied.
+    public var onTurnStarted: ((TurnStartTrigger) -> Void)?
+
+    /// Called each time a keepAlive ping is sent successfully.
+    public var onKeepAliveSent: (() -> Void)?
+
+    /// Called after an automatic reconnection succeeds.
+    public var onReconnected: (() -> Void)?
+
     /// Called on error.
     public var onError: ((Error) -> Void)?
 
@@ -141,6 +163,11 @@ public final class LiveStreamingController {
 
     /// Called when silence auto-end timer fires (user silent for `autoEndSilenceDuration`).
     public var onAutoEnd: (() -> Void)?
+
+    /// Strategies used to detect turn start. Default preserves current behavior.
+    public var turnStartStrategies: [TurnStartStrategy] = [.providerSpeechStarted]
+
+    private var hasStartedTurn = false
 
     public init() {}
 
@@ -494,6 +521,8 @@ public final class LiveStreamingController {
 
     /// Process a transcription event. Internal for testing.
     internal func handleEvent(_ event: TranscriptionEvent) {
+        evaluateTurnStartIfNeeded(for: event)
+
         switch event {
         case .interim(let result):
             guard !result.transcript.isEmpty else { return }
@@ -515,6 +544,21 @@ public final class LiveStreamingController {
             }
 
         case .finalResult(let result):
+            if shouldTreatFinalAsInterim(result) {
+                logger.debug("Short non-terminal final treated as interim: '\(result.transcript, privacy: .private(mask: .hash))'")
+                let downgraded = TranscriptionResult(
+                    transcript: result.transcript,
+                    confidence: result.confidence,
+                    start: result.start,
+                    duration: result.duration,
+                    words: result.words,
+                    isFinal: false,
+                    speechFinal: false
+                )
+                handleEvent(.interim(downgraded))
+                return
+            }
+
             let newText = result.transcript
             let previousInterimCount = lastInterimCharCount
 
@@ -551,12 +595,14 @@ public final class LiveStreamingController {
                 logger.info("speech_final detected — user stopped speaking")
                 onUtteranceEnd?()
                 startSilenceTimer()
+                resetTurnStartState()
             }
 
         case .utteranceEnd:
             logger.info("UtteranceEnd — user stopped speaking")
             onUtteranceEnd?()
             startSilenceTimer()
+            resetTurnStartState()
 
         case .speechStarted:
             // Speech resumed — cancel silence timer
@@ -572,6 +618,7 @@ public final class LiveStreamingController {
             logger.info("Provider session closed")
             cancelSilenceTimer()
             cancelKeepAliveTimer()
+            resetTurnStartState()
 
             if isActive {
                 // ── Reconnection attempt ────────────────────────────
@@ -688,6 +735,97 @@ public final class LiveStreamingController {
         silenceTimer = nil
     }
 
+    private func resetTurnStartState() {
+        hasStartedTurn = false
+    }
+
+    private func evaluateTurnStartIfNeeded(for event: TranscriptionEvent) {
+        guard !hasStartedTurn else { return }
+        for strategy in turnStartStrategies {
+            switch strategy {
+            case .providerSpeechStarted:
+                if case .speechStarted = event {
+                    hasStartedTurn = true
+                    onTurnStarted?(.providerSpeechStarted)
+                    return
+                }
+            case .firstTranscription:
+                if transcriptText(from: event).isEmpty { continue }
+                hasStartedTurn = true
+                onTurnStarted?(.firstTranscription)
+                return
+            case .minimumWords(let minWords):
+                let text = transcriptText(from: event)
+                guard !text.isEmpty else { continue }
+                if lexicalWordCount(in: text) >= max(1, minWords) {
+                    hasStartedTurn = true
+                    onTurnStarted?(.minimumWords(minWords))
+                    return
+                }
+            }
+        }
+    }
+
+    private func transcriptText(from event: TranscriptionEvent) -> String {
+        switch event {
+        case .interim(let result):
+            return result.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .finalResult(let result):
+            return result.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        default:
+            return ""
+        }
+    }
+
+    // MARK: - Final Commit Heuristics
+
+    /// Returns true when a short non-terminal "final" should be treated like interim text.
+    ///
+    /// This prevents one-word fillers from being committed prematurely while preserving
+    /// intentional short commands/sentences that are punctuated or speech-final.
+    private func shouldTreatFinalAsInterim(_ result: TranscriptionResult) -> Bool {
+        guard minimumFinalWordCount > 1 else { return false }
+        guard !result.speechFinal else { return false }
+        let transcript = result.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !transcript.isEmpty else { return false }
+        guard lexicalWordCount(in: transcript) < minimumFinalWordCount else { return false }
+        return !hasTerminalPunctuation(transcript)
+    }
+
+    /// Counts lexical tokens (letters/digits with optional apostrophes).
+    private func lexicalWordCount(in text: String) -> Int {
+        var count = 0
+        var inToken = false
+
+        for scalar in text.unicodeScalars {
+            let isWord = CharacterSet.alphanumerics.contains(scalar) || scalar == "'"
+            if isWord {
+                if !inToken {
+                    count += 1
+                    inToken = true
+                }
+            } else {
+                inToken = false
+            }
+        }
+        return count
+    }
+
+    /// True when the trimmed text ends in strong terminal punctuation.
+    private func hasTerminalPunctuation(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+
+        let trailingClosers = CharacterSet(charactersIn: "\"'”’)]}")
+        let terminalPunctuation = CharacterSet(charactersIn: ".!?;:…")
+        var scalars = Array(text.unicodeScalars)
+
+        while let last = scalars.last, trailingClosers.contains(last) {
+            scalars.removeLast()
+        }
+        guard let last = scalars.last else { return false }
+        return terminalPunctuation.contains(last)
+    }
+
     // MARK: - Smart Diff
 
     /// Compare old and new text, find the common prefix, and return:
@@ -705,7 +843,7 @@ public final class LiveStreamingController {
         let commonLen = zip(oldChars, newChars).prefix(while: { $0 == $1 }).count
 
         let charsToDelete = oldChars.count - commonLen
-        let suffixToType = String(newChars[commonLen...])
+        let suffixToType = commonLen < newChars.count ? String(newChars[commonLen...]) : ""
 
         return (charsToDelete, suffixToType)
     }
@@ -752,6 +890,7 @@ public final class LiveStreamingController {
                 do {
                     try await self.session?.keepAlive()
                     self.logger.debug("KeepAlive sent (interval=\(interval)s)")
+                    self.onKeepAliveSent?()
                 } catch {
                     // keepAlive failure is non-fatal — connection will drop on its own
                     // if the server has already closed, which triggers .closed event
@@ -808,6 +947,7 @@ public final class LiveStreamingController {
             // Reactivate — audio tap is still installed and running
             activateSession(newSession)
             logger.info("Reconnection complete: \(provider.displayName)")
+            onReconnected?()
             return true
         } catch {
             logger.error("Reconnection failed: \(error.localizedDescription)")
