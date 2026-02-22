@@ -28,7 +28,10 @@ REGRESSION_SUITES=(
   "RecordingControllerTests"
   "StreamingRecordingTests"
   "EnterSubmissionContractTests"
+  "KeyInterceptorEnterCaptureTests"
   "TextInserterFocusTests"
+  "TextInserterModifierSafetyTests"
+  "SoundEffectTests"
   "SessionControllerTests"
   "ThinkingPauseDetectorTests"
   "VADStateMachineTests"
@@ -39,6 +42,8 @@ REGRESSION_SUITES=(
   "AudioPipelineTests"
   "TranscriptionQueueTests"
   "TranscriptionTests"
+  "StatisticsTests"
+  "SessionMetricsStoreTests"
   "AuthTests"
   "DeepgramSessionTests"
   "MistralSessionTests"
@@ -88,7 +93,7 @@ run_suite() {
 
   cat "$suite_log" >>"$LOG_FILE"
   local count
-  count="$(grep -Eo 'Test run with [0-9]+ tests' "$suite_log" | tail -n1 | awk '{print $4}')"
+  count="$(grep -Eo 'Test run with [0-9]+ tests?' "$suite_log" | tail -n1 | awk '{print $4}')"
   if [[ -z "$count" || "$count" == "0" ]]; then
     echo "FAILED: $suite matched 0 tests"
     echo "See log: $LOG_FILE"

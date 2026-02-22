@@ -400,7 +400,9 @@ struct ReconnectLifecycleTests {
         c.reconnectConfig = .default
 
         c.handleEvent(.closed)
-        try await Task.sleep(for: .milliseconds(500))
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(25)) {
+            sessionClosedFired && c.isActive == false
+        }
 
         #expect(c._testAudioSessionRefActive == false,
                 "After failed reconnect, audio ref must be cleared")
@@ -527,7 +529,9 @@ struct ReconnectLifecycleTests {
         c.reconnectConfig = .default
 
         c.handleEvent(.closed)
-        try await Task.sleep(for: .milliseconds(500))
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(25)) {
+            sessionClosedCallCount == 1
+        }
 
         #expect(sessionClosedCallCount == 1,
                 "onSessionClosed MUST fire on genuine reconnect failure (not user-cancelled)")
