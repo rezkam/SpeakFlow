@@ -32,6 +32,11 @@ public actor AudioBuffer {
         Double(samples.count) / sampleRate
     }
 
+    /// Number of samples currently buffered.
+    public var count: Int {
+        samples.count
+    }
+
     /// Returns true if the buffer is at its hard capacity limit.
     /// When true, further `append()` calls are no-ops (samples are dropped).
     public var isAtCapacity: Bool {
@@ -61,6 +66,47 @@ public actor AudioBuffer {
     public func takeAll() -> [Float] {
         let result = samples
         samples = []
+        return result
+    }
+
+    /// Non-destructive snapshot of buffered samples.
+    ///
+    /// Useful for diagnostics and classifiers that need to inspect recent audio
+    /// without consuming the transcription buffer.
+    public func peek() -> [Float] {
+        samples
+    }
+
+    /// Non-destructive read of the most recent `seconds` of audio.
+    ///
+    /// Returns fewer samples if the buffer is shorter than the requested window.
+    public func peekLast(seconds: Double) -> [Float] {
+        guard seconds > 0 else { return [] }
+        let sampleCount = Int(seconds * sampleRate)
+        guard sampleCount < samples.count else { return samples }
+        return Array(samples.suffix(sampleCount))
+    }
+
+    /// Drain all buffered samples while retaining a tail overlap.
+    ///
+    /// The returned array contains the full pre-drain buffer. After draining,
+    /// the most recent `overlapSeconds` remains in the buffer for context carry-over
+    /// across chunk boundaries.
+    public func takeAllWithOverlap(overlapSeconds: Double) -> [Float] {
+        guard overlapSeconds > 0, !samples.isEmpty else {
+            return takeAll()
+        }
+
+        let overlapCount = max(Int(overlapSeconds * sampleRate), 0)
+        let result = samples
+        if overlapCount == 0 {
+            samples = []
+            return result
+        }
+
+        samples = overlapCount >= samples.count
+            ? samples
+            : Array(samples.suffix(overlapCount))
         return result
     }
 

@@ -41,6 +41,41 @@ struct AudioBufferTests {
         let durationAgain = await buffer.duration
         #expect(durationAgain == duration, "Buffer should not be drained by reading duration")
     }
+
+    @Test func testPeekIsNonDestructive() async {
+        let buffer = AudioBuffer(sampleRate: 16000)
+        let frames = [Float](repeating: 0.25, count: 4000)
+        await buffer.append(frames: frames)
+
+        let snapshot = await buffer.peek()
+        #expect(snapshot.count == 4000)
+
+        let remaining = await buffer.count
+        #expect(remaining == 4000, "peek() must not drain the buffer")
+    }
+
+    @Test func testPeekLastReturnsTailWindow() async {
+        let buffer = AudioBuffer(sampleRate: 16000)
+        let head = [Float](repeating: 0.1, count: 8000) // 0.5s
+        let tail = [Float](repeating: 0.9, count: 8000) // 0.5s
+        await buffer.append(frames: head + tail)
+
+        let lastHalfSecond = await buffer.peekLast(seconds: 0.5)
+        #expect(lastHalfSecond.count == 8000)
+        #expect(lastHalfSecond.first == 0.9, "Tail window should contain the most recent samples")
+    }
+
+    @Test func testTakeAllWithOverlapRetainsTail() async {
+        let buffer = AudioBuffer(sampleRate: 16000)
+        let frames = [Float](repeating: 0.5, count: 32000) // 2.0s
+        await buffer.append(frames: frames)
+
+        let drained = await buffer.takeAllWithOverlap(overlapSeconds: 0.25)
+        #expect(drained.count == 32000)
+
+        let remaining = await buffer.count
+        #expect(remaining == 4000, "0.25s at 16kHz should remain as overlap tail")
+    }
 }
 
 // MARK: - Chunk Skip Tests
@@ -1447,6 +1482,46 @@ struct EventHandlingTests {
         #expect(col.utteranceEndCount == 0, "Non-speechFinal should not trigger onUtteranceEnd")
     }
 
+    @MainActor @Test func testShortNonSpeechFinalTreatedAsInterim() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.minimumFinalWordCount = 2
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "uh", confidence: 0.9, words: [])))
+
+        #expect(col.entries.count == 1)
+        #expect(col.entries[0].isFinal == false)
+        #expect(col.entries[0].textToType == "uh")
+        #expect(col.utteranceEndCount == 0)
+    }
+
+    @MainActor @Test func testShortPunctuatedNonSpeechFinalStillCommits() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.minimumFinalWordCount = 2
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "Yes.", confidence: 0.95, words: [])))
+
+        #expect(col.entries.count == 1)
+        #expect(col.entries[0].isFinal == true)
+        #expect(col.entries[0].textToType == "Yes.")
+    }
+
+    @MainActor @Test func testShortSpeechFinalStillCommits() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        c.minimumFinalWordCount = 2
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "hmm", confidence: 0.9, words: [], speechFinal: true)))
+
+        #expect(col.entries.count == 1)
+        #expect(col.entries[0].isFinal == true)
+        #expect(col.utteranceEndCount == 1)
+    }
+
     @MainActor @Test func testEmptyInterimIgnored() {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
@@ -1512,6 +1587,50 @@ struct EventHandlingTests {
             #expect(entry.replacingChars == 0,
                     "Progressive interim \(i) should be append-only")
         }
+    }
+
+    @MainActor @Test func testTurnStartStrategyProviderSpeechStarted() {
+        let c = LiveStreamingController()
+        c.turnStartStrategies = [.providerSpeechStarted]
+        var triggers: [TurnStartTrigger] = []
+        c.onTurnStarted = { triggers.append($0) }
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        c.handleEvent(.speechStarted(timestamp: 0.2))
+        #expect(triggers.count == 1)
+        #expect(triggers.first == .providerSpeechStarted)
+
+        c.handleEvent(.utteranceEnd(lastWordEnd: 0.5))
+        c.handleEvent(.speechStarted(timestamp: 1.0))
+        #expect(triggers.count == 2, "Turn start should reset after utterance end")
+    }
+
+    @MainActor @Test func testTurnStartStrategyFirstTranscription() {
+        let c = LiveStreamingController()
+        c.turnStartStrategies = [.firstTranscription]
+        var triggers: [TurnStartTrigger] = []
+        c.onTurnStarted = { triggers.append($0) }
+
+        c.handleEvent(.speechStarted(timestamp: 0))
+        #expect(triggers.isEmpty)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "hello", confidence: 0.8, words: [])))
+        #expect(triggers.count == 1)
+        #expect(triggers.first == .firstTranscription)
+    }
+
+    @MainActor @Test func testTurnStartStrategyMinimumWords() {
+        let c = LiveStreamingController()
+        c.turnStartStrategies = [.minimumWords(3)]
+        var triggers: [TurnStartTrigger] = []
+        c.onTurnStarted = { triggers.append($0) }
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "one two", confidence: 0.8, words: [])))
+        #expect(triggers.isEmpty)
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "one two three", confidence: 0.8, words: [])))
+        #expect(triggers.count == 1)
+        #expect(triggers.first == .minimumWords(3))
     }
 
     @MainActor @Test func testInterimCorrectionMidWord() {
