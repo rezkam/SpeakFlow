@@ -28,6 +28,9 @@ final class KeyInterceptor: KeyIntercepting {
         /// if keyboard focus is in this app (prevents swallowing Escape/Enter
         /// when the user is in Spotlight, password dialogs, etc.).
         var targetPid: pid_t = 0
+        /// One-shot Enter capture token. Armed at recording start, consumed by the
+        /// first intercepted Enter so subsequent Enters pass through normally.
+        var enterCaptureArmed: Bool = false
     }
 
     private let state = OSAllocatedUnfairLock(initialState: EventTapState())
@@ -37,9 +40,14 @@ final class KeyInterceptor: KeyIntercepting {
     // MARK: - Start / Stop
 
     func start(targetPid: pid_t) {
-        let alreadyActive = state.withLockUnchecked { $0.recordingEventTap != nil }
+        let alreadyActive = state.withLockUnchecked {
+            $0.recordingEventTap != nil || $0.keyMonitor != nil
+        }
         guard !alreadyActive else { return }
-        state.withLockUnchecked { $0.targetPid = targetPid }
+        state.withLockUnchecked {
+            $0.targetPid = targetPid
+            $0.enterCaptureArmed = true
+        }
 
         let eventMask = (1 << CGEventType.keyDown.rawValue)
         let tap = CGEvent.tapCreate(
@@ -56,13 +64,25 @@ final class KeyInterceptor: KeyIntercepting {
         guard let tap else {
             Logger.audio.error("Could not create CGEvent tap. Falling back to passive monitor.")
             let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return }
+                let targetPid = self.state.withLockUnchecked { $0.targetPid }
+                // Mirror event-tap behavior in fallback mode: only react when focus is in
+                // the originally captured app so Enter/Escape in other apps are untouched.
+                if targetPid != 0, !Self.isKeyboardFocusInApp(pid: targetPid) {
+                    return
+                }
                 switch event.keyCode {
                 case 53: Task { @MainActor [weak self] in self?.onEscapePressed?() }
-                case 36: Task { @MainActor [weak self] in self?.onEnterPressed?() }
+                case 36:
+                    guard self.consumeEnterCaptureToken() else { return }
+                    Task { @MainActor [weak self] in self?.onEnterPressed?() }
                 default: break
                 }
             }
-            state.withLockUnchecked { $0.keyMonitor = monitor }
+            state.withLockUnchecked {
+                $0.keyMonitor = monitor
+                $0.isActive = true
+            }
             return
         }
 
@@ -85,6 +105,7 @@ final class KeyInterceptor: KeyIntercepting {
             let result = (s.recordingEventTap, s.recordingRunLoopSource, s.keyMonitor)
             s.isActive = false
             s.targetPid = 0
+            s.enterCaptureArmed = false
             s.recordingEventTap = nil
             s.recordingRunLoopSource = nil
             s.keyMonitor = nil
@@ -114,10 +135,23 @@ final class KeyInterceptor: KeyIntercepting {
             Task { @MainActor [weak self] in self?.onEscapePressed?() }
             return nil
         case 36:
+            guard consumeEnterCaptureToken() else {
+                // Enter is one-shot: after the first captured Enter, all subsequent
+                // Enter presses pass through to the app unmodified.
+                return Unmanaged.passRetained(event)
+            }
             Task { @MainActor [weak self] in self?.onEnterPressed?() }
             return nil
         default:
             return Unmanaged.passRetained(event)
+        }
+    }
+
+    private nonisolated func consumeEnterCaptureToken() -> Bool {
+        state.withLockUnchecked { state in
+            guard state.isActive, state.enterCaptureArmed else { return false }
+            state.enterCaptureArmed = false
+            return true
         }
     }
 
@@ -146,3 +180,25 @@ final class KeyInterceptor: KeyIntercepting {
         return frontmost.processIdentifier == pid
     }
 }
+
+#if DEBUG
+extension KeyInterceptor {
+    // swiftlint:disable:next identifier_name
+    nonisolated func _testConsumeEnterCaptureToken() -> Bool {
+        consumeEnterCaptureToken()
+    }
+
+    // swiftlint:disable:next identifier_name
+    @MainActor func _testArmEnterCaptureForTests(active: Bool = true) {
+        state.withLockUnchecked {
+            $0.isActive = active
+            $0.enterCaptureArmed = true
+        }
+    }
+
+    // swiftlint:disable:next identifier_name
+    @MainActor var _testIsEnterCaptureArmed: Bool {
+        state.withLockUnchecked { $0.enterCaptureArmed }
+    }
+}
+#endif

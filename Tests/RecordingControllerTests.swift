@@ -127,11 +127,16 @@ struct RecordingControllerCallbackTests {
     }
 
     @MainActor @Test
-    func enterDuringProcessingFinalSetsEnterFlag() {
+    func enterDuringProcessingFinalIsOneShot() {
         let (controller, keyInterceptor, _, _) = makeTestRecordingController()
         controller.isProcessingFinal = true
         keyInterceptor.onEnterPressed?()
-        #expect(controller.shouldPressEnterOnComplete, "Enter during processing-final should set flag")
+        #expect(controller.shouldPressEnterOnComplete, "First Enter should arm submit")
+        controller.shouldPressEnterOnComplete = false
+
+        // Second Enter in the same processing-final lifecycle must not re-arm.
+        keyInterceptor.onEnterPressed?()
+        #expect(!controller.shouldPressEnterOnComplete, "Second Enter must be ignored by one-shot guard")
     }
 }
 

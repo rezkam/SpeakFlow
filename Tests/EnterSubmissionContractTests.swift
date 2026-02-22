@@ -144,4 +144,22 @@ struct EnterSubmissionContractTests {
         let enterCount = ctx.textInserter.operations.filter { $0 == .pressEnterKey }.count
         #expect(enterCount == 1, "Submit path must synthesize Enter exactly once")
     }
+
+    /// Regression guard:
+    /// Enter capture is one-shot. Once Enter has been captured in a lifecycle,
+    /// additional Enter callbacks must not re-arm submit.
+    @MainActor @Test
+    func secondEnterDoesNotRearmSubmitFlag() {
+        let ctx = makeStreamingContext()
+
+        ctx.controller.isProcessingFinal = true
+        ctx.keyInterceptor.onEnterPressed?()
+        #expect(ctx.controller.shouldPressEnterOnComplete, "First Enter should arm submit")
+
+        // Simulate consumption of the first request and verify second Enter is ignored.
+        ctx.controller.shouldPressEnterOnComplete = false
+        ctx.keyInterceptor.onEnterPressed?()
+        #expect(!ctx.controller.shouldPressEnterOnComplete,
+                "Second Enter in the same lifecycle must not re-arm submit")
+    }
 }

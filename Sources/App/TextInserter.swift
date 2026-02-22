@@ -429,13 +429,9 @@ final class TextInserter: TextInserting {
     ///
     /// This is the core text insertion mechanism:
     /// 1. Ensures the target element has focus (waiting for user to return if needed)
-    /// 2. Waits for modifier keys (Cmd/Ctrl/Option/Shift) to be released — **once**
-    /// 3. Types in batches of `typingBatchSize` characters, checking focus and
-    ///    yielding to the run-loop between batches so mouse clicks, CGEvent tap
-    ///    callbacks, and SwiftUI updates remain responsive
-    ///
-    /// **Why batching matters:** Batching keeps run-loop time available for event taps
-    /// and UI updates during long transcriptions, preventing global input stalls.
+    /// 2. Before every character, re-checks focus so app switches cannot leak typing
+    /// 3. Before every character, waits for modifiers (Cmd/Ctrl/Option/Shift) to release
+    /// 4. Yields between batches so mouse/keyboard input and event taps stay responsive
     ///
     /// - Parameter text: The sanitized text to type. Should not contain control characters.
     private func typeTextAsync(_ text: String) async {
@@ -446,62 +442,86 @@ final class TextInserter: TextInserting {
         // Ensure the target element has focus (waits for user to return if switched)
         guard await self.ensureTargetFocused() else { return }
 
-        // Wait for modifier keys ONCE before starting — not per character.
-        // Per-character polling was a major contributor to the input freeze.
-        await waitForModifiersReleased()
-
         // Type in small batches, yielding between them so the WindowServer
         // event queue can drain (keeps mouse clicks responsive) and other
         // run-loop sources (CGEvent taps, SwiftUI) get processing time.
         let chars = Array(text)
         var index = 0
+        var typedSinceYield = 0
 
         while index < chars.count {
             do { try Task.checkCancellation() } catch { return }
 
-            // Re-check focus between batches — if the user switched apps,
-            // wait for return or timeout rather than typing into the wrong app
-            guard await self.ensureTargetFocused() else { return }
+            // Re-check focus before each character. If user switched apps,
+            // pause until they return or timeout.
+            if !isTargetAppFrontmost() {
+                guard await self.ensureTargetFocused() else { return }
+            }
 
-            let end = min(index + Self.typingBatchSize, chars.count)
-            for i in index..<end {
-                // Convert character to UTF-16 code units for CGEvent's Unicode API
-                var unichar = Array(String(chars[i]).utf16)
+            // Never type while modifiers are active; wait/retry current char.
+            if Self.hasActiveModifiers(Self.currentHardwareModifierFlags()) {
+                let released = await waitForModifiersReleased()
+                guard !Task.isCancelled else { return }
 
-                // Create key events with virtualKey=0 to use Unicode string
-                guard let keyDown = CGEvent(
+                // Modifiers still held after timeout: retry same character.
+                if !released { continue }
+
+                // Focus may have changed while waiting for modifier release.
+                guard await self.ensureTargetFocused() else { return }
+            }
+
+            // Convert character to UTF-16 code units for CGEvent's Unicode API
+            var unichar = Array(String(chars[index]).utf16)
+
+            // Create key events with virtualKey=0 to use Unicode string
+            guard let keyDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 0,
+                keyDown: true
+            ),
+                  let keyUp = CGEvent(
                     keyboardEventSource: source,
                     virtualKey: 0,
-                    keyDown: true
-                ),
-                      let keyUp = CGEvent(
-                        keyboardEventSource: source,
-                        virtualKey: 0,
-                        keyDown: false
-                ) else {
-                    continue
-                }
-
-                keyDown.keyboardSetUnicodeString(
-                    stringLength: unichar.count,
-                    unicodeString: &unichar
-                )
-                keyDown.post(tap: .cghidEventTap)
-                keyUp.post(tap: .cghidEventTap)
-
-                // Small delay to ensure the character is processed
-                try? await Task.sleep(
-                    nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000
-                )
+                    keyDown: false
+            ) else {
+                index += 1
+                continue
             }
 
-            index = end
+            keyDown.keyboardSetUnicodeString(
+                stringLength: unichar.count,
+                unicodeString: &unichar
+            )
+            keyDown.post(tap: .cghidEventTap)
+            keyUp.post(tap: .cghidEventTap)
+
+            // Small delay to ensure the character is processed
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000
+            )
+
+            index += 1
+            typedSinceYield += 1
 
             // Yield between batches so the run-loop can process pending events
-            if index < chars.count {
-                try? await Task.sleep(nanoseconds: 5_000_000) // 5ms yield
+            if typedSinceYield >= Self.typingBatchSize {
+                typedSinceYield = 0
+                if index < chars.count {
+                    try? await Task.sleep(nanoseconds: 5_000_000) // 5ms yield
+                }
             }
         }
+    }
+
+    private static func currentHardwareModifierFlags() -> CGEventFlags {
+        CGEventSource.flagsState(.hidSystemState)
+    }
+
+    private static func hasActiveModifiers(_ flags: CGEventFlags) -> Bool {
+        flags.contains(.maskControl)
+            || flags.contains(.maskCommand)
+            || flags.contains(.maskAlternate)
+            || flags.contains(.maskShift)
     }
 
     /// Waits for all modifier keys (Cmd, Ctrl, Option, Shift) to be released.
@@ -511,34 +531,31 @@ final class TextInserter: TextInserting {
     /// shortcuts (Cmd+A = Select All, Cmd+Q = Quit, etc.).
     ///
     /// Polls the modifier key state every 10ms for up to 1 second (100 attempts).
-    /// If modifiers are still held after the timeout, proceeds anyway to avoid
-    /// blocking indefinitely (e.g., if a modifier key is physically stuck).
-    private func waitForModifiersReleased() async {
+    ///
+    /// - Returns: `true` when all modifiers were released before timeout, `false`
+    ///   when timeout/cancellation occurred and modifiers may still be active.
+    private func waitForModifiersReleased(
+        maxAttempts: Int? = nil,
+        flagsProvider: (() -> CGEventFlags)? = nil,
+        sleep: ((UInt64) async -> Void)? = nil
+    ) async -> Bool {
+        let maxAttempts = maxAttempts ?? Self.maxModifierReleaseAttempts
+        let flagsProvider = flagsProvider ?? { Self.currentHardwareModifierFlags() }
+        let sleep = sleep ?? { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+        }
         var attempts = 0
 
-        while attempts < Self.maxModifierReleaseAttempts {
-            // Use .hidSystemState to read REAL hardware modifier state only.
-            // .combinedSessionState merges the app's own synthetic keystrokes
-            // back into the state, creating a feedback loop where the app sees
-            // modifier flags from its own CGEvent posts and spin-waits on them.
-            let flags = CGEventSource.flagsState(.hidSystemState)
-
-            // Check if any modifier keys are currently pressed
-            if !flags.contains(.maskControl)
-                && !flags.contains(.maskCommand)
-                && !flags.contains(.maskAlternate)
-                && !flags.contains(.maskShift) {
-                // All modifiers released — safe to proceed
-                return
+        while !Task.isCancelled, attempts < maxAttempts {
+            if !Self.hasActiveModifiers(flagsProvider()) {
+                return true
             }
 
             attempts += 1
-
-            // Wait before rechecking
-            try? await Task.sleep(nanoseconds: Self.modifierCheckDelayNanoseconds)
+            await sleep(Self.modifierCheckDelayNanoseconds)
         }
 
-        // Timeout: proceed despite modifiers still being held
+        return !Task.isCancelled && !Self.hasActiveModifiers(flagsProvider())
     }
 }
 
@@ -546,5 +563,22 @@ final class TextInserter: TextInserting {
 extension TextInserter {
     // swiftlint:disable:next identifier_name
     var _testQueuedInsertionCount: Int { queuedInsertionCount }
+
+    // swiftlint:disable:next identifier_name
+    static func _testHasActiveModifiers(_ flags: CGEventFlags) -> Bool {
+        hasActiveModifiers(flags)
+    }
+
+    // swiftlint:disable:next identifier_name
+    func _testWaitForModifiersReleased(
+        maxAttempts: Int,
+        flagsProvider: @escaping () -> CGEventFlags
+    ) async -> Bool {
+        await waitForModifiersReleased(
+            maxAttempts: maxAttempts,
+            flagsProvider: flagsProvider,
+            sleep: { _ in }
+        )
+    }
 }
 #endif
