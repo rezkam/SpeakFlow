@@ -199,8 +199,31 @@ public final class Settings {
         public static let vadThreshold = "settings.vadThreshold"
         public static let vadVolumeGateEnabled = "settings.vad.volumeGateEnabled"
         public static let vadMinVolumeForSpeech = "settings.vad.minVolumeForSpeech"
+        public static let vadVolumeSmoothingFactor = "settings.vad.volumeSmoothingFactor"
+        public static let vadStateResetInterval = "settings.vad.stateResetInterval"
         public static let autoEndEnabled = "settings.autoEndEnabled"
         public static let autoEndSilenceDuration = "settings.autoEndSilenceDuration"
+        public static let autoEndMinSessionDuration = "settings.autoEndMinSessionDuration"
+        public static let autoEndRequireSpeechFirst = "settings.autoEndRequireSpeechFirst"
+        public static let autoEndNoSpeechTimeout = "settings.autoEndNoSpeechTimeout"
+        public static let autoEndMaxContinuousSpeechDuration = "settings.autoEndMaxContinuousSpeechDuration"
+        public static let thinkingPauseEnabled = "settings.autoEnd.thinkingPauseEnabled"
+        public static let thinkingPauseExtensionSeconds = "settings.autoEnd.thinkingPauseExtensionSeconds"
+        public static let turnClassifierEnabled = "settings.autoEnd.turnClassifierEnabled"
+        public static let turnClassifierMinimumSilence = "settings.autoEnd.turnClassifierMinimumSilence"
+        public static let turnClassifierIncompleteExtensionSeconds = "settings.autoEnd.turnClassifierIncompleteExtensionSeconds"
+        public static let turnClassifierThreshold = "settings.autoEnd.turnClassifierThreshold"
+        public static let idleNudgeEnabled = "settings.autoEnd.idleNudgeEnabled"
+        public static let idleNudgeInitialDelay = "settings.autoEnd.idleNudgeInitialDelay"
+        public static let idleNudgeInterval = "settings.autoEnd.idleNudgeInterval"
+        public static let idleNudgeMaxCount = "settings.autoEnd.idleNudgeMaxCount"
+        public static let audioNoiseGateEnabled = "settings.audio.noiseGateEnabled"
+        public static let audioNoiseGateRmsThreshold = "settings.audio.noiseGateRmsThreshold"
+        public static let streamingAutoEndEnabled = "settings.streaming.autoEndEnabled"
+        public static let streamingKeepAliveEnabled = "settings.streaming.keepAliveEnabled"
+        public static let streamingKeepAliveInterval = "settings.streaming.keepAliveInterval"
+        public static let streamingReconnectEnabled = "settings.streaming.reconnectEnabled"
+        public static let streamingMinimumFinalWordCount = "settings.streaming.minimumFinalWordCount"
         public static let minSpeechRatio = "settings.minSpeechRatio"
         public static let focusWaitTimeout = "settings.focusWaitTimeout"
         public static let hotkeyRestartsRecording = "settings.hotkeyRestartsRecording"
@@ -326,6 +349,30 @@ public final class Settings {
         }
     }
 
+    /// Exponential smoothing factor for the VAD volume gate (0...1).
+    public var vadVolumeSmoothingFactor: Float {
+        get {
+            if defaults.object(forKey: Keys.vadVolumeSmoothingFactor) != nil {
+                return defaults.float(forKey: Keys.vadVolumeSmoothingFactor)
+            }
+            return Config.vadVolumeSmoothingFactor
+        }
+        set {
+            defaults.set(max(0.0, min(1.0, newValue)), forKey: Keys.vadVolumeSmoothingFactor)
+        }
+    }
+
+    /// Seconds between periodic Silero hidden-state resets.
+    public var vadStateResetInterval: Double {
+        get {
+            let value = defaults.double(forKey: Keys.vadStateResetInterval)
+            return value > 0 ? value : Config.vadStateResetInterval
+        }
+        set {
+            defaults.set(max(0.1, min(120.0, newValue)), forKey: Keys.vadStateResetInterval)
+        }
+    }
+
     // MARK: - Auto-End Settings
 
     /// Whether auto-end session is enabled
@@ -353,6 +400,196 @@ public final class Settings {
         }
         set {
             defaults.set(max(newValue, 3.0), forKey: Keys.autoEndSilenceDuration)
+        }
+    }
+
+    /// Minimum session duration before auto-end is considered.
+    public var autoEndMinSessionDuration: Double {
+        get {
+            let value = defaults.double(forKey: Keys.autoEndMinSessionDuration)
+            return value > 0 ? value : Config.autoEndMinSessionDuration
+        }
+        set {
+            defaults.set(max(0.0, min(30.0, newValue)), forKey: Keys.autoEndMinSessionDuration)
+        }
+    }
+
+    /// Block auto-end until at least one speechStart has occurred.
+    public var autoEndRequireSpeechFirst: Bool {
+        get {
+            if defaults.object(forKey: Keys.autoEndRequireSpeechFirst) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.autoEndRequireSpeechFirst)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.autoEndRequireSpeechFirst)
+        }
+    }
+
+    /// End session after this many seconds if no speech is detected at all. 0 disables.
+    public var autoEndNoSpeechTimeout: Double {
+        get {
+            let value = defaults.double(forKey: Keys.autoEndNoSpeechTimeout)
+            return value > 0 ? value : 10.0
+        }
+        set {
+            defaults.set(max(0.0, min(120.0, newValue)), forKey: Keys.autoEndNoSpeechTimeout)
+        }
+    }
+
+    /// Safety force-clear threshold for stuck speaking state. 0 disables.
+    public var autoEndMaxContinuousSpeechDuration: Double {
+        get {
+            let value = defaults.double(forKey: Keys.autoEndMaxContinuousSpeechDuration)
+            return value > 0 ? value : 180.0
+        }
+        set {
+            defaults.set(max(0.0, min(1800.0, newValue)), forKey: Keys.autoEndMaxContinuousSpeechDuration)
+        }
+    }
+
+    /// Thinking pause detection toggle.
+    public var thinkingPauseEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.thinkingPauseEnabled) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.thinkingPauseEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.thinkingPauseEnabled)
+        }
+    }
+
+    /// Extra silence allowance when thinking-pause is detected.
+    public var thinkingPauseExtensionSeconds: Double {
+        get {
+            let value = defaults.double(forKey: Keys.thinkingPauseExtensionSeconds)
+            return value > 0 ? value : 5.0
+        }
+        set {
+            defaults.set(max(0.0, min(30.0, newValue)), forKey: Keys.thinkingPauseExtensionSeconds)
+        }
+    }
+
+    /// SmartTurn-style classifier toggle.
+    public var turnClassifierEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.turnClassifierEnabled) == nil {
+                return Config.turnClassifierEnabled
+            }
+            return defaults.bool(forKey: Keys.turnClassifierEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.turnClassifierEnabled)
+        }
+    }
+
+    /// Minimum post-speech silence before turn completion classifier runs.
+    public var turnClassifierMinimumSilence: Double {
+        get {
+            let value = defaults.double(forKey: Keys.turnClassifierMinimumSilence)
+            return value > 0 ? value : Config.turnClassifierMinimumSilence
+        }
+        set {
+            defaults.set(max(0.2, min(15.0, newValue)), forKey: Keys.turnClassifierMinimumSilence)
+        }
+    }
+
+    /// Additional silence allowance when classifier predicts incomplete turn.
+    public var turnClassifierIncompleteExtensionSeconds: Double {
+        get {
+            let value = defaults.double(forKey: Keys.turnClassifierIncompleteExtensionSeconds)
+            return value > 0 ? value : Config.turnClassifierIncompleteExtensionSeconds
+        }
+        set {
+            defaults.set(max(0.0, min(30.0, newValue)), forKey: Keys.turnClassifierIncompleteExtensionSeconds)
+        }
+    }
+
+    /// Completion threshold in [0,1].
+    public var turnClassifierThreshold: Float {
+        get {
+            if defaults.object(forKey: Keys.turnClassifierThreshold) != nil {
+                return defaults.float(forKey: Keys.turnClassifierThreshold)
+            }
+            return Config.turnClassifierThreshold
+        }
+        set {
+            defaults.set(max(0.0, min(1.0, newValue)), forKey: Keys.turnClassifierThreshold)
+        }
+    }
+
+    /// Enable idle nudge sequence before auto-end expiration.
+    public var idleNudgeEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.idleNudgeEnabled) == nil {
+                return Config.idleNudgeEnabled
+            }
+            return defaults.bool(forKey: Keys.idleNudgeEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.idleNudgeEnabled)
+        }
+    }
+
+    /// Delay before first idle nudge (seconds).
+    public var idleNudgeInitialDelay: Double {
+        get {
+            let value = defaults.double(forKey: Keys.idleNudgeInitialDelay)
+            return value >= 0 ? value : Config.idleNudgeInitialDelay
+        }
+        set {
+            defaults.set(max(0.0, min(30.0, newValue)), forKey: Keys.idleNudgeInitialDelay)
+        }
+    }
+
+    /// Interval between idle nudges (seconds).
+    public var idleNudgeInterval: Double {
+        get {
+            let value = defaults.double(forKey: Keys.idleNudgeInterval)
+            return value > 0 ? value : Config.idleNudgeInterval
+        }
+        set {
+            defaults.set(max(0.5, min(30.0, newValue)), forKey: Keys.idleNudgeInterval)
+        }
+    }
+
+    /// Maximum number of nudges before expiration.
+    public var idleNudgeMaxCount: Int {
+        get {
+            let value = defaults.integer(forKey: Keys.idleNudgeMaxCount)
+            return value > 0 ? value : Config.idleNudgeMaxCount
+        }
+        set {
+            defaults.set(max(1, min(10, newValue)), forKey: Keys.idleNudgeMaxCount)
+        }
+    }
+
+    /// Enable lightweight pre-VAD noise gate.
+    public var audioNoiseGateEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.audioNoiseGateEnabled) == nil {
+                return Config.audioNoiseGateEnabled
+            }
+            return defaults.bool(forKey: Keys.audioNoiseGateEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.audioNoiseGateEnabled)
+        }
+    }
+
+    /// RMS threshold for pre-VAD noise gate.
+    public var audioNoiseGateRmsThreshold: Float {
+        get {
+            if defaults.object(forKey: Keys.audioNoiseGateRmsThreshold) != nil {
+                return defaults.float(forKey: Keys.audioNoiseGateRmsThreshold)
+            }
+            return Config.audioNoiseGateRmsThreshold
+        }
+        set {
+            defaults.set(max(0.0, min(0.05, newValue)), forKey: Keys.audioNoiseGateRmsThreshold)
         }
     }
 
@@ -394,16 +631,65 @@ public final class Settings {
 
     // MARK: - Streaming Auto-End
 
-    /// Whether auto-end is enabled for streaming mode (disabled by default)
+    /// Whether auto-end is enabled for streaming mode.
     public var streamingAutoEndEnabled: Bool {
         get {
-            if defaults.object(forKey: "settings.streaming.autoEndEnabled") == nil {
-                return false
+            if defaults.object(forKey: Keys.streamingAutoEndEnabled) == nil {
+                // Enabled by default now that realtime auto-end behavior is stable.
+                return true
             }
-            return defaults.bool(forKey: "settings.streaming.autoEndEnabled")
+            return defaults.bool(forKey: Keys.streamingAutoEndEnabled)
         }
         set {
-            defaults.set(newValue, forKey: "settings.streaming.autoEndEnabled")
+            defaults.set(newValue, forKey: Keys.streamingAutoEndEnabled)
+        }
+    }
+
+    /// Whether live streaming keepAlive pings are sent periodically.
+    public var streamingKeepAliveEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.streamingKeepAliveEnabled) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.streamingKeepAliveEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.streamingKeepAliveEnabled)
+        }
+    }
+
+    /// Interval between keepAlive pings (seconds).
+    public var streamingKeepAliveInterval: Double {
+        get {
+            let value = defaults.double(forKey: Keys.streamingKeepAliveInterval)
+            return value > 0 ? value : 8.0
+        }
+        set {
+            defaults.set(max(1.0, min(30.0, newValue)), forKey: Keys.streamingKeepAliveInterval)
+        }
+    }
+
+    /// Whether one automatic reconnect attempt is made after unexpected close.
+    public var streamingReconnectEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.streamingReconnectEnabled) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.streamingReconnectEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.streamingReconnectEnabled)
+        }
+    }
+
+    /// Minimum lexical words for non-speechFinal commits in streaming mode.
+    public var streamingMinimumFinalWordCount: Int {
+        get {
+            let value = defaults.integer(forKey: Keys.streamingMinimumFinalWordCount)
+            return value > 0 ? value : 1
+        }
+        set {
+            defaults.set(max(1, min(5, newValue)), forKey: Keys.streamingMinimumFinalWordCount)
         }
     }
 

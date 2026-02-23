@@ -20,6 +20,10 @@ public protocol StreamingSettingsProviding: AnyObject {
     var deepgramModel: String { get set }
     var deepgramLanguage: String { get set }
     var streamingAutoEndEnabled: Bool { get set }
+    var streamingKeepAliveEnabled: Bool { get set }
+    var streamingKeepAliveInterval: Double { get set }
+    var streamingReconnectEnabled: Bool { get set }
+    var streamingMinimumFinalWordCount: Int { get set }
 }
 
 /// Mistral Voxtral settings (shared by realtime and batch providers).
@@ -47,8 +51,28 @@ public protocol VADSettingsProviding: AnyObject {
     var vadVolumeGateEnabled: Bool { get set }
     /// Minimum smoothed RMS (0–1) required to pass the volume gate.
     var vadMinVolumeForSpeech: Float { get set }
+    /// Exponential smoothing factor for RMS before gating (0..1).
+    var vadVolumeSmoothingFactor: Float { get set }
+    /// Seconds between periodic Silero state refreshes.
+    var vadStateResetInterval: Double { get set }
     var autoEndEnabled: Bool { get set }
     var autoEndSilenceDuration: Double { get set }
+    var autoEndMinSessionDuration: Double { get set }
+    var autoEndRequireSpeechFirst: Bool { get set }
+    var autoEndNoSpeechTimeout: Double { get set }
+    var autoEndMaxContinuousSpeechDuration: Double { get set }
+    var thinkingPauseEnabled: Bool { get set }
+    var thinkingPauseExtensionSeconds: Double { get set }
+    var turnClassifierEnabled: Bool { get set }
+    var turnClassifierMinimumSilence: Double { get set }
+    var turnClassifierIncompleteExtensionSeconds: Double { get set }
+    var turnClassifierThreshold: Float { get set }
+    var idleNudgeEnabled: Bool { get set }
+    var idleNudgeInitialDelay: Double { get set }
+    var idleNudgeInterval: Double { get set }
+    var idleNudgeMaxCount: Int { get set }
+    var audioNoiseGateEnabled: Bool { get set }
+    var audioNoiseGateRmsThreshold: Float { get set }
     var minSpeechRatio: Float { get set }
 }
 
