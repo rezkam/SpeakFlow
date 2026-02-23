@@ -246,8 +246,8 @@ public final class StreamingRecorder {
         state.setLastSoundTime(Date())
         setupIdleNudgeController()
         setupTurnClassifier()
-        audioFilter = Config.audioNoiseGateEnabled
-            ? NoiseGateFilter(rmsThreshold: Config.audioNoiseGateRmsThreshold)
+        audioFilter = settings.audioNoiseGateEnabled
+            ? NoiseGateFilter(rmsThreshold: settings.audioNoiseGateRmsThreshold)
             : nil
         await audioFilter?.start(sampleRate: sampleRate)
 
@@ -412,23 +412,23 @@ public final class StreamingRecorder {
                 // Users can tune minVolumeForSpeech or disable the gate in Settings.
                 volumeGateEnabled: settings.vadVolumeGateEnabled,
                 minVolumeForSpeech: settings.vadMinVolumeForSpeech,
-                // Smoothing factor and state-reset interval use hardcoded defaults
-                // (0.2 and 5.0s respectively) — these are not user-configurable
-                // because they are internal signal-processing parameters that
-                // non-expert users should not need to touch.
-                volumeSmoothingFactor: Config.vadVolumeSmoothingFactor,
-                stateResetInterval: Config.vadStateResetInterval
+                volumeSmoothingFactor: settings.vadVolumeSmoothingFactor,
+                stateResetInterval: settings.vadStateResetInterval
             )
 
             let autoEndConfig = AutoEndConfiguration(
                 enabled: settings.autoEndEnabled,
                 silenceDuration: settings.autoEndSilenceDuration,
-                minSessionDuration: Config.autoEndMinSessionDuration,
-                requireSpeechFirst: true,
-                turnClassifierEnabled: Config.turnClassifierEnabled,
-                turnClassifierMinimumSilence: Config.turnClassifierMinimumSilence,
-                turnClassifierIncompleteExtensionSeconds: Config.turnClassifierIncompleteExtensionSeconds,
-                turnClassifierThreshold: Config.turnClassifierThreshold
+                minSessionDuration: settings.autoEndMinSessionDuration,
+                requireSpeechFirst: settings.autoEndRequireSpeechFirst,
+                noSpeechTimeout: settings.autoEndNoSpeechTimeout,
+                maxContinuousSpeechDuration: settings.autoEndMaxContinuousSpeechDuration,
+                thinkingPauseEnabled: settings.thinkingPauseEnabled,
+                thinkingPauseExtensionSeconds: settings.thinkingPauseExtensionSeconds,
+                turnClassifierEnabled: settings.turnClassifierEnabled,
+                turnClassifierMinimumSilence: settings.turnClassifierMinimumSilence,
+                turnClassifierIncompleteExtensionSeconds: settings.turnClassifierIncompleteExtensionSeconds,
+                turnClassifierThreshold: settings.turnClassifierThreshold
             )
 
             vadProcessor = VADProcessor(config: vadConfig)
@@ -444,7 +444,7 @@ public final class StreamingRecorder {
             state.setVADActive(true)
             Logger.audio.info("VAD enabled on \(PlatformSupport.platformDescription)")
             // swiftlint:disable:next line_length
-            Logger.audio.warning("VAD CONFIG: vadThreshold=\(settings.vadThreshold, privacy: .public) minSilence=\(Config.vadMinSilenceAfterSpeech, privacy: .public) volumeGate=\(settings.vadVolumeGateEnabled, privacy: .public) minVol=\(settings.vadMinVolumeForSpeech, privacy: .public) stateReset=\(Config.vadStateResetInterval, privacy: .public)s autoEnd=\(settings.autoEndEnabled, privacy: .public) silenceDur=\(settings.autoEndSilenceDuration, privacy: .public) minSession=\(Config.autoEndMinSessionDuration, privacy: .public) maxChunk=\(settings.maxChunkDuration, privacy: .public) chunkDur=\(settings.chunkDuration.rawValue, privacy: .public) skipSilent=\(settings.skipSilentChunks, privacy: .public)")
+            Logger.audio.warning("VAD CONFIG: vadThreshold=\(settings.vadThreshold, privacy: .public) minSilence=\(Config.vadMinSilenceAfterSpeech, privacy: .public) volumeGate=\(settings.vadVolumeGateEnabled, privacy: .public) minVol=\(settings.vadMinVolumeForSpeech, privacy: .public) smoothing=\(settings.vadVolumeSmoothingFactor, privacy: .public) stateReset=\(settings.vadStateResetInterval, privacy: .public)s autoEnd=\(settings.autoEndEnabled, privacy: .public) silenceDur=\(settings.autoEndSilenceDuration, privacy: .public) minSession=\(settings.autoEndMinSessionDuration, privacy: .public) maxChunk=\(settings.maxChunkDuration, privacy: .public) chunkDur=\(settings.chunkDuration.rawValue, privacy: .public) skipSilent=\(settings.skipSilentChunks, privacy: .public)")
         } catch {
             Logger.audio.warning("VAD initialization failed: \(error.localizedDescription). Using fallback mode.")
             vadProcessor = nil
@@ -473,6 +473,10 @@ public final class StreamingRecorder {
                 vadProbAccumulator = 0
                 vadProbCount = 0
                 lastVADProbLog = now
+            }
+
+            if isPotentialSpeechLikeFrame(result) {
+                await session.onPotentialSpeechActivity()
             }
 
             if let event = result.event {
@@ -519,6 +523,22 @@ public final class StreamingRecorder {
         }
     }
 
+    /// Returns true when a VAD frame looks speech-like even if `.speechStart`
+    /// has not been emitted yet.
+    ///
+    /// This acts as a safety guard against premature auto-end when speechStart is
+    /// delayed/suppressed by conservative gating in noisy or very quiet conditions.
+    private func isPotentialSpeechLikeFrame(_ result: VADResult) -> Bool {
+        let probabilityFloor = max(settings.vadThreshold * 0.85, 0.08)
+        let volumeFloor: Float
+        if settings.vadVolumeGateEnabled {
+            volumeFloor = max(settings.vadMinVolumeForSpeech * 0.6, Config.silenceThreshold * 1.5)
+        } else {
+            volumeFloor = Config.silenceThreshold * 1.5
+        }
+        return result.probability >= probabilityFloor && result.smoothedVolume >= volumeFloor
+    }
+
     private func periodicCheck() async {
         guard state.getRecording(), let buffer = audioBuffer else { return }
 
@@ -561,7 +581,7 @@ public final class StreamingRecorder {
             let shouldAutoEnd = await session.shouldAutoEndSession()
             if shouldAutoEnd {
                 if let idleNudgeController {
-                    idleNudgeController.startMonitoring(afterDelay: Config.idleNudgeInitialDelay)
+                    idleNudgeController.startMonitoring(afterDelay: settings.idleNudgeInitialDelay)
                     return
                 }
                 let dur = String(format: "%.1f", duration)
@@ -917,13 +937,13 @@ extension StreamingRecorder {
 @MainActor
 private extension StreamingRecorder {
     func setupIdleNudgeController() {
-        guard Config.idleNudgeEnabled else {
+        guard settings.idleNudgeEnabled else {
             idleNudgeController = nil
             return
         }
         let controller = IdleNudgeController(
-            nudgeInterval: Config.idleNudgeInterval,
-            maxNudges: Config.idleNudgeMaxCount
+            nudgeInterval: settings.idleNudgeInterval,
+            maxNudges: settings.idleNudgeMaxCount
         )
         controller.onNudge = {
             Logger.audio.info("Idle nudge: user is silent, waiting before auto-end")
@@ -938,7 +958,7 @@ private extension StreamingRecorder {
     }
 
     func setupTurnClassifier() {
-        guard Config.turnClassifierEnabled else {
+        guard settings.turnClassifierEnabled else {
             turnClassifier = nil
             return
         }

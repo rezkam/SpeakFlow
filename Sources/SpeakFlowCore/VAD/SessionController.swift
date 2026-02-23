@@ -48,6 +48,7 @@ public actor SessionController {
     private let autoEndConfig: AutoEndConfiguration
     private let maxChunkDuration: TimeInterval
     private let dateProvider: () -> Date
+    private let potentialSpeechHoldDuration: TimeInterval
 
     // MARK: - Core state
 
@@ -56,6 +57,7 @@ public actor SessionController {
     private var chunkStartTime: Date?
     private var sessionStartTime: Date?
     private var hasSpeechOccurredInSession = false
+    private var lastPotentialSpeechActivityTime: Date?
 
     // MARK: - Safety timeout state
     //
@@ -94,10 +96,12 @@ public actor SessionController {
         vadConfig: VADConfiguration = .default,
         autoEndConfig: AutoEndConfiguration = .default,
         maxChunkDuration: TimeInterval = 30.0,
+        potentialSpeechHoldDuration: TimeInterval = 1.0,
         dateProvider: @escaping () -> Date = Date.init
     ) {
         self.vadConfig = vadConfig
         self.maxChunkDuration = maxChunkDuration
+        self.potentialSpeechHoldDuration = potentialSpeechHoldDuration
         self.dateProvider = dateProvider
 
         // Safety clamp: ensure auto-end silence duration is never below the minimum
@@ -123,6 +127,7 @@ public actor SessionController {
         lastTranscript = ""
         lastTurnCompletionProbability = nil
         lastTurnCompletionEvaluatedSpeechEnd = nil
+        lastPotentialSpeechActivityTime = nil
 
         let silence = String(format: "%.1f", autoEndConfig.silenceDuration)
         let minSess = String(format: "%.1f", autoEndConfig.minSessionDuration)
@@ -151,6 +156,7 @@ public actor SessionController {
             isUserSpeaking = true
             hasSpeechOccurredInSession = true
             speakingStartTime = dateProvider()                  // ← Safety timeout tracking
+            lastPotentialSpeechActivityTime = speakingStartTime
             lastTurnCompletionProbability = nil
             lastTurnCompletionEvaluatedSpeechEnd = nil
             if chunkStartTime == nil { chunkStartTime = dateProvider() }
@@ -160,10 +166,19 @@ public actor SessionController {
             isUserSpeaking = false
             speakingStartTime = nil                            // ← Clear safety timeout tracker
             lastSpeechEndTime = dateProvider()
+            lastPotentialSpeechActivityTime = nil
             lastTurnCompletionProbability = nil
             lastTurnCompletionEvaluatedSpeechEnd = nil
             logger.info("🔇 SPEECH END: sessionDur=\(String(format: "%.1f", self.currentSessionDuration), privacy: .public)s")
         }
+    }
+
+    /// Marks recent speech-like activity even when VAD has not yet emitted `.started`.
+    ///
+    /// This guards against edge cases where the user is audibly speaking but a
+    /// conservative gate delays or suppresses the formal speech-start transition.
+    public func onPotentialSpeechActivity() {
+        lastPotentialSpeechActivityTime = dateProvider()
     }
 
     // MARK: - Chunk decision
@@ -183,6 +198,7 @@ public actor SessionController {
 
         guard duration >= maxChunkDuration else { return false }
         guard !isUserSpeaking else { return false }
+        if hasRecentPotentialSpeechActivity(now: now) { return false }
 
         // Clean boundary: confirmed silence after speech end
         if let lastEnd = lastSpeechEndTime,
@@ -264,6 +280,10 @@ public actor SessionController {
             logger.debug("autoEnd: BLOCKED (user currently speaking)")
             return false
         }
+        if hasRecentPotentialSpeechActivity(now: now) {
+            logger.debug("autoEnd: BLOCKED (recent speech-like activity < \(String(format: "%.1f", self.potentialSpeechHoldDuration), privacy: .public)s)")
+            return false
+        }
 
         // ── Minimum session duration guard ────────────────────────────────────
         if let start = sessionStartTime, now.timeIntervalSince(start) < autoEndConfig.minSessionDuration {
@@ -284,16 +304,35 @@ public actor SessionController {
                 baseThreshold: effectiveSilenceThreshold
             )
             let classifierActive = classifierExtendedThreshold > effectiveSilenceThreshold
+            let silenceDisplay = String(format: "%.1f", silenceSoFar)
+            let classifierThresholdDisplay = String(format: "%.1f", classifierExtendedThreshold)
 
             if silenceSoFar >= classifierExtendedThreshold {
-                logger.warning("🛑 AUTO-END NORMAL: silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s >= threshold=\(String(format: "%.1f", classifierExtendedThreshold), privacy: .public)s (thinkingPauseExtended=\(thinkingDetected, privacy: .public) turnClassifierExtended=\(classifierActive, privacy: .public))")
+                logger.warning(
+                    """
+                    🛑 AUTO-END NORMAL: silence=\(silenceDisplay, privacy: .public)s >= threshold=\(classifierThresholdDisplay, privacy: .public)s \
+                    thinkingPauseExtended=\(thinkingDetected, privacy: .public) turnClassifierExtended=\(classifierActive, privacy: .public)
+                    """
+                )
                 return true
             }
 
             if classifierActive {
-                logger.debug("autoEnd: TURN CLASSIFIER HOLD (silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s / extended=\(String(format: "%.1f", classifierExtendedThreshold), privacy: .public)s prob=\(String(format: "%.2f", self.lastTurnCompletionProbability ?? -1), privacy: .public))")
+                let probabilityDisplay = String(format: "%.2f", self.lastTurnCompletionProbability ?? -1)
+                logger.debug(
+                    """
+                    autoEnd: TURN CLASSIFIER HOLD silence=\(silenceDisplay, privacy: .public)s \
+                    extended=\(classifierThresholdDisplay, privacy: .public)s prob=\(probabilityDisplay, privacy: .public)
+                    """
+                )
             } else if thinkingDetected {
-                logger.debug("autoEnd: THINKING PAUSE (silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s / extended=\(String(format: "%.1f", effectiveSilenceThreshold), privacy: .public)s)")
+                let thinkingThresholdDisplay = String(format: "%.1f", effectiveSilenceThreshold)
+                logger.debug(
+                    """
+                    autoEnd: THINKING PAUSE silence=\(silenceDisplay, privacy: .public)s \
+                    extended=\(thinkingThresholdDisplay, privacy: .public)s
+                    """
+                )
             } else {
                 logger.debug("autoEnd: WAITING (silence=\(String(format: "%.1f", silenceSoFar), privacy: .public)s / required=\(String(format: "%.1f", self.autoEndConfig.silenceDuration), privacy: .public)s)")
             }
@@ -342,9 +381,10 @@ public actor SessionController {
         let chunkDur = String(format: "%.1f", currentChunkDuration)
         let silDur = currentSilenceDuration.map { String(format: "%.1f", $0) } ?? "nil"
         let hasEnd = lastSpeechEndTime != nil ? "yes" : "no"
+        let hasPotential = hasRecentPotentialSpeechActivity(now: dateProvider())
         let thinkingActive = !lastTranscript.isEmpty && autoEndConfig.thinkingPauseEnabled
             && ThinkingPauseDetector.isLikelyIncomplete(lastTranscript)
-        return "session=\(sessionDur)s chunk=\(chunkDur)s speaking=\(isUserSpeaking) hasSpeech=\(hasSpeechOccurredInSession) silence=\(silDur)s lastEnd=\(hasEnd) thinkingPause=\(thinkingActive)"
+        return "session=\(sessionDur)s chunk=\(chunkDur)s speaking=\(isUserSpeaking) hasSpeech=\(hasSpeechOccurredInSession) silence=\(silDur)s lastEnd=\(hasEnd) potentialSpeech=\(hasPotential) thinkingPause=\(thinkingActive)"
     }
 
     // MARK: - Private helpers
@@ -368,6 +408,14 @@ public actor SessionController {
             logger.debug("Thinking pause detected: pattern='\(pattern, privacy: .private(mask: .hash))' extending silence to \(String(format: "%.1f", extended), privacy: .public)s")
         }
         return extended
+    }
+
+    private func hasRecentPotentialSpeechActivity(now: Date) -> Bool {
+        guard potentialSpeechHoldDuration > 0,
+              let last = lastPotentialSpeechActivityTime else {
+            return false
+        }
+        return now.timeIntervalSince(last) < potentialSpeechHoldDuration
     }
 
     private func turnClassifierExtendedThreshold(baseThreshold: TimeInterval) -> TimeInterval {

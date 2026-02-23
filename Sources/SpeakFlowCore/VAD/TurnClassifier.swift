@@ -159,6 +159,7 @@ private extension TurnClassifier {
             if let number = feature?.doubleValue {
                 return Float(number)
             }
+            // swiftlint:disable:next empty_count
             if let outArray = feature?.multiArrayValue, outArray.count > 0 {
                 return outArray[0].floatValue
             }
