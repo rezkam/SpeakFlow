@@ -86,6 +86,13 @@ final class TextInserter: TextInserting {
     /// is unreliable across time — the same element can return different refs).
     var targetPid: pid_t = 0
 
+    /// Bundle identifier of the target app captured at recording start.
+    ///
+    /// Some apps route focused UI through helper processes (for example
+    /// `com.vendor.App.helper`). In those cases, AX focused PID can differ from
+    /// the main app PID even when the user is still in the same app.
+    private var targetBundleIdentifier: String?
+
     /// The current task chain for text operations.
     /// Each new operation creates a task that awaits this one, forming a serial queue.
     private var textInsertionTask: Task<Void, Never>?
@@ -129,13 +136,18 @@ final class TextInserter: TextInserting {
             var pid: pid_t = 0
             if AXUIElementGetPid(axElement, &pid) == .success {
                 targetPid = pid
+                targetBundleIdentifier = NSRunningApplication(
+                    processIdentifier: pid
+                )?.bundleIdentifier
             } else {
                 targetPid = 0
+                targetBundleIdentifier = nil
             }
         } else {
             // No focus or accessibility denied — focus checks will be skipped
             targetElement = nil
             targetPid = 0
+            targetBundleIdentifier = nil
         }
     }
 
@@ -319,6 +331,7 @@ final class TextInserter: TextInserting {
         queuedInsertionCount = 0
         targetElement = nil
         targetPid = 0
+        targetBundleIdentifier = nil
     }
 
     /// Clears bookkeeping without cancelling tasks.
@@ -331,6 +344,7 @@ final class TextInserter: TextInserting {
         queuedInsertionCount = 0
         targetElement = nil
         targetPid = 0
+        targetBundleIdentifier = nil
     }
 
     // MARK: - Private Helpers
@@ -356,11 +370,15 @@ final class TextInserter: TextInserting {
     func ensureTargetFocused() async -> Bool {
         guard targetElement != nil, targetPid != 0 else { return true }
 
+        guard recoverTargetPidIfNeeded() else { return false }
+
         // Fast path: target app is frontmost
         if isTargetAppFrontmost() { return true }
 
         // Verify the target app is still running before waiting
-        guard NSRunningApplication(processIdentifier: targetPid) != nil else { return false }
+        guard NSRunningApplication(processIdentifier: targetPid) != nil || recoverTargetPidIfNeeded() else {
+            return false
+        }
 
         let timeout = Settings.shared.focusWaitTimeout
         let startTime = ContinuousClock.now
@@ -376,7 +394,9 @@ final class TextInserter: TextInserting {
             }
 
             // If the target app was terminated while waiting, stop
-            if NSRunningApplication(processIdentifier: targetPid) == nil { return false }
+            if NSRunningApplication(processIdentifier: targetPid) == nil, !recoverTargetPidIfNeeded() {
+                return false
+            }
 
             let elapsed = ContinuousClock.now - startTime
             if elapsed > .seconds(timeout) {
@@ -398,6 +418,10 @@ final class TextInserter: TextInserting {
     func isTargetAppFrontmost() -> Bool {
         guard targetPid != 0 else { return true }
 
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
+        let frontmostMatchesTarget = frontmost.processIdentifier == targetPid
+        guard frontmostMatchesTarget else { return false }
+
         // Primary: check which process owns the actual keyboard focus
         let systemWide = AXUIElementCreateSystemWide()
         var focusedElement: CFTypeRef?
@@ -408,16 +432,57 @@ final class TextInserter: TextInserting {
         ) == .success,
            let element = focusedElement,
            CFGetTypeID(element) == AXUIElementGetTypeID() {
-            // swiftlint:disable:next force_cast
+            let focusedElementAX = unsafeDowncast(element, to: AXUIElement.self)
             var focusedPid: pid_t = 0
-            if AXUIElementGetPid(element as! AXUIElement, &focusedPid) == .success {
-                return focusedPid == targetPid
+            if AXUIElementGetPid(focusedElementAX, &focusedPid) == .success {
+                if focusedPid == targetPid { return true }
+                let targetBundle = targetBundleIdentifier
+                    ?? NSRunningApplication(processIdentifier: targetPid)?.bundleIdentifier
+                let focusedBundle = NSRunningApplication(
+                    processIdentifier: focusedPid
+                )?.bundleIdentifier
+                return Self.bundleIdentifiersLikelySameApp(
+                    target: targetBundle,
+                    candidate: focusedBundle
+                )
             }
         }
 
-        // Fallback: frontmost app check (if AX query fails)
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
-        return frontmost.processIdentifier == targetPid
+        // AX unavailable: frontmost check already passed above.
+        return true
+    }
+
+    /// Recovers `targetPid` when the target app relaunches with a new PID.
+    ///
+    /// Returns false only if the original PID is gone and no matching running app
+    /// can be found for the captured target bundle identifier.
+    private func recoverTargetPidIfNeeded() -> Bool {
+        if targetPid != 0, NSRunningApplication(processIdentifier: targetPid) != nil {
+            return true
+        }
+
+        guard let bundleId = targetBundleIdentifier else { return false }
+        guard let runningTarget = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == bundleId && !$0.isTerminated
+        }) else {
+            return false
+        }
+
+        targetPid = runningTarget.processIdentifier
+        return true
+    }
+
+    /// Returns true when two bundle identifiers likely refer to the same app family.
+    ///
+    /// Helper bundle IDs often use suffixes (for example `.helper`, `.renderer`).
+    /// We treat exact matches and dot-prefix matches as equivalent.
+    nonisolated static func bundleIdentifiersLikelySameApp(
+        target: String?,
+        candidate: String?
+    ) -> Bool {
+        guard let target, let candidate else { return false }
+        if target == candidate { return true }
+        return candidate.hasPrefix(target + ".") || target.hasPrefix(candidate + ".")
     }
 
     /// Number of characters to type before yielding to the run-loop.

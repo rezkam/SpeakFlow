@@ -168,10 +168,9 @@ final class KeyInterceptor: KeyIntercepting {
         ) == .success,
            let element = focusedElement,
            CFGetTypeID(element) == AXUIElementGetTypeID() {
-            // Safe: type check guarantees AXUIElement
-            // swiftlint:disable:next force_cast
+            let focusedElementAX = unsafeBitCast(element, to: AXUIElement.self)
             var focusedPid: pid_t = 0
-            if AXUIElementGetPid(element as! AXUIElement, &focusedPid) == .success {
+            if AXUIElementGetPid(focusedElementAX, &focusedPid) == .success {
                 return focusedPid == pid
             }
         }
