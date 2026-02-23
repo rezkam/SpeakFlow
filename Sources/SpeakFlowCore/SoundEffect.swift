@@ -51,6 +51,7 @@ public enum SoundEffect {
 }
 
 #if DEBUG
+// swiftlint:disable identifier_name
 extension SoundEffect {
     static func _testShouldMute(
         environment: [String: String],
@@ -60,4 +61,5 @@ extension SoundEffect {
         shouldMute(environment: environment, arguments: arguments, bundlePath: bundlePath)
     }
 }
+// swiftlint:enable identifier_name
 #endif

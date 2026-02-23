@@ -214,6 +214,7 @@ public final class OpenAICodexAuth {
     }
 
 #if DEBUG
+    // swiftlint:disable identifier_name
     static func _testSetRandomBytesProvider(
         _ provider: @escaping @Sendable (Int, UnsafeMutableRawPointer) -> Int32
     ) {
@@ -223,6 +224,7 @@ public final class OpenAICodexAuth {
     static func _testResetRandomBytesProvider() {
         _randomProviderLock.withLock { $0 = secureRandomProvider }
     }
+    // swiftlint:enable identifier_name
 #endif
     
     // MARK: - Form Encoding

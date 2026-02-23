@@ -140,7 +140,9 @@ public final class Transcription {
 extension Transcription: TranscriptionCoordinating {}
 
 #if DEBUG
+// swiftlint:disable identifier_name
 extension Transcription {
     var _testErrorSoundPlayCount: Int { testErrorSoundPlayCount }
 }
+// swiftlint:enable identifier_name
 #endif
