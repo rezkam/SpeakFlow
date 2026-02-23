@@ -145,6 +145,55 @@ struct TextInserterFocusBehavioralTests {
     }
 }
 
+@Suite("TextInserter Focus — Bundle Matching")
+struct TextInserterBundleMatchingTests {
+    @Test
+    func exactBundleMatchIsTrue() {
+        #expect(
+            TextInserter.bundleIdentifiersLikelySameApp(
+                target: "com.google.Chrome",
+                candidate: "com.google.Chrome"
+            )
+        )
+    }
+
+    @Test
+    func helperBundleSuffixMatchesParentApp() {
+        #expect(
+            TextInserter.bundleIdentifiersLikelySameApp(
+                target: "com.google.Chrome",
+                candidate: "com.google.Chrome.helper"
+            )
+        )
+        #expect(
+            TextInserter.bundleIdentifiersLikelySameApp(
+                target: "com.google.Chrome.helper",
+                candidate: "com.google.Chrome"
+            )
+        )
+    }
+
+    @Test
+    func unrelatedBundlesDoNotMatch() {
+        #expect(
+            !TextInserter.bundleIdentifiersLikelySameApp(
+                target: "com.apple.TextEdit",
+                candidate: "com.apple.Safari"
+            )
+        )
+    }
+
+    @Test
+    func nilBundleDoesNotMatch() {
+        #expect(
+            !TextInserter.bundleIdentifiersLikelySameApp(
+                target: "com.apple.TextEdit",
+                candidate: nil
+            )
+        )
+    }
+}
+
 // MARK: - TextInserter PID-Based Focus Tests
 
 @Suite("TextInserter Focus — PID-Based App Tracking", .serialized)
@@ -158,16 +207,33 @@ struct TextInserterPidFocusTests {
         inserter.cancelAndReset()
         #expect(inserter.targetPid == 0, "PID should be 0 after reset")
 
-        // captureTarget should capture the test process's PID
-        // (the test runner is the frontmost app with a focused element)
+        // Determine the focused element PID first. In GUI test runs this may be
+        // the test process or another currently focused app.
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedElement: CFTypeRef?
+        var expectedPid: pid_t = 0
+        if AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedElement
+        ) == .success,
+           let element = focusedElement,
+           CFGetTypeID(element) == AXUIElementGetTypeID() {
+            // swiftlint:disable:next force_cast
+            let axElement = element as! AXUIElement
+            _ = AXUIElementGetPid(axElement, &expectedPid)
+        }
+
         inserter.captureTarget()
 
         if inserter.targetElement != nil {
             // If we captured an element, PID must be set
             #expect(inserter.targetPid != 0,
                     "captureTarget must store the target element's PID")
-            #expect(inserter.targetPid == ProcessInfo.processInfo.processIdentifier,
-                    "PID should match the test process since it owns the focused element")
+            if expectedPid != 0 {
+                #expect(inserter.targetPid == expectedPid,
+                        "PID should match the focused element owner at capture time")
+            }
         }
         // If no element captured (headless CI), that's OK — PID stays 0
 

@@ -285,6 +285,57 @@ struct SessionControllerTests {
         // Should chunk now via max-duration + silence branch.
         #expect(await c.shouldSendChunk() == true)
     }
+
+    @Test func testAutoEndBlockedByRecentPotentialSpeechActivity() async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(
+            enabled: true,
+            silenceDuration: 5.0,
+            minSessionDuration: 0.1,
+            requireSpeechFirst: true,
+            noSpeechTimeout: 100.0
+        )
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+        await c.onSpeechEvent(.started(at: 0))
+        clock.now += 1.0
+        await c.onSpeechEvent(.ended(at: 1.0))
+
+        // Past normal silence threshold, but a fresh speech-like frame arrived.
+        clock.now += 5.2
+        await c.onPotentialSpeechActivity()
+        #expect(
+            await c.shouldAutoEndSession() == false,
+            "Recent potential speech activity should block auto-end even after base silence threshold"
+        )
+
+        // Once the short hold window passes, auto-end should proceed normally.
+        clock.now += 1.1
+        #expect(await c.shouldAutoEndSession() == true)
+    }
+
+    @Test func testChunkSendBlockedByRecentPotentialSpeechActivity() async {
+        let clock = MockDateProvider()
+        let vadConfig = VADConfiguration(minSilenceAfterSpeech: 0.2)
+        let c = SessionController(
+            vadConfig: vadConfig,
+            maxChunkDuration: 1.0,
+            dateProvider: clock.date
+        )
+        await c.startSession()
+        await c.onSpeechEvent(.started(at: 0))
+        clock.now += 0.5
+        await c.onSpeechEvent(.ended(at: 0.5))
+
+        // Chunk duration reached, but speech-like activity just happened.
+        clock.now += 1.0
+        await c.onPotentialSpeechActivity()
+        #expect(await c.shouldSendChunk() == false)
+
+        // After hold window expires, chunk can be sent.
+        clock.now += 1.1
+        #expect(await c.shouldSendChunk() == true)
+    }
 }
 
 // MARK: - Silence Duration Boundary Tests
