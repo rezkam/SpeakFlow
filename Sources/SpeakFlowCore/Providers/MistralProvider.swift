@@ -573,6 +573,7 @@ public actor MistralStreamingSession: StreamingSession {
 #if DEBUG
     /// Test seam: mark the session as connected without a real WebSocket,
     /// so close() will execute its flush path.
+    // swiftlint:disable identifier_name
     func _testSetConnected(_ connected: Bool) {
         isConnected = connected
     }
@@ -589,5 +590,6 @@ public actor MistralStreamingSession: StreamingSession {
     nonisolated func _testIsNormalClose(_ error: Error) -> Bool {
         isNormalClose(error)
     }
+    // swiftlint:enable identifier_name
 #endif
 }

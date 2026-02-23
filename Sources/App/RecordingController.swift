@@ -254,12 +254,16 @@ final class RecordingController {
             }
         }
 
-        // Auto-end: disabled by default for streaming (user must opt in)
+        // Auto-end for streaming mode (user-configurable, enabled by default).
         if settings.streamingAutoEndEnabled {
             controller.autoEndSilenceDuration = settings.autoEndSilenceDuration
         } else {
             controller.autoEndSilenceDuration = 0
         }
+        controller.keepAliveEnabled = settings.streamingKeepAliveEnabled
+        controller.keepAliveInterval = settings.streamingKeepAliveInterval
+        controller.reconnectEnabled = settings.streamingReconnectEnabled
+        controller.minimumFinalWordCount = settings.streamingMinimumFinalWordCount
         controller.onAutoEnd = { [weak self] in
             Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
         }

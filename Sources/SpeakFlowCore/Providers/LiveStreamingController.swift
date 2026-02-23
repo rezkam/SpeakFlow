@@ -520,6 +520,7 @@ public final class LiveStreamingController {
     // MARK: - Event Handling
 
     /// Process a transcription event. Internal for testing.
+    // swiftlint:disable:next cyclomatic_complexity
     internal func handleEvent(_ event: TranscriptionEvent) {
         evaluateTurnStartIfNeeded(for: event)
 
@@ -993,6 +994,7 @@ public final class LiveStreamingController {
 
 #if DEBUG
 extension LiveStreamingController {
+    // swiftlint:disable identifier_name
     /// Whether the audio tap reference is currently marked active.
     /// When false, the audio tap silently discards audio instead of sending.
     // swiftlint:disable:next identifier_name
@@ -1038,9 +1040,11 @@ extension LiveStreamingController {
         audioSessionRef.droppedChunkCount
     }
 
+    // swiftlint:disable:next identifier_name
     public func _testArmSilenceTimer() {
         self.hasSpeechOccurred = true
         self.startSilenceTimer()
     }
+    // swiftlint:enable identifier_name
 }
 #endif

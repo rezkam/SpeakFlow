@@ -331,6 +331,7 @@ public actor DeepgramStreamingSession: StreamingSession {
     }
 
 #if DEBUG
+    // swiftlint:disable identifier_name
     func _testSetConnected(_ connected: Bool) {
         isConnected = connected
     }
@@ -342,6 +343,7 @@ public actor DeepgramStreamingSession: StreamingSession {
     func _testDidInvalidateURLSession() -> Bool {
         testDidInvalidateURLSession
     }
+    // swiftlint:enable identifier_name
 #endif
 }
 
