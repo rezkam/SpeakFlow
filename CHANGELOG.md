@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0 — Advanced VAD Controls & Streaming Reliability
+
+Major update exposing advanced Voice Activity Detection (VAD) and auto-end settings, alongside significant reliability improvements for streaming transcription and text insertion.
+
+### Features
+* **Advanced VAD Settings** — Exposed comprehensive UI controls for VAD thresholds, noise gating, volume smoothing, and state reset intervals.
+* **Smart Auto-End Controls** — Added "Thinking Pause" extension, Turn Classifier for incomplete sentences, and Idle Nudge to intelligently delay auto-end when you pause mid-thought.
+* **Streaming Reliability** — Added configurable WebSocket keep-alive pings and automatic reconnect on drop to maintain long-running live transcription sessions.
+* **Metrics & Observability** — Added per-session metrics store and Speech-to-Text (STT) latency tracking.
+* **Audio Noise Gate** — Added a pluggable pre-VAD audio filter with a noise gate to reject background noise before detection.
+
+### Bug Fixes
+* **Focus Recovery** — Improved PID matching and added bundle ID tracking so text correctly inserts even if an app relaunches or uses a helper process.
+* **Text Insertion Safety** — Fixed Enter submission to wait for pending text insertions, and added per-character modifier safety.
+* **Session Lifecycle** — Hardened OAuth flow, audio buffering, stream reconnects, and fixed transcription cancellation handling.
+* **VAD Accuracy** — Defer Silero state reset during active speech to prevent dropouts, and added a "potential speech" hold guard against premature auto-end.
+
+### Release Infrastructure & Testing
+* Rewrote release scripts with `rc` (release candidate) commands, `--yes` non-interactive mode, and robust CI timeouts/heartbeats.
+* Added extensive regression test suites for core behavior contracts (focus, modifier safety, VAD state machine).
+
+---
+
 ## 0.6.1 — Bug fixes & test reliability
 
 Patch release fixing one production bug and hardening the test suite against
