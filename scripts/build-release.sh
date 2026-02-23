@@ -224,10 +224,68 @@ fi
 # STAGE 2 — Tests
 # =============================================================================
 step "Running test suite"
-if swift test --quiet 2>&1 | tail -3 | grep -qE "passed|0 failures"; then
+TEST_LOG="$(mktemp /tmp/speakflow-release-tests-XXXXXX.log)"
+TEST_TIMEOUT_SECONDS="${SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS:-2400}"
+SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-/tmp/speakflow-rc-build}"
+
+info "Test log: $TEST_LOG"
+info "Timeout: ${TEST_TIMEOUT_SECONDS}s (override with SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS)"
+if [[ -n "$SCRATCH_PATH" ]]; then
+    info "Scratch: $SCRATCH_PATH"
+    mkdir -p "$SCRATCH_PATH"
+fi
+
+set +e
+test_cmd=(env SPEAKFLOW_MUTE_SOUNDS=1 swift test)
+if [[ -n "$SCRATCH_PATH" ]]; then
+    test_cmd+=(--scratch-path "$SCRATCH_PATH")
+fi
+"${test_cmd[@]}" >"$TEST_LOG" 2>&1 &
+TEST_PID=$!
+TEST_START_TS=$(date +%s)
+LAST_HEARTBEAT_TS="$TEST_START_TS"
+TEST_TIMED_OUT=0
+
+while kill -0 "$TEST_PID" 2>/dev/null; do
+    sleep 2
+    NOW_TS=$(date +%s)
+    ELAPSED_SECONDS=$((NOW_TS - TEST_START_TS))
+
+    # Heartbeat every 20 seconds so RC does not look stuck.
+    if [ $((NOW_TS - LAST_HEARTBEAT_TS)) -ge 20 ]; then
+        LAST_HEARTBEAT_TS="$NOW_TS"
+        LAST_TEST_LINE="$(tail -n 1 "$TEST_LOG" 2>/dev/null | tr -d '\r')"
+        if [ -n "$LAST_TEST_LINE" ]; then
+            info "Tests running (${ELAPSED_SECONDS}s): $LAST_TEST_LINE"
+        else
+            info "Tests running (${ELAPSED_SECONDS}s)..."
+        fi
+    fi
+
+    if [ "$ELAPSED_SECONDS" -ge "$TEST_TIMEOUT_SECONDS" ]; then
+        TEST_TIMED_OUT=1
+        warn "Test suite timed out after ${TEST_TIMEOUT_SECONDS}s — stopping test process"
+        kill -TERM "$TEST_PID" 2>/dev/null || true
+        sleep 2
+        kill -KILL "$TEST_PID" 2>/dev/null || true
+        break
+    fi
+done
+
+wait "$TEST_PID"
+TEST_STATUS=$?
+set -e
+
+tail -n 5 "$TEST_LOG" 2>/dev/null | sed 's/^/  /'
+
+if [ "$TEST_STATUS" -eq 0 ] && [ "$TEST_TIMED_OUT" -eq 0 ]; then
     ok "All tests passed"
 else
-    warn "Tests may have failures — check output above"
+    if [ "$TEST_TIMED_OUT" -eq 1 ]; then
+        warn "Tests timed out — see log: $TEST_LOG"
+    else
+        warn "Tests failed — see log: $TEST_LOG"
+    fi
     confirm "Release anyway?"
 fi
 
@@ -235,13 +293,66 @@ fi
 # STAGE 3 — Build
 # =============================================================================
 step "Building release binary"
-swift build -c release --product SpeakFlow 2>&1 \
+build_cmd=(swift build -c release --product SpeakFlow)
+if [[ -n "$SCRATCH_PATH" ]]; then
+    build_cmd+=(--scratch-path "$SCRATCH_PATH")
+fi
+BUILD_LOG="$(mktemp /tmp/speakflow-release-build-XXXXXX.log)"
+BUILD_TIMEOUT_SECONDS="${SPEAKFLOW_RC_BUILD_TIMEOUT_SECONDS:-1800}"
+info "Build log: $BUILD_LOG"
+info "Build timeout: ${BUILD_TIMEOUT_SECONDS}s (override with SPEAKFLOW_RC_BUILD_TIMEOUT_SECONDS)"
+
+set +e
+"${build_cmd[@]}" >"$BUILD_LOG" 2>&1 &
+BUILD_PID=$!
+BUILD_START_TS=$(date +%s)
+LAST_BUILD_HEARTBEAT_TS="$BUILD_START_TS"
+BUILD_TIMED_OUT=0
+
+while kill -0 "$BUILD_PID" 2>/dev/null; do
+    sleep 2
+    NOW_TS=$(date +%s)
+    ELAPSED_SECONDS=$((NOW_TS - BUILD_START_TS))
+
+    if [ $((NOW_TS - LAST_BUILD_HEARTBEAT_TS)) -ge 20 ]; then
+        LAST_BUILD_HEARTBEAT_TS="$NOW_TS"
+        LAST_BUILD_LINE="$(tail -n 1 "$BUILD_LOG" 2>/dev/null | tr -d '\r')"
+        if [ -n "$LAST_BUILD_LINE" ]; then
+            info "Build running (${ELAPSED_SECONDS}s): $LAST_BUILD_LINE"
+        else
+            info "Build running (${ELAPSED_SECONDS}s)..."
+        fi
+    fi
+
+    if [ "$ELAPSED_SECONDS" -ge "$BUILD_TIMEOUT_SECONDS" ]; then
+        BUILD_TIMED_OUT=1
+        warn "Build timed out after ${BUILD_TIMEOUT_SECONDS}s — stopping build process"
+        kill -TERM "$BUILD_PID" 2>/dev/null || true
+        sleep 2
+        kill -KILL "$BUILD_PID" 2>/dev/null || true
+        break
+    fi
+done
+
+wait "$BUILD_PID"
+BUILD_STATUS=$?
+set -e
+
+tail -n 10 "$BUILD_LOG" 2>/dev/null \
     | grep -v "^Found unhandled resource" \
     | grep -v "^$" \
-    | sed 's/^/  /' \
-    || fail "Build failed"
+    | sed 's/^/  /'
 
-BUILT_BINARY=".build/release/$APP_NAME"
+if [ "$BUILD_STATUS" -ne 0 ] || [ "$BUILD_TIMED_OUT" -eq 1 ]; then
+    fail "Build failed or timed out — see log: $BUILD_LOG"
+fi
+
+BUILD_ROOT=".build"
+if [[ -n "$SCRATCH_PATH" ]]; then
+    BUILD_ROOT="$SCRATCH_PATH"
+fi
+
+BUILT_BINARY="$BUILD_ROOT/release/$APP_NAME"
 [ -f "$BUILT_BINARY" ] || fail "Binary not found after build: $BUILT_BINARY"
 ok "Build complete"
 # Hash captured after signing (stage 5) once codesign has written its seal
@@ -259,8 +370,8 @@ mkdir -p "$APP_NAME.app/Contents/Resources"
 cp "$BUILT_BINARY" "$APP_NAME.app/Contents/MacOS/"
 
 # SPM resource bundle (optional)
-if [ -d ".build/release/${APP_NAME}_${APP_NAME}.bundle" ]; then
-    cp -r ".build/release/${APP_NAME}_${APP_NAME}.bundle" \
+if [ -d "$BUILD_ROOT/release/${APP_NAME}_${APP_NAME}.bundle" ]; then
+    cp -r "$BUILD_ROOT/release/${APP_NAME}_${APP_NAME}.bundle" \
         "$APP_NAME.app/Contents/Resources/"
 fi
 
@@ -314,8 +425,10 @@ step "Code signing"
 # Pure resource bundles (images only) are not signable and are skipped.
 EMBEDDED_BUNDLE="$APP_NAME.app/Contents/Resources/${APP_NAME}_${APP_NAME}.bundle"
 if [ -d "$EMBEDDED_BUNDLE" ]; then
-    EXEC_COUNT=$(find "$EMBEDDED_BUNDLE" -type f \
-        -exec sh -c 'file "$1" | grep -q "Mach-O"' _ {} \; -print 2>/dev/null | wc -l)
+    # Count Mach-O payloads without nested `sh -c` to avoid shell parsing edge cases.
+    EXEC_COUNT=$(find "$EMBEDDED_BUNDLE" -type f -print0 2>/dev/null \
+        | xargs -0 file 2>/dev/null \
+        | grep -c "Mach-O" || true)
     if [ "$EXEC_COUNT" -gt 0 ]; then
         codesign --force --options runtime --timestamp \
             --sign "$SIGNING_IDENTITY" \
