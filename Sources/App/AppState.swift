@@ -57,7 +57,11 @@ final class AppState: BannerPresenting {
     var deepgramEndpointingMs = 300
     var deepgramModel = "nova-3"
     var deepgramLanguage = "en-US"
-    var streamingAutoEndEnabled = false
+    var streamingAutoEndEnabled = true
+    var streamingKeepAliveEnabled = true
+    var streamingKeepAliveInterval: Double = 8.0
+    var streamingReconnectEnabled = true
+    var streamingMinimumFinalWordCount = 1
 
     // MARK: - Mistral Settings
     var mistralModel = "voxtral-mini-transcribe-realtime-2602"
@@ -84,8 +88,28 @@ final class AppState: BannerPresenting {
     // MARK: - Audio / VAD Settings
     var vadEnabled = true
     var vadThreshold: Float = Config.vadThreshold
+    var vadVolumeGateEnabled: Bool = Config.vadVolumeGateEnabled
+    var vadMinVolumeForSpeech: Float = Config.vadMinVolumeForSpeech
+    var vadVolumeSmoothingFactor: Float = Config.vadVolumeSmoothingFactor
+    var vadStateResetInterval: Double = Config.vadStateResetInterval
     var autoEndEnabled = true
     var autoEndSilenceDuration: Double = Config.autoEndSilenceDuration
+    var autoEndMinSessionDuration: Double = Config.autoEndMinSessionDuration
+    var autoEndRequireSpeechFirst: Bool = true
+    var autoEndNoSpeechTimeout: Double = 10.0
+    var autoEndMaxContinuousSpeechDuration: Double = 180.0
+    var thinkingPauseEnabled: Bool = true
+    var thinkingPauseExtensionSeconds: Double = 5.0
+    var turnClassifierEnabled: Bool = Config.turnClassifierEnabled
+    var turnClassifierMinimumSilence: Double = Config.turnClassifierMinimumSilence
+    var turnClassifierIncompleteExtensionSeconds: Double = Config.turnClassifierIncompleteExtensionSeconds
+    var turnClassifierThreshold: Float = Config.turnClassifierThreshold
+    var idleNudgeEnabled: Bool = Config.idleNudgeEnabled
+    var idleNudgeInitialDelay: Double = Config.idleNudgeInitialDelay
+    var idleNudgeInterval: Double = Config.idleNudgeInterval
+    var idleNudgeMaxCount: Int = Config.idleNudgeMaxCount
+    var audioNoiseGateEnabled: Bool = Config.audioNoiseGateEnabled
+    var audioNoiseGateRmsThreshold: Float = Config.audioNoiseGateRmsThreshold
     var minSpeechRatio: Float = Config.minSpeechRatio
 
     // MARK: - Inline Banner (replaces popup alerts)
@@ -142,8 +166,28 @@ final class AppState: BannerPresenting {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
         vadEnabled = Settings.shared.vadEnabled
         vadThreshold = Settings.shared.vadThreshold
+        vadVolumeGateEnabled = Settings.shared.vadVolumeGateEnabled
+        vadMinVolumeForSpeech = Settings.shared.vadMinVolumeForSpeech
+        vadVolumeSmoothingFactor = Settings.shared.vadVolumeSmoothingFactor
+        vadStateResetInterval = Settings.shared.vadStateResetInterval
         autoEndEnabled = Settings.shared.autoEndEnabled
         autoEndSilenceDuration = Settings.shared.autoEndSilenceDuration
+        autoEndMinSessionDuration = Settings.shared.autoEndMinSessionDuration
+        autoEndRequireSpeechFirst = Settings.shared.autoEndRequireSpeechFirst
+        autoEndNoSpeechTimeout = Settings.shared.autoEndNoSpeechTimeout
+        autoEndMaxContinuousSpeechDuration = Settings.shared.autoEndMaxContinuousSpeechDuration
+        thinkingPauseEnabled = Settings.shared.thinkingPauseEnabled
+        thinkingPauseExtensionSeconds = Settings.shared.thinkingPauseExtensionSeconds
+        turnClassifierEnabled = Settings.shared.turnClassifierEnabled
+        turnClassifierMinimumSilence = Settings.shared.turnClassifierMinimumSilence
+        turnClassifierIncompleteExtensionSeconds = Settings.shared.turnClassifierIncompleteExtensionSeconds
+        turnClassifierThreshold = Settings.shared.turnClassifierThreshold
+        idleNudgeEnabled = Settings.shared.idleNudgeEnabled
+        idleNudgeInitialDelay = Settings.shared.idleNudgeInitialDelay
+        idleNudgeInterval = Settings.shared.idleNudgeInterval
+        idleNudgeMaxCount = Settings.shared.idleNudgeMaxCount
+        audioNoiseGateEnabled = Settings.shared.audioNoiseGateEnabled
+        audioNoiseGateRmsThreshold = Settings.shared.audioNoiseGateRmsThreshold
         minSpeechRatio = Settings.shared.minSpeechRatio
         deepgramInterimResults = Settings.shared.deepgramInterimResults
         deepgramSmartFormat = Settings.shared.deepgramSmartFormat
@@ -151,6 +195,10 @@ final class AppState: BannerPresenting {
         deepgramModel = Settings.shared.deepgramModel
         deepgramLanguage = Settings.shared.deepgramLanguage
         streamingAutoEndEnabled = Settings.shared.streamingAutoEndEnabled
+        streamingKeepAliveEnabled = Settings.shared.streamingKeepAliveEnabled
+        streamingKeepAliveInterval = Settings.shared.streamingKeepAliveInterval
+        streamingReconnectEnabled = Settings.shared.streamingReconnectEnabled
+        streamingMinimumFinalWordCount = Settings.shared.streamingMinimumFinalWordCount
         mistralModel = Settings.shared.mistralModel
         mistralBatchModel = Settings.shared.mistralBatchModel
         mistralLanguage = Settings.shared.mistralLanguage
