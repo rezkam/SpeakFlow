@@ -109,6 +109,9 @@ struct TranscriptionSettingsView: View {
 
         // Shared: streaming auto-end
         streamingAutoEndSection
+
+        // Shared: streaming reliability and commit behavior
+        streamingReliabilitySection
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -130,6 +133,9 @@ struct TranscriptionSettingsView: View {
 
         // Shared: VAD (all batch providers)
         vadSection
+
+        // Shared: pre-VAD audio cleanup
+        noiseGateSection
 
         // Shared: auto-end (all batch providers)
         batchAutoEndSection
@@ -174,11 +180,61 @@ struct TranscriptionSettingsView: View {
                     lowLabel: "More sensitive",
                     highLabel: "Stricter filtering"
                 )
+
+                Toggle("Enable Volume Gate", isOn: state.binding(for: \.vadVolumeGateEnabled))
+                if state.vadVolumeGateEnabled {
+                    SettingSlider(
+                        title: "Min Speech Volume",
+                        displayValue: String(format: "%.4f", state.vadMinVolumeForSpeech),
+                        value: floatBinding(for: \.vadMinVolumeForSpeech),
+                        range: 0.001...0.050, step: 0.001,
+                        lowLabel: "Allow quieter speech",
+                        highLabel: "Reject more noise"
+                    )
+                }
+
+                SettingSlider(
+                    title: "Volume Smoothing",
+                    displayValue: String(format: "%.2f", state.vadVolumeSmoothingFactor),
+                    value: floatBinding(for: \.vadVolumeSmoothingFactor),
+                    range: 0.05...1.0, step: 0.05,
+                    lowLabel: "More smoothing",
+                    highLabel: "More reactive"
+                )
+
+                SettingSlider(
+                    title: "State Reset Interval",
+                    displayValue: String(format: "%.1fs", state.vadStateResetInterval),
+                    value: state.binding(for: \.vadStateResetInterval),
+                    range: 0.5...30.0, step: 0.5,
+                    lowLabel: "0.5s",
+                    highLabel: "30s"
+                )
             }
         } header: {
             Text("Voice Activity Detection")
         } footer: {
-            Text("VAD analyzes audio in real time to detect when you are speaking. Only segments containing speech are sent to the transcription service. Default: 15%.")
+            Text("VAD analyzes audio in real time to detect when you are speaking. Volume gate + smoothing help prevent keyboard/fan noise from triggering speech.")
+        }
+    }
+
+    private var noiseGateSection: some View {
+        Section {
+            Toggle("Enable Pre-VAD Noise Gate", isOn: state.binding(for: \.audioNoiseGateEnabled))
+            if state.audioNoiseGateEnabled {
+                SettingSlider(
+                    title: "Noise Gate RMS Threshold",
+                    displayValue: String(format: "%.4f", state.audioNoiseGateRmsThreshold),
+                    value: floatBinding(for: \.audioNoiseGateRmsThreshold),
+                    range: 0.000...0.010, step: 0.0005,
+                    lowLabel: "Less filtering",
+                    highLabel: "More filtering"
+                )
+            }
+        } header: {
+            Text("Noise Filtering")
+        } footer: {
+            Text("Applies a lightweight gate before VAD and buffering. Useful in noisy rooms to keep low-level background noise from contaminating detection/transcription.")
         }
     }
 
@@ -189,11 +245,109 @@ struct TranscriptionSettingsView: View {
 
             if state.autoEndEnabled {
                 silenceDurationSlider
+
+                SettingSlider(
+                    title: "Min Session Duration",
+                    displayValue: String(format: "%.1fs", state.autoEndMinSessionDuration),
+                    value: state.binding(for: \.autoEndMinSessionDuration),
+                    range: 0...10, step: 0.5,
+                    lowLabel: "0s",
+                    highLabel: "10s"
+                )
+
+                Toggle("Require Speech Before Auto-End", isOn: state.binding(for: \.autoEndRequireSpeechFirst))
+
+                SettingSlider(
+                    title: "No-Speech Timeout",
+                    displayValue: state.autoEndNoSpeechTimeout == 0
+                        ? "Disabled"
+                        : String(format: "%.0fs", state.autoEndNoSpeechTimeout),
+                    value: state.binding(for: \.autoEndNoSpeechTimeout),
+                    range: 0...60, step: 1,
+                    lowLabel: "0s (off)",
+                    highLabel: "60s"
+                )
+
+                SettingSlider(
+                    title: "Max Continuous Speech Safety",
+                    displayValue: state.autoEndMaxContinuousSpeechDuration == 0
+                        ? "Disabled"
+                        : String(format: "%.0fs", state.autoEndMaxContinuousSpeechDuration),
+                    value: state.binding(for: \.autoEndMaxContinuousSpeechDuration),
+                    range: 0...600, step: 5,
+                    lowLabel: "0s (off)",
+                    highLabel: "600s"
+                )
+
+                Toggle("Thinking Pause Extension", isOn: state.binding(for: \.thinkingPauseEnabled))
+                if state.thinkingPauseEnabled {
+                    SettingSlider(
+                        title: "Thinking Pause Extension",
+                        displayValue: String(format: "+%.0fs", state.thinkingPauseExtensionSeconds),
+                        value: state.binding(for: \.thinkingPauseExtensionSeconds),
+                        range: 1...15, step: 1,
+                        lowLabel: "+1s",
+                        highLabel: "+15s"
+                    )
+                }
+
+                Toggle("Turn Classifier", isOn: state.binding(for: \.turnClassifierEnabled))
+                if state.turnClassifierEnabled {
+                    SettingSlider(
+                        title: "Classifier Min Silence",
+                        displayValue: String(format: "%.1fs", state.turnClassifierMinimumSilence),
+                        value: state.binding(for: \.turnClassifierMinimumSilence),
+                        range: 0.5...10, step: 0.5,
+                        lowLabel: "0.5s",
+                        highLabel: "10s"
+                    )
+                    SettingSlider(
+                        title: "Classifier Incomplete Extension",
+                        displayValue: String(format: "+%.0fs", state.turnClassifierIncompleteExtensionSeconds),
+                        value: state.binding(for: \.turnClassifierIncompleteExtensionSeconds),
+                        range: 1...20, step: 1,
+                        lowLabel: "+1s",
+                        highLabel: "+20s"
+                    )
+                    SettingSlider(
+                        title: "Classifier Threshold",
+                        displayValue: String(format: "%.2f", state.turnClassifierThreshold),
+                        value: floatBinding(for: \.turnClassifierThreshold),
+                        range: 0.1...0.9, step: 0.05,
+                        lowLabel: "More complete",
+                        highLabel: "More incomplete"
+                    )
+                }
+
+                Toggle("Idle Nudge Before Auto-End", isOn: state.binding(for: \.idleNudgeEnabled))
+                if state.idleNudgeEnabled {
+                    SettingSlider(
+                        title: "Nudge Initial Delay",
+                        displayValue: String(format: "%.1fs", state.idleNudgeInitialDelay),
+                        value: state.binding(for: \.idleNudgeInitialDelay),
+                        range: 0...10, step: 0.5,
+                        lowLabel: "0s",
+                        highLabel: "10s"
+                    )
+                    SettingSlider(
+                        title: "Nudge Interval",
+                        displayValue: String(format: "%.1fs", state.idleNudgeInterval),
+                        value: state.binding(for: \.idleNudgeInterval),
+                        range: 1...10, step: 0.5,
+                        lowLabel: "1s",
+                        highLabel: "10s"
+                    )
+                    Stepper(
+                        "Max Nudges: \(state.idleNudgeMaxCount)",
+                        value: state.binding(for: \.idleNudgeMaxCount),
+                        in: 1...10
+                    )
+                }
             }
         } header: {
             Text("Auto-End")
         } footer: {
-            Text("When enabled, recording automatically stops after the specified silence period. Default: 5s.")
+            Text("Pro controls for auto-end timing, thinking-pause behavior, classifier gating, and idle re-engagement.")
         }
     }
 
@@ -219,7 +373,7 @@ struct TranscriptionSettingsView: View {
     // MARK: - Shared Sections (Streaming)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    /// Auto-end for streaming mode (disabled by default). Used by all streaming providers.
+    /// Auto-end for streaming mode. Used by all streaming providers.
     private var streamingAutoEndSection: some View {
         Section {
             Toggle("Auto-End on Silence", isOn: state.binding(for: \.streamingAutoEndEnabled))
@@ -230,11 +384,35 @@ struct TranscriptionSettingsView: View {
         } header: {
             Text("Auto-End")
         } footer: {
-            Text("""
-            Disabled by default for streaming. When enabled, recording stops \
-            after the specified silence period. In streaming mode, text is already \
-            inserted in real-time, so you can simply press the hotkey to stop when finished.
-            """)
+            Text("When enabled, live transcription sessions stop after sustained silence. Enabled by default; tune silence duration for your speaking style.")
+        }
+    }
+
+    private var streamingReliabilitySection: some View {
+        Section {
+            Toggle("KeepAlive Pings", isOn: state.binding(for: \.streamingKeepAliveEnabled))
+            if state.streamingKeepAliveEnabled {
+                SettingSlider(
+                    title: "KeepAlive Interval",
+                    displayValue: String(format: "%.0fs", state.streamingKeepAliveInterval),
+                    value: state.binding(for: \.streamingKeepAliveInterval),
+                    range: 2...20, step: 1,
+                    lowLabel: "2s",
+                    highLabel: "20s"
+                )
+            }
+
+            Toggle("Auto-Reconnect on Drop", isOn: state.binding(for: \.streamingReconnectEnabled))
+
+            Stepper(
+                "Minimum Final Words: \(state.streamingMinimumFinalWordCount)",
+                value: state.binding(for: \.streamingMinimumFinalWordCount),
+                in: 1...5
+            )
+        } header: {
+            Text("Streaming Reliability")
+        } footer: {
+            Text("KeepAlive prevents idle WebSocket drops. Reconnect attempts one recovery after unexpected close. Minimum Final Words controls short non-terminal final commits.")
         }
     }
 
