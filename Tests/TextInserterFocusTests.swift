@@ -286,39 +286,53 @@ struct TextInserterPidFocusTests {
     /// the frontmost app. This catches system overlays (Spotlight, password
     /// prompts) that steal keyboard focus without changing the frontmost app.
     ///
-    /// The test finds a background GUI app and sets it as the target. Since
-    /// the test runner owns the actual keyboard focus, `isTargetAppFrontmost`
-    /// must return false — even though the background app might technically
-    /// be "frontmost" in some NSWorkspace sense, it doesn't own the focused element.
+    /// The test finds a background GUI app that does NOT own the focused element
+    /// and sets it as the target. `isTargetAppFrontmost` must return false
+    /// because the focused element belongs to a different process.
     @MainActor @Test
     func isTargetAppFrontmostDetectsAXFocusOwner() {
-        // This test relies on the AX-based focused-element query returning a
-        // valid element.  In headless CI environments (even with AX trusted)
-        // there is no focused element, so the implementation falls back to
-        // NSWorkspace.frontmostApplication which can give a different answer.
         guard AXIsProcessTrusted() else { return }
 
-        // Verify there is actually a focused UI element — skip in headless CI.
+        // Resolve the PID of the process that currently owns keyboard focus.
         let systemWide = AXUIElementCreateSystemWide()
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             systemWide,
             kAXFocusedUIElementAttribute as CFString,
             &focusedRef
-        ) == .success, focusedRef != nil else {
-            // No focused element (headless / no GUI session).
+        ) == .success,
+              let focusedElement = focusedRef,
+              CFGetTypeID(focusedElement) == AXUIElementGetTypeID() else {
+            // No focused element — skip in headless CI.
             return
         }
+
+        // swiftlint:disable:next force_cast
+        let focusedAX = focusedElement as! AXUIElement
+        var focusedPid: pid_t = 0
+        guard AXUIElementGetPid(focusedAX, &focusedPid) == .success, focusedPid != 0 else {
+            return
+        }
+        let focusedBundle = NSRunningApplication(processIdentifier: focusedPid)?.bundleIdentifier
 
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
 
-        // The focused element's PID should match whoever owns the keyboard focus.
-        // Set our target to a different running GUI app — since that app doesn't
-        // own the focused element, isTargetAppFrontmost must return false.
+        // Pick a background GUI app that does NOT own the focused element.
+        // In CI, Finder is frontmost and owns the focused element, so we must
+        // explicitly exclude it (and any app in the same bundle family).
         let ourPid = ProcessInfo.processInfo.processIdentifier
         if let otherApp = NSWorkspace.shared.runningApplications.first(where: {
-            $0.processIdentifier != ourPid && $0.activationPolicy == .regular
+            guard $0.processIdentifier != ourPid,
+                  $0.processIdentifier != focusedPid,
+                  $0.activationPolicy == .regular
+            else { return false }
+            // Also exclude apps in the same bundle family as the focused app.
+            let otherBundle = $0.bundleIdentifier
+            return !TextInserter.bundleIdentifiersLikelySameApp(
+                target: focusedBundle,
+                candidate: otherBundle
+            )
         }) {
             inserter.targetPid = otherApp.processIdentifier
             #expect(!inserter.isTargetAppFrontmost(),
