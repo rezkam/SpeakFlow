@@ -12,6 +12,7 @@ import SpeakFlowCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var uiTestHarness: UITestHarnessController?
     private var windowCloseObserver: Any?
+    private var openMainWindowHandler: (() -> Void)?
     private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
     private let useMockRecordingInUITests = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MOCK_RECORDING"] != "0"
     private let resetUITestState = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_RESET_STATE"] == "1"
@@ -99,6 +100,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Keep the app alive when the settings window is closed — it runs in the menu bar.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    /// Handle Finder reopen events (including when users replace/update the app while it is
+    /// already running as a menu bar app). Without this, reopening can look like a no-op.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        NSApp.setActivationPolicy(.regular)
+
+        if !flag {
+            var showedWindow = false
+
+            for window in NSApp.windows where window.styleMask.contains(.titled) {
+                window.makeKeyAndOrderFront(nil)
+                showedWindow = true
+            }
+
+            if !showedWindow {
+                if let openMainWindowHandler {
+                    openMainWindowHandler()
+                } else {
+                    // Fallback path if bridge is not yet registered.
+                    let showedSettings = NSApp.sendAction(
+                        Selector(("showSettingsWindow:")),
+                        to: nil,
+                        from: nil
+                    )
+                    if !showedSettings {
+                        _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                    }
+                }
+            }
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        return true
+    }
+
+    func registerMainWindowOpener(_ handler: @escaping () -> Void) {
+        openMainWindowHandler = handler
     }
 
     // MARK: - Window Lifecycle

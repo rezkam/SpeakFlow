@@ -83,10 +83,10 @@ install_and_verify() {
     INSTALLED_VERSION=$(defaults read \
         "/Applications/$APP_NAME.app/Contents/Info" \
         CFBundleShortVersionString 2>/dev/null || echo "unknown")
-    if [ "$INSTALLED_VERSION" = "$DISPLAY_VERSION" ]; then
+    if [ "$INSTALLED_VERSION" = "$MARKETING_VERSION" ]; then
         ok "Version string correct: $INSTALLED_VERSION"
     else
-        fail "Version mismatch — expected $DISPLAY_VERSION, got $INSTALLED_VERSION"
+        fail "Version mismatch — expected $MARKETING_VERSION, got $INSTALLED_VERSION"
     fi
 }
 
@@ -152,9 +152,11 @@ BASE_VERSION="${BASE_VERSION:-0.0.0}"
 if [[ "$MODE" == "rc" ]]; then
     RC_TIMESTAMP=$(date +%Y%m%d%H%M)
     DISPLAY_VERSION="${BASE_VERSION}-rc.${RC_TIMESTAMP}"
-    BUNDLE_VERSION="$DISPLAY_VERSION"
+    MARKETING_VERSION="$BASE_VERSION"
+    BUNDLE_VERSION="$RC_TIMESTAMP"
 else
     DISPLAY_VERSION="$BASE_VERSION"
+    MARKETING_VERSION="$BASE_VERSION"
     BUNDLE_VERSION="$BASE_VERSION"
 fi
 
@@ -402,7 +404,8 @@ cat > "$APP_NAME.app/Contents/Info.plist" << PLIST
     <key>CFBundleName</key>            <string>$APP_NAME</string>
     <key>CFBundleDisplayName</key>     <string>$APP_NAME</string>
     <key>CFBundleVersion</key>         <string>$BUNDLE_VERSION</string>
-    <key>CFBundleShortVersionString</key> <string>$DISPLAY_VERSION</string>
+    <key>CFBundleShortVersionString</key> <string>$MARKETING_VERSION</string>
+    <key>SpeakFlowDisplayVersion</key> <string>$DISPLAY_VERSION</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>  <string>15.0</string>

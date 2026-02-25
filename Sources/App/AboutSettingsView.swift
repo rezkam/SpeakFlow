@@ -74,7 +74,11 @@ struct AboutSettingsView: View {
     // MARK: - Helpers
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
+        if let display = Bundle.main.object(forInfoDictionaryKey: "SpeakFlowDisplayVersion") as? String,
+           !display.isEmpty {
+            return display
+        }
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
     }
 
     private static let appIcon: NSImage? = {

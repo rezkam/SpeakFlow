@@ -168,7 +168,7 @@ final class KeyInterceptor: KeyIntercepting {
         ) == .success,
            let element = focusedElement,
            CFGetTypeID(element) == AXUIElementGetTypeID() {
-            let focusedElementAX = unsafeBitCast(element, to: AXUIElement.self)
+            let focusedElementAX = unsafeDowncast(element, to: AXUIElement.self)
             var focusedPid: pid_t = 0
             if AXUIElementGetPid(focusedElementAX, &focusedPid) == .success {
                 return focusedPid == pid
