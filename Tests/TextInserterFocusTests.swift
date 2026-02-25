@@ -495,16 +495,9 @@ struct TextInserterPidFocusTests {
         let result = await inserter.ensureTargetFocused()
         #expect(result, "ensureTargetFocused should return true for freshly captured target")
 
-        // Simulate cross-app switch by changing PID to a non-matching value
-        let savedPid = inserter.targetPid
-        inserter.targetPid = 1  // launchd — never the focused app
-        #expect(!inserter.isTargetAppFrontmost(),
-                "After changing PID to another app, isTargetAppFrontmost must return false")
-
-        // Restore PID — should work again
-        inserter.targetPid = savedPid
-        #expect(inserter.isTargetAppFrontmost(),
-                "After restoring PID, isTargetAppFrontmost must return true again")
+        // Note: the "different PID → false" case is covered by the dedicated unit test
+        // isTargetAppFrontmostReturnsFalseForDifferentApp(), which starts from a clean
+        // state (no targetBundleIdentifier) so the bundle-ID fallback cannot interfere.
 
         inserter.cancelAndReset()
     }
