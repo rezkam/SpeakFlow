@@ -82,8 +82,6 @@ struct AboutSettingsView: View {
     }
 
     private static let appIcon: NSImage? = {
-        guard let url = Bundle.module.url(forResource: "DockIcon", withExtension: "png"),
-              let image = NSImage(contentsOf: url) else { return nil }
-        return image
+        AppResources.pngImage(named: "DockIcon")
     }()
 }
