@@ -88,6 +88,9 @@ run_suite() {
     cat "$suite_log" >>"$LOG_FILE"
     echo "FAILED: $suite"
     echo "See log: $LOG_FILE"
+    echo "--- begin test output ---"
+    cat "$suite_log"
+    echo "--- end test output ---"
     return 1
   fi
 
