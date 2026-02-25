@@ -93,6 +93,13 @@ final class TextInserter: TextInserting {
     /// the main app PID even when the user is still in the same app.
     private var targetBundleIdentifier: String?
 
+    /// Test-only override for `isTargetAppFrontmost()`.
+    ///
+    /// Set to `true` or `false` in unit tests to produce a deterministic result
+    /// without depending on the live system frontmost-application state.
+    /// Must be `nil` in production (default).
+    var _testIsTargetFrontmost: Bool? = nil
+
     /// The current task chain for text operations.
     /// Each new operation creates a task that awaits this one, forming a serial queue.
     private var textInsertionTask: Task<Void, Never>?
@@ -417,6 +424,11 @@ final class TextInserter: TextInserting {
     /// Falls back to `NSWorkspace.frontmostApplication` if the AX query fails.
     func isTargetAppFrontmost() -> Bool {
         guard targetPid != 0 else { return true }
+
+        // Test hook: allows unit tests to inject a deterministic result without
+        // depending on live NSWorkspace / AX state (which can be non-deterministic
+        // in CI environments where the frontmost app may change between test steps).
+        if let override = _testIsTargetFrontmost { return override }
 
         guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
         let frontmostMatchesTarget = frontmost.processIdentifier == targetPid
