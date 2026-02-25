@@ -88,6 +88,22 @@ install_and_verify() {
     else
         fail "Version mismatch — expected $MARKETING_VERSION, got $INSTALLED_VERSION"
     fi
+
+    step "Launch smoke test"
+    SMOKE_LOG="$(mktemp /tmp/speakflow-launch-smoke-XXXXXX.log)"
+    "/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME" >"$SMOKE_LOG" 2>&1 &
+    SMOKE_PID=$!
+    sleep 2
+
+    if kill -0 "$SMOKE_PID" 2>/dev/null; then
+        ok "Installed app process starts successfully"
+        kill -TERM "$SMOKE_PID" 2>/dev/null || true
+        wait "$SMOKE_PID" 2>/dev/null || true
+    else
+        warn "Launch smoke-test log:"
+        tail -n 60 "$SMOKE_LOG" | sed 's/^/  /'
+        fail "Installed app exited during launch smoke test"
+    fi
 }
 
 banner() {

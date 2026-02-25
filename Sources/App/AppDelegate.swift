@@ -27,8 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Set the Dock icon from the bundled colorful icon
-        if let url = Bundle.module.url(forResource: "DockIcon", withExtension: "png"),
-           let icon = NSImage(contentsOf: url) {
+        if let icon = AppResources.pngImage(named: "DockIcon") {
             icon.isTemplate = false
             NSApp.applicationIconImage = icon
         }

@@ -41,8 +41,7 @@ struct SpeakFlowApp: App {
     /// Load MenuBarIcon.png as a template image for automatic light/dark mode tinting.
     /// The image is black-on-transparent at @2x (44px height); macOS uses only the alpha channel.
     private static let menuBarIcon: NSImage? = {
-        guard let url = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
-              let image = NSImage(contentsOf: url) else { return nil }
+        guard let image = AppResources.pngImage(named: "MenuBarIcon") else { return nil }
         // Set the size in points (half the pixel size for @2x Retina)
         image.size = NSSize(width: image.size.width / 2, height: image.size.height / 2)
         image.isTemplate = true
