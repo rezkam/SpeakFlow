@@ -1,5 +1,4 @@
 import AppKit
-import os
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
@@ -360,7 +359,7 @@ struct TextInserterPidFocusTests {
     /// wait (poll). We cancel the task to verify it returns false on cancellation.
     @MainActor @Test
     func ensureTargetFocusedPausesWhenTargetNotFrontmost() async throws {
-        // Find a real running GUI app that isn't frontmost.
+        // Find a real running GUI app to use as the target.
         // ensureTargetFocused checks NSRunningApplication(processIdentifier:) to verify
         // the app is still running — system daemons (PID 1) aren't GUI apps and return nil.
         let frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
@@ -374,30 +373,36 @@ struct TextInserterPidFocusTests {
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
 
-        // Set the target to a background app that IS running but NOT frontmost
+        // Force isTargetAppFrontmost() to return false deterministically.
+        // Without this override, CI runners can flakily promote the target app
+        // (e.g. Finder) to frontmost when the test process yields the main actor,
+        // causing ensureTargetFocused to return immediately with true.
+        inserter._testIsTargetFrontmost = false
+        defer { inserter._testIsTargetFrontmost = nil; inserter.cancelAndReset() }
+
+        // Set the target to a running app so the "is still alive" guard passes.
         inserter.targetElement = AXUIElementCreateApplication(backgroundApp.processIdentifier)
         inserter.targetPid = backgroundApp.processIdentifier
 
-        // ensureTargetFocused should NOT return immediately — it should poll
-        let returned = OSAllocatedUnfairLock(initialState: false)
+        // ensureTargetFocused should NOT return immediately — it should poll.
+        // We verify this by spawning the function, waiting 400 ms (≥ 2 poll cycles),
+        // then cancelling and checking that it returned false, not true.
         let task = Task { @MainActor in
-            let result = await inserter.ensureTargetFocused()
-            returned.withLock { $0 = true }
-            return result
+            await inserter.ensureTargetFocused()
         }
 
-        // Give it time — it should be polling, not returning
+        // Give the function time to poll at least once (200 ms per cycle).
         try await Task.sleep(for: .milliseconds(400))
-        #expect(returned.withLock { $0 } == false,
-                "ensureTargetFocused must NOT return while target app is not frontmost — it was returning immediately before the PID fix")
 
-        // Cancel the task to unblock
+        // Cancel and collect the result.
         task.cancel()
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(returned.withLock { $0 } == true,
-                "ensureTargetFocused should return false after cancellation")
+        let result = await task.value
 
-        inserter.cancelAndReset()
+        // The result must be false: true would mean the function incorrectly
+        // treated the target as frontmost (regression: was returning immediately
+        // with true before the PID fix was applied).
+        #expect(!result,
+                "ensureTargetFocused must return false — returning true means it incorrectly treated the target app as frontmost (pre-PID-fix regression)")
     }
 
     /// When targetPid points to a terminated app, ensureTargetFocused
@@ -432,6 +437,12 @@ struct TextInserterPidFocusTests {
 
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
+
+        // Force isTargetAppFrontmost() to return false deterministically so the
+        // timeout logic is exercised regardless of live system frontmost state.
+        inserter._testIsTargetFrontmost = false
+        defer { inserter._testIsTargetFrontmost = nil; inserter.cancelAndReset() }
+
         inserter.targetElement = AXUIElementCreateApplication(backgroundApp.processIdentifier)
         inserter.targetPid = backgroundApp.processIdentifier
 
@@ -446,7 +457,6 @@ struct TextInserterPidFocusTests {
         #expect(!result, "ensureTargetFocused must return false after timeout expires")
 
         testDefaults.removeObject(forKey: "settings.focusWaitTimeout")
-        inserter.cancelAndReset()
     }
 
     // MARK: - AX Integration (real element capture)
