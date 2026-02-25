@@ -11,7 +11,6 @@ import SpeakFlowCore
 @main
 struct SpeakFlowApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         Window("SpeakFlow", id: "main") {
@@ -21,6 +20,7 @@ struct SpeakFlowApp: App {
                 .environment(\.permissionController, PermissionController.shared)
                 .environment(\.authController, AuthController.shared)
                 .environment(\.statistics, Statistics.shared)
+                .modifier(MainWindowOpenBridge(appDelegate: appDelegate))
         }
         .defaultSize(width: 750, height: 650)
         .windowResizability(.contentMinSize)
@@ -48,6 +48,21 @@ struct SpeakFlowApp: App {
         image.isTemplate = true
         return image
     }()
+}
+
+private struct MainWindowOpenBridge: ViewModifier {
+    @Environment(\.openWindow) private var openWindow
+    let appDelegate: AppDelegate
+
+    func body(content: Content) -> some View {
+        content.onAppear {
+            appDelegate.registerMainWindowOpener { [openWindow] in
+                NSApp.setActivationPolicy(.regular)
+                openWindow(id: "main")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
 }
 
 /// Minimal menu bar menu: open settings, toggle dictation, quit.
