@@ -430,11 +430,14 @@ final class TextInserter: TextInserting {
         // in CI environments where the frontmost app may change between test steps).
         if let override = _testIsTargetFrontmost { return override }
 
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
-        let frontmostMatchesTarget = frontmost.processIdentifier == targetPid
-        guard frontmostMatchesTarget else { return false }
-
-        // Primary: check which process owns the actual keyboard focus
+        // Primary: ask the AX system which process owns the current keyboard focus.
+        // This is more authoritative than NSWorkspace.frontmostApplication because:
+        //   • Overlay windows (Spotlight, password dialogs) steal keyboard focus
+        //     without changing the NSWorkspace frontmost app.
+        //   • In CI the terminal process that owns the focused element is often
+        //     NOT the same process that NSWorkspace considers "frontmost".
+        //   • Some apps route UI through helper processes whose PID differs from
+        //     the main app PID even though the user is still in the same app.
         let systemWide = AXUIElementCreateSystemWide()
         var focusedElement: CFTypeRef?
         if AXUIElementCopyAttributeValue(
@@ -448,6 +451,7 @@ final class TextInserter: TextInserting {
             var focusedPid: pid_t = 0
             if AXUIElementGetPid(focusedElementAX, &focusedPid) == .success {
                 if focusedPid == targetPid { return true }
+                // Helper-process check: same app family if bundle IDs share a prefix.
                 let targetBundle = targetBundleIdentifier
                     ?? NSRunningApplication(processIdentifier: targetPid)?.bundleIdentifier
                 let focusedBundle = NSRunningApplication(
@@ -460,8 +464,10 @@ final class TextInserter: TextInserting {
             }
         }
 
-        // AX unavailable: frontmost check already passed above.
-        return true
+        // Fallback: AX unavailable (permission not granted or no focused element).
+        // Use NSWorkspace.frontmostApplication as a best-effort substitute.
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
+        return frontmost.processIdentifier == targetPid
     }
 
     /// Recovers `targetPid` when the target app relaunches with a new PID.
