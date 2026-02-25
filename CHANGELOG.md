@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1 — Polish & Reliability
+
+Small but satisfying fixes to a couple of rough edges introduced by the menu-bar-only mode in 0.7.0.
+
+### Bug Fixes
+
+* **Reopening the app now works** — If SpeakFlow is already running in your menu bar and you double-click the app icon in Finder (for example, after dragging in a fresh download), the Settings window now appears reliably instead of nothing happening.
+* **App icon always shows up** — The dock icon and menu bar icon now load correctly regardless of where the app is installed or how macOS resolves the resource bundle. No more blank icon on first launch in certain setups.
+
+---
+
 ## 0.7.0 — Advanced VAD Controls & Streaming Reliability
 
 Major update exposing advanced Voice Activity Detection (VAD) and auto-end settings, alongside significant reliability improvements for streaming transcription and text insertion.
