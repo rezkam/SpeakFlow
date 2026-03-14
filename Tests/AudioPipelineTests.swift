@@ -674,8 +674,7 @@ struct StreamingRecorderStopCancelTests {
 
         recorder.cancel()
 
-        // Give the stop() Task time to run
-        try? await Task.sleep(for: .milliseconds(300))
+        await recorder.waitForStopCompletion()
         #expect(!chunkReceived, "cancel() must suppress final chunk emission")
     }
 
@@ -703,7 +702,7 @@ struct StreamingRecorderStopCancelTests {
         Settings.shared.chunkDuration = .minute10
 
         recorder.stop()
-        try? await Task.sleep(for: .milliseconds(300))
+        await recorder.waitForStopCompletion()
 
         #expect(receivedChunk != nil, "stop() must emit final chunk when audio has speech")
         if let chunk = receivedChunk {
@@ -728,7 +727,7 @@ struct StreamingRecorderStopCancelTests {
         recorder.onChunkReady = { _ in chunkReceived = true }
 
         recorder.stop()
-        try? await Task.sleep(for: .milliseconds(300))
+        await recorder.waitForStopCompletion()
         #expect(!chunkReceived, "Audio shorter than minRecordingDurationMs must be discarded")
     }
 }
@@ -927,11 +926,10 @@ struct IntegrationRecorderToQueueTests {
         await queue.submitResult(ticket: t1, text: "first")
         await queue.submitResult(ticket: t2, text: "second")
 
-        // Give stream time to receive
-        try? await Task.sleep(for: .milliseconds(100))
-
+        // finishStream signals the end of the AsyncStream; await the task so all
+        // buffered elements ("first", "second") are drained before we check.
         await queue.finishStream()
-        streamTask.cancel()
+        _ = await streamTask.result
 
         let values = received.withLock { $0 }
         #expect(values == ["first", "second"],
