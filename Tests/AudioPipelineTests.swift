@@ -913,21 +913,26 @@ struct IntegrationRecorderToQueueTests {
         let t1 = await queue.nextSequence() // will succeed
         let t2 = await queue.nextSequence() // will succeed
 
-        // Collect results via textStream
+        // Pre-access textStream so the actor sets up its continuation BEFORE we
+        // submit results or call finishStream. Without this, the streamTask's
+        // `await queue.textStream` actor hop might execute after finishStream()
+        // has already been called, leaving a new stream whose continuation is
+        // never finished — causing `await streamTask.result` to deadlock.
+        let stream = await queue.textStream
+
         let received = OSAllocatedUnfairLock<[String]>(initialState: [])
         let streamTask = Task {
-            for await text in await queue.textStream {
+            for await text in stream {
                 received.withLock { $0.append(text) }
             }
         }
-        try? await Task.sleep(for: .milliseconds(50))
 
         await queue.markFailed(ticket: t0)
         await queue.submitResult(ticket: t1, text: "first")
         await queue.submitResult(ticket: t2, text: "second")
 
-        // finishStream signals the end of the AsyncStream; await the task so all
-        // buffered elements ("first", "second") are drained before we check.
+        // finishStream ends the stream; await natural task completion so all
+        // buffered elements are drained before we inspect received.
         await queue.finishStream()
         _ = await streamTask.result
 
