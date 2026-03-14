@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.2 — Focus Fix & UI Polish
+
+### Bug Fixes
+
+* **More reliable focus detection** — Restored Accessibility (AX) framework as the primary source of keyboard-focus ownership in `isTargetAppFrontmost`. Some apps route their UI through helper processes whose PID differs from the main app PID; AX correctly identifies these, whereas NSWorkspace does not. Text insertion now works correctly in apps like this without losing focus mid-dictation.
+
+### UI
+
+* **Cleaner Mistral account page** — Removed the per-minute API pricing numbers from the Voxtral Realtime and Voxtral Mini capability badges. The pricing was stale and better consulted directly on the Mistral console.
+
+### Test & CI Reliability
+
+* Fixed three load-sensitive test flakes in the parallel regression suite (`stopReturnsEarlyWhenNoTrailingEventsArrive`, `audioBackpressureUsesBoundedQueue`, `testFullPipelineWithFailedChunk`).
+* Fixed a potential test deadlock in `testFullPipelineWithFailedChunk` where an actor-hop race could leave an `AsyncStream` continuation unfinished.
+* CI now prints failing test output directly to stdout for easier diagnosis.
+
+---
+
 ## 0.7.1 — Polish & Reliability
 
 Small but satisfying fixes to a couple of rough edges introduced by the menu-bar-only mode in 0.7.0.
