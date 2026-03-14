@@ -169,14 +169,14 @@ struct AccountsSettingsView: View {
                         HStack(spacing: 12) {
                             capabilityBadge(
                                 label: "Voxtral Realtime",
-                                detail: "Streaming · $0.006/min",
+                                detail: "Streaming",
                                 icon: "waveform",
                                 color: .green
                             )
 
                             capabilityBadge(
                                 label: "Voxtral Mini",
-                                detail: "Batch · $0.003/min",
+                                detail: "Batch",
                                 icon: "square.stack",
                                 color: .blue
                             )
