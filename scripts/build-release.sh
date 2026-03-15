@@ -245,16 +245,28 @@ step "Running test suite"
 TEST_LOG="$(mktemp /tmp/speakflow-release-tests-XXXXXX.log)"
 TEST_TIMEOUT_SECONDS="${SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS:-2400}"
 SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-/tmp/speakflow-rc-build}"
+OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-rc-tests-$(date +%Y%m%d%H%M%S)-$$}"
+OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-/tmp/speakflow-observability-tests/$OBS_PROFILE}"
+mkdir -p "$OBS_DIR"
 
 info "Test log: $TEST_LOG"
 info "Timeout: ${TEST_TIMEOUT_SECONDS}s (override with SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS)"
+info "Observability: $OBS_DIR"
 if [[ -n "$SCRATCH_PATH" ]]; then
     info "Scratch: $SCRATCH_PATH"
     mkdir -p "$SCRATCH_PATH"
 fi
 
 set +e
-test_cmd=(env SPEAKFLOW_MUTE_SOUNDS=1 swift test)
+test_cmd=(
+    env
+    SPEAKFLOW_MUTE_SOUNDS=1
+    SPEAKFLOW_ISOLATE_TEST_AUDIO=1
+    SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE"
+    SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
+    swift
+    test
+)
 if [[ -n "$SCRATCH_PATH" ]]; then
     test_cmd+=(--scratch-path "$SCRATCH_PATH")
 fi

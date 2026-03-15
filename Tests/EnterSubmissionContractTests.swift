@@ -15,6 +15,9 @@ struct EnterSubmissionContractTests {
         let textInserter = SpyTextInserter()
         let banner = SpyBannerPresenter()
 
+        // Zero trailing-final timeout so stop tasks complete without a real wait.
+        settings.streamingTrailingFinalTimeout = 0.0
+
         let mockSession = MockStreamingSession()
         let mockProvider = MockStreamingProvider()
         mockProvider.isConfigured = true
@@ -101,7 +104,7 @@ struct EnterSubmissionContractTests {
         controller.fullTranscript = "final text"
         controller.shouldPressEnterOnComplete = true
 
-        controller.finishIfDone()
+        Task { await controller.completeBatchFinalization() }
 
         try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
             textInserter.operations.contains(.pressEnterKey)

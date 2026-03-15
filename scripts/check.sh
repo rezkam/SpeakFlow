@@ -16,6 +16,10 @@ fi
 LOG_FILE="${SPEAKFLOW_CHECK_LOG_FILE:-$(mktemp /tmp/speakflow-check-XXXXXX).log}"
 : > "$LOG_FILE"
 
+OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-check-$(date +%Y%m%d%H%M%S)-$$}"
+OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-/tmp/speakflow-observability-tests/$OBS_PROFILE}"
+mkdir -p "$OBS_DIR"
+
 FAILED=0
 FAILED_STEPS=()
 
@@ -38,7 +42,12 @@ echo "  SpeakFlow Check"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 run_step "Build............" swift build
-run_step "Swift tests......" env SPEAKFLOW_MUTE_SOUNDS=1 swift test
+run_step "Swift tests......" env \
+    SPEAKFLOW_MUTE_SOUNDS=1 \
+    SPEAKFLOW_ISOLATE_TEST_AUDIO=1 \
+    SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE" \
+    SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR" \
+    swift test
 
 # Optional: SwiftLint (skip if not installed)
 if command -v swiftlint &> /dev/null; then
@@ -52,6 +61,7 @@ else
     echo "Status: FAILED (${FAILED_STEPS[*]})"
 fi
 echo "Log: $LOG_FILE"
+echo "Observability: $OBS_DIR"
 echo ""
 
 exit "$FAILED"

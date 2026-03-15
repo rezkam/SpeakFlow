@@ -17,6 +17,40 @@ public final class Transcription {
 
     var queue: TranscriptionQueueBridge { queueBridge }
 
+    private func observabilityEvent(
+        _ name: String,
+        level: ObservabilityEventLevel = .info,
+        sessionId: UUID? = nil,
+        metadata: @autoclosure () -> [String: String] = [:]
+    ) {
+        let settings = Settings.shared
+        guard settings.observabilityEnabled,
+              settings.observabilityVerbosity.includes(level) else { return }
+        let id = sessionId ?? metricsSessionId
+        let payload = metadata()
+        Task {
+            await ObservabilityStore.shared.record(
+                component: "Transcription",
+                name: name,
+                level: level,
+                sessionId: id,
+                metadata: payload
+            )
+        }
+    }
+
+    private func metadataForText(_ text: String) -> [String: String] {
+        var metadata: [String: String] = [
+            "textChars": String(text.count),
+            "textWords": String(text.split(whereSeparator: \.isWhitespace).count),
+            "textFingerprint": ObservabilityFingerprint.sha256(text)
+        ]
+        if Settings.shared.observabilityCaptureTextPayloads {
+            metadata["text"] = text
+        }
+        return metadata
+    }
+
     public init(
         statistics: any StatisticsProviding = Statistics.shared,
         service: any TranscriptionServiceProviding = TranscriptionService.shared
@@ -29,6 +63,17 @@ public final class Transcription {
     public func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk) {
         // Use stable task IDs so each async task is removed from tracking on completion.
         let taskId = UUID()
+        observabilityEvent(
+            "chunk_submitted",
+            level: .debug,
+            metadata: [
+                "taskId": taskId.uuidString,
+                "ticketSeq": String(ticket.seq),
+                "ticketSession": String(ticket.session),
+                "bytes": String(chunk.wavData.count),
+                "durationSeconds": String(format: "%.3f", chunk.durationSeconds)
+            ]
+        )
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -61,6 +106,16 @@ public final class Transcription {
                     )
                     await SessionMetricsStore.shared.incrementChunkSucceeded(sessionId: metricsId)
                 }
+                self.observabilityEvent(
+                    "chunk_succeeded",
+                    level: .info,
+                    sessionId: metricsId,
+                    metadata: [
+                        "taskId": taskId.uuidString,
+                        "ticketSeq": String(ticket.seq),
+                        "latencyMs": String(format: "%.2f", latencySeconds * 1000)
+                    ].merging(self.metadataForText(text), uniquingKeysWith: { _, new in new })
+                )
                 Logger.transcription.info("Chunk #\(ticket.seq) success: \(text, privacy: .private)")
 
                 // Track successful transcription statistics
@@ -73,6 +128,15 @@ public final class Transcription {
             } catch {
                 if Self.isCancellation(error) {
                     Logger.transcription.debug("Chunk #\(ticket.seq) cancelled")
+                    self.observabilityEvent(
+                        "chunk_cancelled",
+                        level: .warning,
+                        sessionId: metricsId,
+                        metadata: [
+                            "taskId": taskId.uuidString,
+                            "ticketSeq": String(ticket.seq)
+                        ]
+                    )
                     await queueBridge.markFailed(ticket: ticket)
                     await queueBridge.checkCompletion()
                     return
@@ -89,6 +153,17 @@ public final class Transcription {
                 }
 
                 Logger.transcription.error("Chunk #\(ticket.seq) failed: \(error.localizedDescription)")
+                self.observabilityEvent(
+                    "chunk_failed",
+                    level: .error,
+                    sessionId: metricsId,
+                    metadata: [
+                        "taskId": taskId.uuidString,
+                        "ticketSeq": String(ticket.seq),
+                        "latencyMs": String(format: "%.2f", latencySeconds * 1000),
+                        "error": error.localizedDescription
+                    ]
+                )
                 await queueBridge.markFailed(ticket: ticket)
 
                 // Play error sound to notify user that transcription failed
@@ -106,6 +181,11 @@ public final class Transcription {
     }
 
     public func cancelAll() {
+        observabilityEvent(
+            "cancel_all_requested",
+            level: .warning,
+            metadata: ["activeTaskCount": String(processingTasks.count)]
+        )
         for task in processingTasks.values {
             task.cancel()
         }
@@ -128,6 +208,12 @@ public final class Transcription {
 
     public func setMetricsSession(_ sessionId: UUID?) {
         metricsSessionId = sessionId
+        observabilityEvent(
+            "metrics_session_set",
+            level: .debug,
+            sessionId: sessionId,
+            metadata: ["hasSession": sessionId == nil ? "false" : "true"]
+        )
     }
 
     private static func elapsedSeconds(since start: ContinuousClock.Instant) -> TimeInterval {

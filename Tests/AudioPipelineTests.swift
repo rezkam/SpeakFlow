@@ -1499,6 +1499,23 @@ struct EventHandlingTests {
         #expect(col.utteranceEndCount == 0)
     }
 
+    @MainActor @Test func testDefaultThresholdKeepsShortFinalProvisionalUntilExpanded() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+
+        #expect(c.minimumFinalWordCount == Config.defaultStreamingMinimumFinalWordCount)
+
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "much", confidence: 0.9, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(transcript: "much higher", confidence: 0.95, words: [])))
+
+        #expect(col.entries.count == 2)
+        #expect(col.entries[0].isFinal == false, "Short non-terminal final should stay provisional")
+        #expect(col.entries[1].isFinal == true)
+        #expect(col.screenText == "much higher ",
+                "Expanded final should replace the provisional word instead of duplicating it")
+    }
+
     @MainActor @Test func testShortPunctuatedNonSpeechFinalStillCommits() {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
@@ -1640,6 +1657,7 @@ struct EventHandlingTests {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
         col.wire(c)
+        c.minimumFinalWordCount = 1
 
         // Deepgram corrects mid-word
         c.handleEvent(.interim(TranscriptionResult(transcript: "recognise", confidence: 0.7, words: [])))

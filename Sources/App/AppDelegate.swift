@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let recording = RecordingController.shared
         let permissions = PermissionController.shared
+        configureObservabilityForCurrentSettings()
 
         if isUITestMode {
             Logger.permissions.info("UI test mode enabled; skipping startup permission prompts")
@@ -160,6 +161,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Termination
 
     func applicationWillTerminate(_ notification: Notification) {
+        Task {
+            await ObservabilityStore.shared.record(
+                component: "App",
+                name: "app_terminate",
+                level: .info
+            )
+        }
         RecordingController.shared.shutdown()
         AuthController.shared.shutdown()
         PermissionController.shared.shutdown()
@@ -168,6 +176,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Statistics.shared.flushIfDirty()
         if let observer = windowCloseObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func configureObservabilityForCurrentSettings() {
+        let settings = Settings.shared
+        let providerId = ProviderSettings.shared.activeProviderId
+        let mode = ProviderRegistry.shared.provider(for: providerId)?.mode.rawValue ?? "unknown"
+        let hotkey = HotkeySettings.shared.currentHotkey.rawValue
+        let captureSettings = settings.observabilityCaptureSettingsSnapshot
+
+        Task {
+            await ObservabilityStore.shared.applyConfiguration(
+                enabled: settings.observabilityEnabled,
+                verbosity: settings.observabilityVerbosity,
+                captureSettingsSnapshot: captureSettings,
+                captureSystemContext: settings.observabilityCaptureSystemContext,
+                captureTextPayloads: settings.observabilityCaptureTextPayloads
+            )
+
+            await ObservabilityStore.shared.record(
+                component: "App",
+                name: "app_launch",
+                level: .info,
+                metadata: [
+                    "activeProviderId": providerId,
+                    "activeProviderMode": mode,
+                    "hotkey": hotkey,
+                    "uiTestMode": isUITestMode ? "true" : "false"
+                ]
+            )
+
+            guard captureSettings else { return }
+            await ObservabilityStore.shared.recordSettingsSnapshot(
+                sessionId: nil,
+                settings: [
+                    "provider.activeId": providerId,
+                    "provider.activeMode": mode,
+                    "hotkey.current": hotkey,
+                    "streaming.autoEndEnabled": settings.streamingAutoEndEnabled ? "true" : "false",
+                    "streaming.keepAliveEnabled": settings.streamingKeepAliveEnabled ? "true" : "false",
+                    "streaming.keepAliveInterval": String(settings.streamingKeepAliveInterval),
+                    "streaming.reconnectEnabled": settings.streamingReconnectEnabled ? "true" : "false",
+                    "streaming.minimumFinalWordCount": String(settings.streamingMinimumFinalWordCount),
+                    "streaming.trailingFinalTimeout": String(settings.streamingTrailingFinalTimeout),
+                    "observability.captureTextPayloads": settings.observabilityCaptureTextPayloads ? "true" : "false",
+                    "batch.chunkDuration": String(settings.chunkDuration.rawValue),
+                    "batch.skipSilentChunks": settings.skipSilentChunks ? "true" : "false",
+                    "batch.finalizationTimeoutBase": String(settings.batchFinalizationTimeoutBase),
+                    "batch.finalizationTimeoutPerChunkSecond": String(settings.batchFinalizationTimeoutPerChunkSecond),
+                    "batch.finalizationMaxTimeout": String(settings.batchFinalizationMaxTimeout),
+                    "vad.enabled": settings.vadEnabled ? "true" : "false",
+                    "vad.threshold": String(settings.vadThreshold),
+                    "autoEnd.enabled": settings.autoEndEnabled ? "true" : "false",
+                    "autoEnd.silenceDuration": String(settings.autoEndSilenceDuration),
+                    "behavior.focusWaitTimeout": String(settings.focusWaitTimeout)
+                ]
+            )
         }
     }
 

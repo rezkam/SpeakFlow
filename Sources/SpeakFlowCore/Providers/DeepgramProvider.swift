@@ -120,6 +120,8 @@ public actor DeepgramStreamingSession: StreamingSession {
     private let _events: AsyncStream<TranscriptionEvent>
     private var isConnected = false
     private var receiveTask: Task<Void, Never>?
+    private var observabilitySessionId: UUID?
+    private var messageSequence: UInt64 = 0
 #if DEBUG
     private var testDidInvalidateURLSession = false
 #endif
@@ -138,6 +140,10 @@ public actor DeepgramStreamingSession: StreamingSession {
             continuation = c
         }
         self.eventContinuation = continuation
+    }
+
+    public func setObservabilitySessionId(_ sessionId: UUID?) {
+        observabilitySessionId = sessionId
     }
 
     func connect() async throws {
@@ -207,6 +213,43 @@ public actor DeepgramStreamingSession: StreamingSession {
 
     // MARK: - Private
 
+    private func observabilityEvent(
+        _ name: String,
+        level: ObservabilityEventLevel = .debug,
+        metadata: @autoclosure () -> [String: String] = [:]
+    ) {
+        let payload = metadata()
+        let sessionId = observabilitySessionId
+        Task {
+            await ObservabilityStore.shared.record(
+                component: "DeepgramSession",
+                name: name,
+                level: level,
+                sessionId: sessionId,
+                metadata: payload
+            )
+        }
+    }
+
+    private func nextMessageSequence() -> UInt64 {
+        messageSequence &+= 1
+        return messageSequence
+    }
+
+    private func metadataForTranscript(_ text: String) -> [String: String] {
+        [
+            "transcriptChars": String(text.count),
+            "transcriptWords": String(text.split(whereSeparator: \.isWhitespace).count),
+            "transcriptFingerprint": ObservabilityFingerprint.sha256(text)
+        ]
+    }
+
+    private static func extractMessageType(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = object["type"] as? String else { return nil }
+        return type
+    }
+
     func buildURL() -> URL {
         var components = URLComponents()
         components.scheme = "wss"
@@ -263,14 +306,25 @@ public actor DeepgramStreamingSession: StreamingSession {
 
     func parseMessage(_ json: String) {
         guard let data = json.data(using: .utf8) else { return }
+        let observedSequence = nextMessageSequence()
+        let hintedType = Self.extractMessageType(from: data) ?? "unknown"
 
         do {
             let msg = try JSONDecoder().decode(DeepgramMessage.self, from: data)
 
             switch msg.type {
             case "Results":
-                guard let channel = msg.channel,
-                      let alt = channel.alternatives.first else { return }
+                guard let channel = msg.channel?.alternatives,
+                      let alt = channel.first else { return }
+                observabilityEvent(
+                    "provider_message",
+                    metadata: [
+                        "providerMessageSequence": String(observedSequence),
+                        "messageType": msg.type,
+                        "isFinal": msg.isFinal == true ? "true" : "false",
+                        "speechFinal": msg.speechFinal == true ? "true" : "false"
+                    ].merging(metadataForTranscript(alt.transcript), uniquingKeysWith: { _, new in new })
+                )
 
                 let words = alt.words?.map { w in
                     WordInfo(word: w.punctuatedWord ?? w.word, start: w.start, end: w.end, confidence: w.confidence)
@@ -299,24 +353,63 @@ public actor DeepgramStreamingSession: StreamingSession {
                 }
 
             case "UtteranceEnd":
+                observabilityEvent(
+                    "provider_message",
+                    metadata: [
+                        "providerMessageSequence": String(observedSequence),
+                        "messageType": msg.type,
+                        "lastWordEnd": String(format: "%.3f", msg.lastWordEnd ?? 0)
+                    ]
+                )
                 let lastWordEnd = msg.lastWordEnd ?? 0
                 eventContinuation?.yield(.utteranceEnd(lastWordEnd: lastWordEnd))
                 logger.info("UtteranceEnd at \(String(format: "%.2f", lastWordEnd))s")
 
             case "SpeechStarted":
+                observabilityEvent(
+                    "provider_message",
+                    metadata: [
+                        "providerMessageSequence": String(observedSequence),
+                        "messageType": msg.type,
+                        "timestamp": String(format: "%.3f", msg.timestamp ?? 0)
+                    ]
+                )
                 let timestamp = msg.timestamp ?? 0
                 eventContinuation?.yield(.speechStarted(timestamp: timestamp))
                 logger.debug("SpeechStarted at \(String(format: "%.2f", timestamp))s")
 
             case "Metadata":
+                observabilityEvent(
+                    "provider_message",
+                    metadata: [
+                        "providerMessageSequence": String(observedSequence),
+                        "messageType": msg.type,
+                        "requestId": msg.requestId ?? "unknown"
+                    ]
+                )
                 let requestId = msg.requestId ?? "unknown"
                 eventContinuation?.yield(.metadata(requestId: requestId))
                 logger.info("Session metadata: requestId=\(requestId, privacy: .public)")
 
             default:
+                observabilityEvent(
+                    "provider_message",
+                    metadata: [
+                        "providerMessageSequence": String(observedSequence),
+                        "messageType": msg.type
+                    ]
+                )
                 logger.debug("Unknown message type: \(msg.type, privacy: .public)")
             }
         } catch {
+            var metadata: [String: String] = [
+                "providerMessageSequence": String(observedSequence),
+                "messageType": hintedType,
+                "payloadChars": String(json.count),
+                "payloadFingerprint": ObservabilityFingerprint.sha256(json),
+                "error": error.localizedDescription
+            ]
+            observabilityEvent("provider_message_parse_failed", level: .error, metadata: metadata)
             logger.error("Failed to parse message: \(error.localizedDescription)")
         }
     }
@@ -352,7 +445,7 @@ public actor DeepgramStreamingSession: StreamingSession {
 private struct DeepgramMessage: Decodable {
     let type: String
     // Results fields
-    let channel: DeepgramChannel?
+    let channel: DeepgramChannelPayload?
     let isFinal: Bool?
     let speechFinal: Bool?
     let start: Double?
@@ -374,6 +467,35 @@ private struct DeepgramMessage: Decodable {
         case requestId = "request_id"
         case transactionKey = "transaction_key"
         case lastWordEnd = "last_word_end"
+    }
+}
+
+private enum DeepgramChannelPayload: Decodable {
+    case alternatives(DeepgramChannel)
+    case indexes([Int])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let channel = try? container.decode(DeepgramChannel.self) {
+            self = .alternatives(channel)
+            return
+        }
+        if let indexes = try? container.decode([Int].self) {
+            self = .indexes(indexes)
+            return
+        }
+        throw DecodingError.typeMismatch(
+            DeepgramChannelPayload.self,
+            DecodingError.Context(
+                codingPath: decoder.codingPath,
+                debugDescription: "Expected channel object or channel index array"
+            )
+        )
+    }
+
+    var alternatives: [DeepgramAlternative]? {
+        guard case .alternatives(let channel) = self else { return nil }
+        return channel.alternatives
     }
 }
 

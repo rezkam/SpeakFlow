@@ -56,6 +56,22 @@ public enum Config {
     /// If chunks arrive faster than text can be typed, older insertions are dropped
     public static let maxQueuedTextInsertions: Int = 10
 
+    // MARK: - Observability
+    /// Master switch for structured observability event capture.
+    public static let observabilityEnabled: Bool = true
+    /// Default event verbosity for structured observability events.
+    public static let observabilityVerbosity: ObservabilityVerbosity = .standard
+    /// Include startup/session settings snapshots in observability events.
+    public static let observabilityCaptureSettingsSnapshot: Bool = true
+    /// Include one-time runtime/system context in observability events.
+    public static let observabilityCaptureSystemContext: Bool = true
+    /// Include raw transcript/keystroke payloads in observability events.
+    /// Off by default due sensitivity and log volume.
+    public static let observabilityCaptureTextPayloads: Bool = false
+    /// Default lexical word floor before a non-speechFinal streaming final commits.
+    /// Keeping this at 2 avoids one-word clause fragments being committed too early.
+    public static let defaultStreamingMinimumFinalWordCount: Int = 2
+
     // MARK: - VAD Settings
     /// Positive threshold for Silero VAD: probability ≥ this triggers speechStart.
     /// Lowered from 0.30 to 0.15 because real mic speech often registers 0.07-0.25
@@ -224,9 +240,18 @@ public final class Settings {
         public static let streamingKeepAliveInterval = "settings.streaming.keepAliveInterval"
         public static let streamingReconnectEnabled = "settings.streaming.reconnectEnabled"
         public static let streamingMinimumFinalWordCount = "settings.streaming.minimumFinalWordCount"
+        public static let streamingTrailingFinalTimeout = "settings.streaming.trailingFinalTimeout"
+        public static let batchFinalizationTimeoutBase = "settings.batch.finalizationTimeoutBase"
+        public static let batchFinalizationTimeoutPerChunkSecond = "settings.batch.finalizationTimeoutPerChunkSecond"
+        public static let batchFinalizationMaxTimeout = "settings.batch.finalizationMaxTimeout"
         public static let minSpeechRatio = "settings.minSpeechRatio"
         public static let focusWaitTimeout = "settings.focusWaitTimeout"
         public static let hotkeyRestartsRecording = "settings.hotkeyRestartsRecording"
+        public static let observabilityEnabled = "settings.observability.enabled"
+        public static let observabilityVerbosity = "settings.observability.verbosity"
+        public static let observabilityCaptureSettingsSnapshot = "settings.observability.captureSettingsSnapshot"
+        public static let observabilityCaptureSystemContext = "settings.observability.captureSystemContext"
+        public static let observabilityCaptureTextPayloads = "settings.observability.captureTextPayloads"
     }
 
     private let defaults: UserDefaults
@@ -629,6 +654,74 @@ public final class Settings {
         set { defaults.set(newValue, forKey: Keys.hotkeyRestartsRecording) }
     }
 
+    // MARK: - Observability
+
+    /// Master switch for observability event capture.
+    public var observabilityEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.observabilityEnabled) == nil {
+                return Config.observabilityEnabled
+            }
+            return defaults.bool(forKey: Keys.observabilityEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.observabilityEnabled)
+        }
+    }
+
+    /// Verbosity level for observability events.
+    public var observabilityVerbosity: ObservabilityVerbosity {
+        get {
+            guard let raw = defaults.string(forKey: Keys.observabilityVerbosity),
+                  let value = ObservabilityVerbosity(rawValue: raw) else {
+                return Config.observabilityVerbosity
+            }
+            return value
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.observabilityVerbosity)
+        }
+    }
+
+    /// Capture structured settings snapshots in observability logs.
+    public var observabilityCaptureSettingsSnapshot: Bool {
+        get {
+            if defaults.object(forKey: Keys.observabilityCaptureSettingsSnapshot) == nil {
+                return Config.observabilityCaptureSettingsSnapshot
+            }
+            return defaults.bool(forKey: Keys.observabilityCaptureSettingsSnapshot)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.observabilityCaptureSettingsSnapshot)
+        }
+    }
+
+    /// Capture one-time runtime/system context in observability logs.
+    public var observabilityCaptureSystemContext: Bool {
+        get {
+            if defaults.object(forKey: Keys.observabilityCaptureSystemContext) == nil {
+                return Config.observabilityCaptureSystemContext
+            }
+            return defaults.bool(forKey: Keys.observabilityCaptureSystemContext)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.observabilityCaptureSystemContext)
+        }
+    }
+
+    /// Include raw transcript/keystroke payloads in observability events.
+    public var observabilityCaptureTextPayloads: Bool {
+        get {
+            if defaults.object(forKey: Keys.observabilityCaptureTextPayloads) == nil {
+                return Config.observabilityCaptureTextPayloads
+            }
+            return defaults.bool(forKey: Keys.observabilityCaptureTextPayloads)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.observabilityCaptureTextPayloads)
+        }
+    }
+
     // MARK: - Streaming Auto-End
 
     /// Whether auto-end is enabled for streaming mode.
@@ -686,10 +779,63 @@ public final class Settings {
     public var streamingMinimumFinalWordCount: Int {
         get {
             let value = defaults.integer(forKey: Keys.streamingMinimumFinalWordCount)
-            return value > 0 ? value : 1
+            return value > 0 ? value : Config.defaultStreamingMinimumFinalWordCount
         }
         set {
             defaults.set(max(1, min(5, newValue)), forKey: Keys.streamingMinimumFinalWordCount)
+        }
+    }
+
+    /// Maximum seconds to wait for server trailing finals after stop-finalize in
+    /// streaming mode. Stop may finish earlier once trailing events go quiet.
+    /// Must be ≥ 0.1 s and ≤ 30 s.
+    public var streamingTrailingFinalTimeout: Double {
+        get {
+            let value = defaults.double(forKey: Keys.streamingTrailingFinalTimeout)
+            return value > 0 ? value : 2.0
+        }
+        set {
+            defaults.set(max(0.1, min(30.0, newValue)), forKey: Keys.streamingTrailingFinalTimeout)
+        }
+    }
+
+    /// Minimum wait floor for batch finalization (seconds). Must be ≥ 1 s.
+    public var batchFinalizationTimeoutBase: Double {
+        get {
+            let value = defaults.double(forKey: Keys.batchFinalizationTimeoutBase)
+            return value > 0 ? value : 10.0
+        }
+        set {
+            defaults.set(max(1.0, newValue), forKey: Keys.batchFinalizationTimeoutBase)
+        }
+    }
+
+    /// Extra wait seconds per second of max chunk audio for batch finalization. Must be ≥ 0.
+    ///
+    /// The getter uses `object(forKey:)` to distinguish "never written" (→ return default 2.0)
+    /// from "user explicitly set to 0" (→ return 0.0).  Using `double(forKey:) >= 0` would
+    /// always return 0.0 on fresh installs because `UserDefaults.double` returns 0.0 when
+    /// the key is absent, making `0.0 >= 0` evaluate to `true` and masking the default.
+    public var batchFinalizationTimeoutPerChunkSecond: Double {
+        get {
+            guard defaults.object(forKey: Keys.batchFinalizationTimeoutPerChunkSecond) != nil else {
+                return 2.0  // spec default: 2.0 s per second of chunk audio
+            }
+            return max(0.0, defaults.double(forKey: Keys.batchFinalizationTimeoutPerChunkSecond))
+        }
+        set {
+            defaults.set(max(0.0, newValue), forKey: Keys.batchFinalizationTimeoutPerChunkSecond)
+        }
+    }
+
+    /// Hard ceiling for batch finalization wait regardless of chunk size (seconds). Must be ≥ 10 s.
+    public var batchFinalizationMaxTimeout: Double {
+        get {
+            let value = defaults.double(forKey: Keys.batchFinalizationMaxTimeout)
+            return value > 0 ? value : 120.0
+        }
+        set {
+            defaults.set(max(10.0, newValue), forKey: Keys.batchFinalizationMaxTimeout)
         }
     }
 

@@ -61,7 +61,7 @@ final class AppState: BannerPresenting {
     var streamingKeepAliveEnabled = true
     var streamingKeepAliveInterval: Double = 8.0
     var streamingReconnectEnabled = true
-    var streamingMinimumFinalWordCount = 1
+    var streamingMinimumFinalWordCount = Config.defaultStreamingMinimumFinalWordCount
 
     // MARK: - Mistral Settings
     var mistralModel = "voxtral-mini-transcribe-realtime-2602"
@@ -74,6 +74,13 @@ final class AppState: BannerPresenting {
     // MARK: - Behavior
     var focusWaitTimeout: Double = 60.0
     var hotkeyRestartsRecording: Bool = true
+
+    // MARK: - Observability
+    var observabilityEnabled: Bool = Config.observabilityEnabled
+    var observabilityVerbosity: ObservabilityVerbosity = Config.observabilityVerbosity
+    var observabilityCaptureSettingsSnapshot: Bool = Config.observabilityCaptureSettingsSnapshot
+    var observabilityCaptureSystemContext: Bool = Config.observabilityCaptureSystemContext
+    var observabilityCaptureTextPayloads: Bool = Config.observabilityCaptureTextPayloads
 
     // MARK: - Recording
     var isRecording = false
@@ -207,6 +214,11 @@ final class AppState: BannerPresenting {
         mistralContextBias = Settings.shared.mistralContextBias
         focusWaitTimeout = Settings.shared.focusWaitTimeout
         hotkeyRestartsRecording = Settings.shared.hotkeyRestartsRecording
+        observabilityEnabled = Settings.shared.observabilityEnabled
+        observabilityVerbosity = Settings.shared.observabilityVerbosity
+        observabilityCaptureSettingsSnapshot = Settings.shared.observabilityCaptureSettingsSnapshot
+        observabilityCaptureSystemContext = Settings.shared.observabilityCaptureSystemContext
+        observabilityCaptureTextPayloads = Settings.shared.observabilityCaptureTextPayloads
     }
 
     init(providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared) {
