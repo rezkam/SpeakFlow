@@ -14,6 +14,10 @@ fi
 LOG_FILE="${SPEAKFLOW_REGRESSION_LOG_FILE:-$(mktemp /tmp/speakflow-regression-core-XXXXXX)}"
 : > "$LOG_FILE"
 
+OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-regression-$(date +%Y%m%d%H%M%S)-$$}"
+OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-/tmp/speakflow-observability-tests/$OBS_PROFILE}"
+mkdir -p "$OBS_DIR"
+
 SKIP_BUILD="${SPEAKFLOW_REGRESSION_SKIP_BUILD:-0}"
 STRESS_RUNS="${SPEAKFLOW_REGRESSION_STRESS_RUNS:-3}"
 SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-}"
@@ -44,6 +48,7 @@ REGRESSION_SUITES=(
   "TranscriptionTests"
   "StatisticsTests"
   "SessionMetricsStoreTests"
+  "ObservabilityTests"
   "AuthTests"
   "DeepgramSessionTests"
   "MistralSessionTests"
@@ -56,6 +61,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  SpeakFlow Main Feature Regression"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Log: $LOG_FILE"
+echo "Observability.... $OBS_DIR"
 if [[ -n "$SCRATCH_PATH" ]]; then
   echo "Scratch.......... $SCRATCH_PATH"
   mkdir -p "$SCRATCH_PATH"
@@ -75,7 +81,17 @@ run_suite() {
   local suite_log
   suite_log="$(mktemp /tmp/speakflow-reg-suite-XXXXXX)"
   local test_cmd
-  test_cmd=(env SPEAKFLOW_MUTE_SOUNDS=1 swift test --filter "$suite")
+  test_cmd=(
+    env
+    SPEAKFLOW_MUTE_SOUNDS=1
+    SPEAKFLOW_ISOLATE_TEST_AUDIO=1
+    SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE"
+    SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
+    swift
+    test
+    --filter
+    "$suite"
+  )
   if [[ "$SKIP_BUILD" == "1" ]]; then
     test_cmd+=(--skip-build)
   fi
@@ -110,7 +126,17 @@ done
 
 echo "Stress............. EnterSubmissionContractTests x$STRESS_RUNS"
 for ((i = 1; i <= STRESS_RUNS; i++)); do
-  stress_cmd=(env SPEAKFLOW_MUTE_SOUNDS=1 swift test --filter EnterSubmissionContractTests)
+  stress_cmd=(
+    env
+    SPEAKFLOW_MUTE_SOUNDS=1
+    SPEAKFLOW_ISOLATE_TEST_AUDIO=1
+    SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE"
+    SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
+    swift
+    test
+    --filter
+    EnterSubmissionContractTests
+  )
   if [[ "$SKIP_BUILD" == "1" ]]; then
     stress_cmd+=(--skip-build)
   fi

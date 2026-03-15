@@ -2,13 +2,22 @@ import Foundation
 
 // MARK: - Focused Settings Protocols
 
-/// Batch recording settings (chunk size, silence skipping).
+/// Batch recording settings (chunk size, silence skipping, and stop-finalization timeout).
 @MainActor
 public protocol BatchSettingsProviding: AnyObject {
     var chunkDuration: ChunkDuration { get set }
     var skipSilentChunks: Bool { get set }
     var maxChunkDuration: Double { get }
     var minChunkDuration: Double { get }
+    /// Floor for the adaptive batch finalization wait (seconds).
+    /// Combined with `batchFinalizationTimeoutPerChunkSecond * maxChunkDuration`
+    /// to give the total per-session deadline, capped by `batchFinalizationMaxTimeout`.
+    var batchFinalizationTimeoutBase: Double { get set }
+    /// Extra seconds of wait granted per second of max chunk audio.
+    /// E.g. 2.0 means a 30 s chunk gets 60 s of extra headroom beyond the base.
+    var batchFinalizationTimeoutPerChunkSecond: Double { get set }
+    /// Hard ceiling for the finalization wait regardless of chunk size (seconds).
+    var batchFinalizationMaxTimeout: Double { get set }
 }
 
 /// Streaming (Deepgram) session settings.
@@ -24,6 +33,9 @@ public protocol StreamingSettingsProviding: AnyObject {
     var streamingKeepAliveInterval: Double { get set }
     var streamingReconnectEnabled: Bool { get set }
     var streamingMinimumFinalWordCount: Int { get set }
+    /// Maximum seconds to wait for server-side trailing finals after the stop finalize
+    /// signal is sent. Trailing finals arriving during this window are typed normally.
+    var streamingTrailingFinalTimeout: Double { get set }
 }
 
 /// Mistral Voxtral settings (shared by realtime and batch providers).
@@ -83,9 +95,20 @@ public protocol BehaviorSettingsProviding: AnyObject {
     var hotkeyRestartsRecording: Bool { get set }
 }
 
+/// Observability settings (event capture + verbosity).
+@MainActor
+public protocol ObservabilitySettingsProviding: AnyObject {
+    var observabilityEnabled: Bool { get set }
+    var observabilityVerbosity: ObservabilityVerbosity { get set }
+    var observabilityCaptureSettingsSnapshot: Bool { get set }
+    var observabilityCaptureSystemContext: Bool { get set }
+    var observabilityCaptureTextPayloads: Bool { get set }
+}
+
 // MARK: - Composite Protocol
 
 /// Full settings surface — existing consumers continue to use this unchanged.
 @MainActor
 public protocol SettingsProviding: BatchSettingsProviding, StreamingSettingsProviding,
-    MistralSettingsProviding, VADSettingsProviding, BehaviorSettingsProviding {}
+    MistralSettingsProviding, VADSettingsProviding, BehaviorSettingsProviding,
+    ObservabilitySettingsProviding {}

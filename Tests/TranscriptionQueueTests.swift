@@ -1123,9 +1123,14 @@ struct TranscriptionQueueBridgeTests {
         await bridge.submitResult(ticket: s1t0, text: "hello")
         await bridge.submitResult(ticket: s1t2, text: "world")
         await bridge.submitResult(ticket: s1t1, text: "beautiful")
-        try? await Task.sleep(for: .milliseconds(100))
+        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+            texts.count == 3
+        }
         #expect(texts == ["hello", "beautiful", "world"])
         await bridge.checkCompletion()
+        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+            completions == 1
+        }
         #expect(completions == 1)
 
         // Reset for session 2
@@ -1137,9 +1142,14 @@ struct TranscriptionQueueBridgeTests {
         let s2t1 = await bridge.nextSequence()
         await bridge.markFailed(ticket: s2t0)
         await bridge.submitResult(ticket: s2t1, text: "recovered")
-        try? await Task.sleep(for: .milliseconds(100))
+        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+            texts.count == 1
+        }
         #expect(texts == ["recovered"])
         await bridge.checkCompletion()
+        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+            completions == 2
+        }
         #expect(completions == 2)
 
         bridge.stopListening()

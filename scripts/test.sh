@@ -20,6 +20,10 @@ else
     : > "$LOG_FILE"
 fi
 
+OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-test-$(date +%Y%m%d%H%M%S)-$$}"
+OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-/tmp/speakflow-observability-tests/$OBS_PROFILE}"
+mkdir -p "$OBS_DIR"
+
 FAILED=0
 FAILED_STEPS=()
 
@@ -43,7 +47,12 @@ if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 fi
 
-run_step "Swift tests......" env SPEAKFLOW_MUTE_SOUNDS=1 swift test
+run_step "Swift tests......" env \
+    SPEAKFLOW_MUTE_SOUNDS=1 \
+    SPEAKFLOW_ISOLATE_TEST_AUDIO=1 \
+    SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE" \
+    SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR" \
+    swift test
 
 if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -55,6 +64,7 @@ else
     echo "Status: FAILED (${FAILED_STEPS[*]})"
 fi
 echo "Log: $LOG_FILE"
+echo "Observability: $OBS_DIR"
 echo ""
 
 exit "$FAILED"

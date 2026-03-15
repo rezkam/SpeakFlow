@@ -72,6 +72,8 @@ public final class LiveStreamingController {
     // Interim text tracking for replacement
     private var lastInterimText = ""
     private var lastInterimCharCount = 0
+    private var transcriptionEventSequence: UInt64 = 0
+    private var lastTranscriptionEventAt: ContinuousClock.Instant?
 
     // Silence-based auto-end (server-side detection only, no local VAD)
     internal var silenceTimer: Task<Void, Never>?
@@ -112,7 +114,7 @@ public final class LiveStreamingController {
     /// Guard rails:
     /// - `speechFinal=true` always commits (utterance boundary).
     /// - Text with terminal punctuation commits even if short (e.g. "Yes.").
-    public var minimumFinalWordCount: Int = 1
+    public var minimumFinalWordCount: Int = Config.defaultStreamingMinimumFinalWordCount
 
     /// Stored provider reference for reconnection. Set when `start()` is called.
     internal var reconnectProvider: (any StreamingTranscriptionProvider)?
@@ -164,12 +166,43 @@ public final class LiveStreamingController {
     /// Called when silence auto-end timer fires (user silent for `autoEndSilenceDuration`).
     public var onAutoEnd: (() -> Void)?
 
+    /// Correlation ID propagated from RecordingController for observability.
+    public var sessionId: UUID?
+
     /// Strategies used to detect turn start. Default preserves current behavior.
     public var turnStartStrategies: [TurnStartStrategy] = [.providerSpeechStarted]
 
     private var hasStartedTurn = false
 
-    public init() {}
+    /// When `true`, `start()` skips all `AVAudioEngine` / CoreAudio setup so unit tests
+    /// never touch the real microphone, install audio taps, or consume mic permissions.
+    /// Passed in by `RecordingController` when `testMode == .live`.
+    private let skipAudioEngineForTesting: Bool
+
+    public init(skipAudioEngineForTesting: Bool = false) {
+        self.skipAudioEngineForTesting = skipAudioEngineForTesting
+    }
+
+    private func observabilityEvent(
+        _ name: String,
+        level: ObservabilityEventLevel = .info,
+        metadata: @autoclosure () -> [String: String] = [:]
+    ) {
+        let settings = Settings.shared
+        guard settings.observabilityEnabled,
+              settings.observabilityVerbosity.includes(level) else { return }
+        let sessionId = self.sessionId
+        let payload = metadata()
+        Task {
+            await ObservabilityStore.shared.record(
+                component: "LiveStreamingController",
+                name: name,
+                level: level,
+                sessionId: sessionId,
+                metadata: payload
+            )
+        }
+    }
 
     /// Thread-safe wrapper so the audio callback (which runs on the audio thread)
     /// can check if streaming is active and send audio without touching @MainActor state.
@@ -306,8 +339,18 @@ public final class LiveStreamingController {
     public func start(provider: StreamingTranscriptionProvider, config: StreamingSessionConfig = .default) async -> Bool {
         guard !isActive else {
             logger.warning("Already streaming")
+            observabilityEvent("start_rejected_already_active", level: .warning)
             return false
         }
+        observabilityEvent(
+            "start_requested",
+            metadata: [
+                "providerId": provider.id,
+                "sampleRate": String(config.sampleRate),
+                "encoding": config.encoding.rawValue,
+                "skipAudioEngineForTesting": skipAudioEngineForTesting ? "true" : "false"
+            ]
+        )
 
         // New session lifecycle begins; unexpected close callbacks are allowed again.
         suppressSessionClosedCallback = false
@@ -318,6 +361,11 @@ public final class LiveStreamingController {
         hasAttemptedReconnect = false
 
         do {
+            // --- Audio engine setup (skipped in unit tests) ---
+            // skipAudioEngineForTesting is set by RecordingController when testMode == .live
+            // so tests never touch the real microphone, install CoreAudio taps, or hold
+            // mic permissions.  All logic below this block runs in both paths.
+            if !skipAudioEngineForTesting {
             // Set up audio engine FIRST — synchronously, before any await.
             // AVAudioEngine / CoreAudio internally asserts on dispatch_get_main_queue().
             // After an await, Swift concurrency may resume on a cooperative thread pool
@@ -402,11 +450,15 @@ public final class LiveStreamingController {
 
             try engine.start()
             self.audioEngine = engine
+            } // end if !skipAudioEngineForTesting
 
             // NOW connect to provider (async WebSocket) — audio engine is already running
             // and buffered via sessionRef.isActive being false until we set it below.
             logger.info("Connecting to \(provider.displayName, privacy: .public)...")
             let streamSession = try await provider.startSession(config: config)
+            if let deepgramSession = streamSession as? DeepgramStreamingSession {
+                await deepgramSession.setObservabilitySessionId(self.sessionId)
+            }
             self.session = streamSession
 
             // Start listening to events
@@ -420,10 +472,16 @@ public final class LiveStreamingController {
             activateSession(streamSession)
 
             logger.info("Live streaming started: \(provider.displayName, privacy: .public), \(config.sampleRate)Hz, \(config.encoding.rawValue)")
+            observabilityEvent("start_succeeded", metadata: ["providerId": provider.id])
             return true
 
         } catch {
             logger.error("Failed to start streaming: \(error.localizedDescription)")
+            observabilityEvent(
+                "start_failed",
+                level: .error,
+                metadata: ["error": error.localizedDescription]
+            )
             onError?(error)
             await cleanup()
             return false
@@ -431,7 +489,11 @@ public final class LiveStreamingController {
     }
 
     /// Stop streaming: close mic, finalize and close provider session.
-    public func stop() async {
+    public func stop(trailingFinalTimeout: Double = 2.0) async {
+        observabilityEvent(
+            "stop_requested",
+            metadata: ["trailingFinalTimeout": String(format: "%.3f", trailingFinalTimeout)]
+        )
         // Explicit user action: suppress onSessionClosed for this shutdown path.
         suppressSessionClosedCallback = true
 
@@ -461,8 +523,9 @@ public final class LiveStreamingController {
         do { try await session?.finalize() }
         catch { logger.debug("Session finalize failed: \(error.localizedDescription)") }
 
-        // Wait briefly for final results after finalize
-        try? await Task.sleep(for: .seconds(2))
+        // Wait briefly for post-finalize trailing finals, but close early once
+        // transcription events have gone quiet.
+        await waitForTrailingFinals(maxWait: trailingFinalTimeout)
 
         // Close the WebSocket
         do { try await session?.close() }
@@ -475,13 +538,17 @@ public final class LiveStreamingController {
         // Clear interim state
         lastInterimText = ""
         lastInterimCharCount = 0
+        transcriptionEventSequence = 0
+        lastTranscriptionEventAt = nil
         hasSpeechOccurred = false
 
         logger.info("Live streaming stopped")
+        observabilityEvent("stop_completed")
     }
 
     /// Cancel without waiting for final results.
     public func cancel() async {
+        observabilityEvent("cancel_requested", level: .warning)
         // Explicit user action: suppress onSessionClosed for this shutdown path.
         suppressSessionClosedCallback = true
 
@@ -512,9 +579,52 @@ public final class LiveStreamingController {
         }
         lastInterimText = ""
         lastInterimCharCount = 0
+        transcriptionEventSequence = 0
+        lastTranscriptionEventAt = nil
         hasSpeechOccurred = false
 
         logger.info("Live streaming cancelled")
+        observabilityEvent("cancel_completed", level: .warning)
+    }
+
+    /// Wait for trailing transcription events after finalize.
+    /// Honors the full configured timeout when nothing new arrives, but closes
+    /// early once actual post-finalize transcription activity has gone quiet.
+    private func waitForTrailingFinals(maxWait: Double) async {
+        let boundedMaxWait = max(0.0, maxWait)
+        guard boundedMaxWait > 0 else { return }
+        observabilityEvent(
+            "trailing_finals_wait_start",
+            level: .debug,
+            metadata: ["maxWait": String(format: "%.3f", boundedMaxWait)]
+        )
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let deadline = start + .seconds(boundedMaxWait)
+        let sequenceAtFinalize = transcriptionEventSequence
+
+        // Once trailing events stop changing, close quickly.
+        let quietWindowSeconds = min(boundedMaxWait, 0.22)
+        let pollIntervalSeconds = min(boundedMaxWait, 0.02)
+
+        while clock.now < deadline {
+            if Task.isCancelled { break }
+
+            if transcriptionEventSequence != sequenceAtFinalize,
+               let lastEventAt = lastTranscriptionEventAt {
+                if clock.now >= lastEventAt + .seconds(quietWindowSeconds) {
+                    break
+                }
+            }
+
+            if pollIntervalSeconds > 0 {
+                try? await Task.sleep(for: .seconds(pollIntervalSeconds))
+            } else {
+                await Task.yield()
+            }
+        }
+        observabilityEvent("trailing_finals_wait_end", level: .debug)
     }
 
     // MARK: - Event Handling
@@ -527,6 +637,12 @@ public final class LiveStreamingController {
         switch event {
         case .interim(let result):
             guard !result.transcript.isEmpty else { return }
+            markTranscriptionActivity()
+            observabilityEvent(
+                "event_interim",
+                level: .debug,
+                metadata: ["characters": String(result.transcript.count)]
+            )
             let newText = result.transcript
 
             // Speech activity — cancel any silence timer
@@ -545,6 +661,14 @@ public final class LiveStreamingController {
             }
 
         case .finalResult(let result):
+            observabilityEvent(
+                "event_final",
+                level: .debug,
+                metadata: [
+                    "characters": String(result.transcript.count),
+                    "speechFinal": result.speechFinal ? "true" : "false"
+                ]
+            )
             if shouldTreatFinalAsInterim(result) {
                 logger.debug("Short non-terminal final treated as interim: '\(result.transcript, privacy: .private(mask: .hash))'")
                 let downgraded = TranscriptionResult(
@@ -560,6 +684,7 @@ public final class LiveStreamingController {
                 return
             }
 
+            markTranscriptionActivity()
             let newText = result.transcript
             let previousInterimCount = lastInterimCharCount
 
@@ -601,6 +726,7 @@ public final class LiveStreamingController {
 
         case .utteranceEnd:
             logger.info("UtteranceEnd — user stopped speaking")
+            observabilityEvent("event_utterance_end", level: .debug)
             onUtteranceEnd?()
             startSilenceTimer()
             resetTurnStartState()
@@ -609,14 +735,21 @@ public final class LiveStreamingController {
             // Speech resumed — cancel silence timer
             hasSpeechOccurred = true
             cancelSilenceTimer()
+            observabilityEvent("event_speech_started", level: .debug)
             onSpeechStarted?()
 
         case .error(let error):
             logger.error("Provider error: \(error.localizedDescription)")
+            observabilityEvent(
+                "event_error",
+                level: .error,
+                metadata: ["error": error.localizedDescription]
+            )
             onError?(error)
 
         case .closed:
             logger.info("Provider session closed")
+            observabilityEvent("event_closed")
             cancelSilenceTimer()
             cancelKeepAliveTimer()
             resetTurnStartState()
@@ -634,6 +767,7 @@ public final class LiveStreamingController {
                     hasAttemptedReconnect = true
                     isActive = false  // temporarily mark inactive during reconnect
                     logger.warning("WebSocket closed unexpectedly — attempting reconnection")
+                    observabilityEvent("reconnect_attempt_started", level: .warning)
 
                     // Store the reconnect task so stop()/cancel() can interrupt it.
                     // If cancelled, the task will exit early and NOT resume streaming.
@@ -667,6 +801,7 @@ public final class LiveStreamingController {
                         let success = await self.reconnect(provider: provider, config: config)
                         if success {
                             self.logger.info("Reconnection successful")
+                            self.observabilityEvent("reconnect_succeeded", level: .warning)
                             // hasAttemptedReconnect remains true — allows ONE retry per unexpected drop
                             // Reset it only on explicit stop/cancel so next unexpected drop also retries
                         } else if Task.isCancelled {
@@ -676,6 +811,7 @@ public final class LiveStreamingController {
                         } else {
                             // Genuine reconnection failure — surface to consumers.
                             self.logger.error("Reconnection failed — surfacing session closed")
+                            self.observabilityEvent("reconnect_failed", level: .error)
                             await self.cleanup()
 
                             // If user stop/cancel raced with reconnect failure, suppress callback.
@@ -688,6 +824,7 @@ public final class LiveStreamingController {
                     // No reconnection: explicit stop, or already tried, or reconnect disabled
                     if hasAttemptedReconnect {
                         logger.warning("Second close event after reconnect attempt — giving up")
+                        observabilityEvent("reconnect_exhausted", level: .error)
                     }
                     isActive = false
                     Task { @MainActor [weak self] in
@@ -827,6 +964,11 @@ public final class LiveStreamingController {
         return terminalPunctuation.contains(last)
     }
 
+    private func markTranscriptionActivity() {
+        transcriptionEventSequence &+= 1
+        lastTranscriptionEventAt = ContinuousClock.now
+    }
+
     // MARK: - Smart Diff
 
     /// Compare old and new text, find the common prefix, and return:
@@ -860,7 +1002,10 @@ public final class LiveStreamingController {
         audioSessionRef.set(session: streamSession, active: true)
         lastInterimText = ""
         lastInterimCharCount = 0
+        transcriptionEventSequence = 0
+        lastTranscriptionEventAt = nil
         startKeepAliveTimer()
+        observabilityEvent("session_activated", level: .debug)
     }
 
     // MARK: - KeepAlive timer
@@ -878,6 +1023,11 @@ public final class LiveStreamingController {
     private func startKeepAliveTimer() {
         guard keepAliveEnabled, keepAliveInterval > 0 else { return }
         cancelKeepAliveTimer()
+        observabilityEvent(
+            "keep_alive_timer_started",
+            level: .debug,
+            metadata: ["interval": String(format: "%.3f", keepAliveInterval)]
+        )
 
         let interval = keepAliveInterval
         keepAliveTask = Task { [weak self] in
@@ -891,11 +1041,17 @@ public final class LiveStreamingController {
                 do {
                     try await self.session?.keepAlive()
                     self.logger.debug("KeepAlive sent (interval=\(interval)s)")
+                    self.observabilityEvent("keep_alive_sent", level: .debug)
                     self.onKeepAliveSent?()
                 } catch {
                     // keepAlive failure is non-fatal — connection will drop on its own
                     // if the server has already closed, which triggers .closed event
                     self.logger.warning("KeepAlive send failed: \(error.localizedDescription)")
+                    self.observabilityEvent(
+                        "keep_alive_failed",
+                        level: .warning,
+                        metadata: ["error": error.localizedDescription]
+                    )
                 }
             }
         }
@@ -904,6 +1060,7 @@ public final class LiveStreamingController {
     private func cancelKeepAliveTimer() {
         keepAliveTask?.cancel()
         keepAliveTask = nil
+        observabilityEvent("keep_alive_timer_cancelled", level: .debug)
     }
 
     // MARK: - Reconnection
@@ -921,6 +1078,7 @@ public final class LiveStreamingController {
     private func reconnect(provider: any StreamingTranscriptionProvider, config: StreamingSessionConfig) async -> Bool {
         do {
             logger.info("Reconnecting to \(provider.displayName)...")
+            observabilityEvent("reconnect_attempt_connecting", level: .warning)
             let newSession = try await provider.startSession(config: config)
 
             // CRITICAL: Check for cancellation after the await returns.
@@ -952,6 +1110,11 @@ public final class LiveStreamingController {
             return true
         } catch {
             logger.error("Reconnection failed: \(error.localizedDescription)")
+            observabilityEvent(
+                "reconnect_attempt_failed",
+                level: .error,
+                metadata: ["error": error.localizedDescription]
+            )
             return false
         }
     }
@@ -959,6 +1122,7 @@ public final class LiveStreamingController {
     // MARK: - Cleanup helpers
 
     private func cleanup() async {
+        observabilityEvent("cleanup_full", level: .debug)
         cancelKeepAliveTimer()
         audioSessionRef.clear()
         audioEngine?.inputNode.removeTap(onBus: 0)
@@ -968,6 +1132,8 @@ public final class LiveStreamingController {
         eventTask?.cancel()
         eventTask = nil
         isActive = false
+        transcriptionEventSequence = 0
+        lastTranscriptionEventAt = nil
     }
 
     /// Clean up only the session (WebSocket) while keeping the audio engine running.
@@ -980,6 +1146,7 @@ public final class LiveStreamingController {
     /// during the reconnect window and doing unnecessary work.
     /// `activateSession()` re-arms the ref when the new session is ready.
     private func cleanupSessionOnly() async {
+        observabilityEvent("cleanup_session_only", level: .debug)
         cancelKeepAliveTimer()
         audioSessionRef.deactivatePreservingBuffer()
         do { try await session?.close() }
@@ -987,6 +1154,8 @@ public final class LiveStreamingController {
         session = nil
         eventTask?.cancel()
         eventTask = nil
+        transcriptionEventSequence = 0
+        lastTranscriptionEventAt = nil
     }
 }
 

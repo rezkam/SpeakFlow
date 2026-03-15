@@ -14,6 +14,8 @@ struct TextInserterFocusBehavioralTests {
         let providerSettings = SpyProviderSettings()
         let providerRegistry = SpyProviderRegistry()
         let settings = SpySettings()
+        // Zero trailing-final timeout so tests complete without a real network wait.
+        settings.streamingTrailingFinalTimeout = 0.0
 
         let mockSession = MockStreamingSession()
         let mockProvider = MockStreamingProvider()
@@ -62,6 +64,8 @@ struct TextInserterFocusBehavioralTests {
         // The final event should have produced at least one insertion
         #expect(ctx.textInserter.insertedTexts.count >= 1,
                 "Final transcription should produce at least one insertText call")
+        #expect(ctx.textInserter.replaceTailCallCount >= 1,
+                "Streaming updates must use atomic replaceTail path")
     }
 
     @MainActor @Test
@@ -119,8 +123,9 @@ struct TextInserterFocusBehavioralTests {
         // The internal Task awaits pending insertions then presses Enter.
         ctx.controller.stopRecordingAndSubmit()
 
-        // Allow the internal Task to settle (it awaits pendingTask then presses Enter)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // Allow the internal Task to settle (awaits controller.stop() then presses Enter).
+        // Uses waitUntil so the test is not coupled to any hardcoded sleep duration.
+        try await waitUntil(timeout: .seconds(3)) { ctx.textInserter.enterKeyPressed }
 
         #expect(ctx.textInserter.enterKeyPressed,
                 "pressEnterKey should be called after text insertions complete")
@@ -520,6 +525,28 @@ struct TextInserterPidFocusTests {
 @Suite("TextInserter Queue Guard")
 struct TextInserterQueueGuardTests {
     @MainActor @Test
+    func replaceTailQueuesDeleteAndInsertAtomically() {
+        let inserter = TextInserter.shared
+        inserter.cancelAndReset()
+        defer {
+            inserter._testIsTargetFrontmost = nil
+            inserter.cancelAndReset()
+        }
+
+        // Keep the first queued task blocked so queue depth is stable for assertion.
+        inserter.targetElement = AXUIElementCreateSystemWide()
+        inserter.targetPid = NSRunningApplication.current.processIdentifier
+        inserter._testIsTargetFrontmost = false
+
+        inserter.replaceTail(replacingChars: 2, with: "abc")
+
+        #expect(
+            inserter._testQueuedInsertionCount == 1,
+            "replaceTail should enqueue delete+insert as one atomic queue operation"
+        )
+    }
+
+    @MainActor @Test
     func deleteCharsRespectsQueueCap() {
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
@@ -533,6 +560,31 @@ struct TextInserterQueueGuardTests {
         #expect(
             inserter._testQueuedInsertionCount == Config.maxQueuedTextInsertions,
             "deleteChars must honor maxQueuedTextInsertions just like insertText"
+        )
+    }
+
+    @MainActor @Test
+    func replaceTailRespectsQueueCap() {
+        let inserter = TextInserter.shared
+        inserter.cancelAndReset()
+        defer {
+            inserter._testIsTargetFrontmost = nil
+            inserter.cancelAndReset()
+        }
+
+        // Keep queued work pending so cap checks are observable.
+        inserter.targetElement = AXUIElementCreateSystemWide()
+        inserter.targetPid = NSRunningApplication.current.processIdentifier
+        inserter._testIsTargetFrontmost = false
+
+        let attempts = Config.maxQueuedTextInsertions + 25
+        for _ in 0..<attempts {
+            inserter.replaceTail(replacingChars: 1, with: "x")
+        }
+
+        #expect(
+            inserter._testQueuedInsertionCount == Config.maxQueuedTextInsertions,
+            "replaceTail must honor maxQueuedTextInsertions"
         )
     }
 }

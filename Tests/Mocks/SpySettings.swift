@@ -35,7 +35,11 @@ final class SpySettings: SettingsProviding {
     var streamingKeepAliveEnabled: Bool = true
     var streamingKeepAliveInterval: Double = 8.0
     var streamingReconnectEnabled: Bool = true
-    var streamingMinimumFinalWordCount: Int = 1
+    var streamingMinimumFinalWordCount: Int = Config.defaultStreamingMinimumFinalWordCount
+    var streamingTrailingFinalTimeout: Double = 2.0
+    var batchFinalizationTimeoutBase: Double = 10.0
+    var batchFinalizationTimeoutPerChunkSecond: Double = 2.0
+    var batchFinalizationMaxTimeout: Double = 120.0
     var deepgramInterimResults: Bool = true
     var deepgramSmartFormat: Bool = true
     var deepgramEndpointingMs: Int = 300
@@ -49,6 +53,11 @@ final class SpySettings: SettingsProviding {
     var mistralContextBias: String = ""
     var focusWaitTimeout: Double = 60.0
     var hotkeyRestartsRecording: Bool = true
+    var observabilityEnabled: Bool = true
+    var observabilityVerbosity: ObservabilityVerbosity = .standard
+    var observabilityCaptureSettingsSnapshot: Bool = true
+    var observabilityCaptureSystemContext: Bool = true
+    var observabilityCaptureTextPayloads: Bool = false
     var maxChunkDuration: Double { chunkDuration.rawValue }
     var minChunkDuration: Double { chunkDuration.minDuration }
 }

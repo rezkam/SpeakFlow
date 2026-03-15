@@ -154,19 +154,43 @@ struct StreamingStopContractTests {
         }
     }
 
-    /// Stop should not block for the full configured trailing-final timeout when
-    /// no trailing events arrive after finalize.
-    /// The early-exit grace window is min(trailingFinalTimeout, 0.35s), so even
-    /// under heavy parallel-test load the stop must complete well before the full
-    /// 10 s timeout. Threshold is 3.0 s to absorb MainActor scheduling jitter
-    /// while still proving that early-exit fires rather than the full timeout.
+    /// If no trailing events arrive after finalize, stop must honor the full
+    /// configured timeout instead of closing after a fixed short grace window.
     @MainActor @Test
-    func stopReturnsEarlyWhenNoTrailingEventsArrive() async throws {
-        let (controller, _, _, _) = makeStreamingContext(trailingFinalTimeout: 10.0)
+    func stopHonorsConfiguredTimeoutWhenNoTrailingEventsArrive() async throws {
+        let (controller, _, _, _) = makeStreamingContext(trailingFinalTimeout: 0.6)
         let startedAt = ContinuousClock.now
 
         controller.stopRecording(reason: .hotkey)
-        try await waitUntil(timeout: .seconds(8)) { !controller.isProcessingFinal }
+        try await waitUntil(timeout: .seconds(3)) { !controller.isProcessingFinal }
+
+        let elapsed = startedAt.duration(to: ContinuousClock.now)
+        let elapsedSeconds =
+            Double(elapsed.components.seconds) +
+            (Double(elapsed.components.attoseconds) / 1_000_000_000_000_000_000.0)
+
+        #expect(
+            elapsedSeconds >= 0.45,
+            "Stop should honor the configured trailing-final timeout when no events arrive; elapsed \(elapsedSeconds)s"
+        )
+    }
+
+    /// Once a real trailing event arrives after finalize, stop may close early
+    /// after that activity has gone quiet.
+    @MainActor @Test
+    func stopReturnsEarlyAfterTrailingEventQuietsDown() async throws {
+        let (controller, lsc, _, _) = makeStreamingContext(trailingFinalTimeout: 10.0)
+        let startedAt = ContinuousClock.now
+
+        controller.stopRecording(reason: .hotkey)
+        try await Task.sleep(for: .milliseconds(100))
+        lsc.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "finished now",
+            confidence: 0.99,
+            words: [],
+            speechFinal: true
+        )))
+        try await waitUntil(timeout: .seconds(3)) { !controller.isProcessingFinal }
 
         let elapsed = startedAt.duration(to: ContinuousClock.now)
         let elapsedSeconds =
@@ -175,7 +199,7 @@ struct StreamingStopContractTests {
 
         #expect(
             elapsedSeconds < 3.0,
-            "Stop should close soon after finalize quiets; elapsed \(elapsedSeconds)s"
+            "Stop should close after trailing activity quiets instead of waiting the full timeout; elapsed \(elapsedSeconds)s"
         )
     }
 

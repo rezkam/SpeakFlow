@@ -13,7 +13,8 @@ import Testing
 func makeTestRecordingController(
     providerSettings: SpyProviderSettings = SpyProviderSettings(),
     providerRegistry: SpyProviderRegistry = SpyProviderRegistry(),
-    settings: SpySettings = SpySettings()
+    settings: SpySettings = SpySettings(),
+    transcription: SpyTranscription = SpyTranscription()
 ) -> (RecordingController, SpyKeyInterceptor, SpyTextInserter, SpyBannerPresenter) {
     SoundEffect.isMuted = true
     let ki = SpyKeyInterceptor()
@@ -22,9 +23,12 @@ func makeTestRecordingController(
     let c = RecordingController(
         keyInterceptor: ki, textInserter: ti, appState: bp,
         providerSettings: providerSettings, providerRegistry: providerRegistry,
-        settings: settings
+        settings: settings, transcription: transcription
     )
     c.testMode = .live
+    // Mirror AppDelegate: wire transcription callbacks so onAllComplete
+    // and onTextReady behave correctly in tests.
+    c.setupTranscriptionCallbacks()
     return (c, ki, ti, bp)
 }
 

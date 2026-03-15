@@ -71,6 +71,42 @@ struct GeneralSettingsView: View {
                 """)
             }
 
+            Section {
+                Toggle("Enable Structured Observability", isOn: state.binding(for: \.observabilityEnabled))
+
+                if state.observabilityEnabled {
+                    Picker("Verbosity", selection: state.binding(for: \.observabilityVerbosity)) {
+                        ForEach(ObservabilityVerbosity.allCases, id: \.self) { verbosity in
+                            Text(verbosityLabel(verbosity)).tag(verbosity)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Toggle(
+                        "Capture Settings Snapshots",
+                        isOn: state.binding(for: \.observabilityCaptureSettingsSnapshot)
+                    )
+                    Toggle(
+                        "Capture Runtime Context",
+                        isOn: state.binding(for: \.observabilityCaptureSystemContext)
+                    )
+                    Toggle(
+                        "Capture Transcript and Keystroke Payloads",
+                        isOn: state.binding(for: \.observabilityCaptureTextPayloads)
+                    )
+                }
+            } header: {
+                Text("Observability")
+            } footer: {
+                Text(
+                    """
+                    Structured diagnostics are written as JSONL events to:
+                    \(ObservabilityStore.defaultPathInfo.eventsFile.path)
+                    Enable payload capture only while actively debugging typing/order issues.
+                    """
+                )
+            }
+
             Section("System") {
                 Toggle("Launch at Login", isOn: launchAtLoginBinding)
             }
@@ -98,6 +134,17 @@ struct GeneralSettingsView: View {
         if mins > 0 && secs > 0 { return "\(mins)m \(secs)s" }
         if mins > 0 { return "\(mins)m" }
         return "\(secs)s"
+    }
+
+    private func verbosityLabel(_ value: ObservabilityVerbosity) -> String {
+        switch value {
+        case .minimal:
+            return "Minimal (warnings/errors)"
+        case .standard:
+            return "Standard (default)"
+        case .verbose:
+            return "Verbose (debug detail)"
+        }
     }
 
     private var launchAtLoginBinding: Binding<Bool> {

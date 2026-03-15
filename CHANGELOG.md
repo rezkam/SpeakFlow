@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.3 — Structured Observability & Reliability
+
+### Features
+
+* **Structured observability** — SpeakFlow now writes a structured JSONL event log to `~/.speakflow/observability/app/events.jsonl`. Every meaningful moment in the recording lifecycle — session start/stop, provider messages, text insertions, focus changes, errors — is recorded as a correlated, timestamped event. A new `observability-session-timeline.py` script renders a readable per-session timeline from the log. Observability settings (verbosity, payload capture, snapshots) are exposed in General Settings under a new *Observability* section.
+
+* **Atomic tail replacement** — Streaming interim corrections now use a new `replaceTail(replacingChars:with:)` operation that queues the delete and re-type as a single atomic item. Previously, under queue pressure the deletion could be accepted while the matching insertion was dropped (or vice versa), corrupting the correction order mid-dictation. This is now impossible.
+
+* **Adaptive batch finalization timeout** — Batch-mode finalization no longer uses a fixed retry loop. The deadline is now computed as `clamp(base + maxChunkDuration × perChunkFactor, _, maxTimeout)`, so short recordings finish faster and long ones get proportionally more time. The queue's `onAllComplete` callback also triggers an immediate fast-path completion when all chunks resolve naturally, with no polling wait.
+
+### Bug Fixes
+
+* **Streaming recorder test isolation** — `StreamingRecorder` and `LiveStreamingController` now detect the test runtime via `SPEAKFLOW_ISOLATE_TEST_AUDIO` and skip all `AVAudioEngine` / CoreAudio setup in that context. Tests no longer risk touching the real microphone or consuming audio permissions.
+
+* **Streaming minimum final word count** — Default raised from 1 to 2 words before a non-`speechFinal` streaming result commits. Eliminates premature commits of single-word clause fragments during fast speech.
+
+---
+
 ## 0.7.2 — Focus Fix & UI Polish
 
 ### Bug Fixes

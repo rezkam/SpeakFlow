@@ -134,7 +134,7 @@ struct DeepgramParseMessageTests {
     func parseMessage_utteranceEnd_emitsEvent() async {
         let session = makeSession()
         let json = """
-        {"type":"UtteranceEnd","last_word_end":2.5}
+        {"type":"UtteranceEnd","channel":[0],"last_word_end":2.5}
         """
 
         let eventTask = Task {
@@ -190,7 +190,7 @@ struct DeepgramParseMessageTests {
     func parseMessage_speechStarted_emitsEvent() async {
         let session = makeSession()
         let json = """
-        {"type":"SpeechStarted","timestamp":1.23}
+        {"type":"SpeechStarted","channel":[0],"timestamp":1.23}
         """
 
         let eventTask = Task {

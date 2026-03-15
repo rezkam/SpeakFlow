@@ -107,8 +107,51 @@ final class TextInserter: TextInserting {
     /// Number of operations currently queued.
     /// Bounded by `Config.maxQueuedTextInsertions` to prevent unbounded memory growth.
     private var queuedInsertionCount = 0
+    /// Monotonic operation sequence used to correlate queued text actions.
+    private var operationSequence: UInt64 = 0
+    private var observabilitySessionId: UUID?
 
     private init() {}
+
+    private func observabilityEvent(
+        _ name: String,
+        level: ObservabilityEventLevel = .debug,
+        metadata: @autoclosure () -> [String: String] = [:]
+    ) {
+        let settings = Settings.shared
+        guard settings.observabilityEnabled,
+              settings.observabilityVerbosity.includes(level) else { return }
+        let payload = metadata()
+        Task {
+            await ObservabilityStore.shared.record(
+                component: "TextInserter",
+                name: name,
+                level: level,
+                sessionId: self.observabilitySessionId,
+                metadata: payload
+            )
+        }
+    }
+
+    private func nextOperationId() -> UInt64 {
+        operationSequence &+= 1
+        return operationSequence
+    }
+
+    private func metadataForTextPayload(_ text: String) -> [String: String] {
+        var metadata: [String: String] = [
+            "textChars": String(text.count),
+            "textFingerprint": ObservabilityFingerprint.sha256(text)
+        ]
+        if Settings.shared.observabilityCaptureTextPayloads {
+            metadata["text"] = text
+        }
+        return metadata
+    }
+
+    func setObservabilitySessionId(_ sessionId: UUID?) {
+        observabilitySessionId = sessionId
+    }
 
     // MARK: - Target Capture
 
@@ -160,6 +203,58 @@ final class TextInserter: TextInserting {
 
     // MARK: - Text Operations
 
+    /// Queues an atomic tail replacement (delete then type) as a single queue item.
+    ///
+    /// This prevents split queue-drop behavior where deletion is accepted but the
+    /// matching insertion is dropped under queue pressure (or vice versa), which can
+    /// corrupt streaming interim correction order.
+    func replaceTail(replacingChars: Int, with text: String) {
+        let textToInsert = sanitizeTextForInsertion(text)
+        guard replacingChars > 0 || !textToInsert.isEmpty else { return }
+        let operationId = nextOperationId()
+        guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
+            observabilityEvent(
+                "replace_tail_dropped_queue_full",
+                level: .warning,
+                metadata: [
+                    "operationId": String(operationId),
+                    "queuedInsertionCount": String(queuedInsertionCount)
+                ]
+            )
+            return
+        }
+        observabilityEvent(
+            "replace_tail_queued",
+            metadata: [
+                "operationId": String(operationId),
+                "replacingChars": String(replacingChars),
+                "queueDepthBefore": String(queuedInsertionCount)
+            ]
+            .merging(metadataForTextPayload(textToInsert), uniquingKeysWith: { _, new in new })
+        )
+
+        queuedInsertionCount += 1
+        let previousTask = textInsertionTask
+
+        textInsertionTask = Task { [weak self] in
+            defer {
+                Task { @MainActor in
+                    self?.queuedInsertionCount -= 1
+                }
+            }
+            await previousTask?.value
+            guard let self else { return }
+
+            if replacingChars > 0 {
+                let deleted = await self.deleteCharsAsync(replacingChars, operationId: operationId)
+                guard deleted else { return }
+            }
+            if !textToInsert.isEmpty {
+                await self.typeTextAsync(textToInsert, operationId: operationId)
+            }
+        }
+    }
+
     /// Queues text for insertion into the focused element.
     ///
     /// The text is sanitized to allow only letters, numbers, punctuation, symbols,
@@ -175,22 +270,33 @@ final class TextInserter: TextInserting {
     /// - Parameter text: The transcribed text to insert. Will be sanitized and truncated
     ///   if longer than `maxTextInsertionLength`.
     func insertText(_ text: String) {
-        // Sanitize: only allow safe printable characters and whitespace
-        let sanitized = text.filter {
-            $0.isLetter || $0.isNumber || $0.isPunctuation ||
-            $0.isSymbol || $0.isWhitespace || $0 == "\n" || $0 == "\t"
-        }
-
-        // Truncate to safety limit if needed
-        let textToInsert = sanitized.count > Self.maxTextInsertionLength
-            ? String(sanitized.prefix(Self.maxTextInsertionLength))
-            : sanitized
+        let textToInsert = sanitizeTextForInsertion(text)
+        let operationId = nextOperationId()
 
         // Ignore empty text or if queue is full
-        guard !textToInsert.isEmpty, queuedInsertionCount < Config.maxQueuedTextInsertions else {
+        guard !textToInsert.isEmpty else {
+            return
+        }
+        guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
+            observabilityEvent(
+                "insert_text_dropped_queue_full",
+                level: .warning,
+                metadata: [
+                    "operationId": String(operationId),
+                    "queuedInsertionCount": String(queuedInsertionCount)
+                ]
+            )
             return
         }
 
+        observabilityEvent(
+            "insert_text_queued",
+            metadata: [
+                "operationId": String(operationId),
+                "queueDepthBefore": String(queuedInsertionCount)
+            ]
+            .merging(metadataForTextPayload(textToInsert), uniquingKeysWith: { _, new in new })
+        )
         queuedInsertionCount += 1
         let previousTask = textInsertionTask
 
@@ -202,7 +308,7 @@ final class TextInserter: TextInserting {
                 }
             }
             await previousTask?.value
-            await self?.typeTextAsync(textToInsert)
+            await self?.typeTextAsync(textToInsert, operationId: operationId)
         }
     }
 
@@ -218,8 +324,28 @@ final class TextInserter: TextInserting {
     ///
     /// - Parameter count: Number of characters to delete. Must be > 0.
     func deleteChars(_ count: Int) {
-        guard count > 0, queuedInsertionCount < Config.maxQueuedTextInsertions else { return }
+        guard count > 0 else { return }
+        let operationId = nextOperationId()
+        guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
+            observabilityEvent(
+                "delete_chars_dropped_queue_full",
+                level: .warning,
+                metadata: [
+                    "operationId": String(operationId),
+                    "queuedInsertionCount": String(queuedInsertionCount)
+                ]
+            )
+            return
+        }
 
+        observabilityEvent(
+            "delete_chars_queued",
+            metadata: [
+                "operationId": String(operationId),
+                "deleteCount": String(count),
+                "queueDepthBefore": String(queuedInsertionCount)
+            ]
+        )
         let previousTask = textInsertionTask
         queuedInsertionCount += 1
 
@@ -230,43 +356,7 @@ final class TextInserter: TextInserting {
                 }
             }
             await previousTask?.value
-
-            // Ensure the target element has focus before deleting
-            guard await self?.ensureTargetFocused() == true else { return }
-
-            guard let source = CGEventSource(stateID: .combinedSessionState) else {
-                return
-            }
-
-            // Send Delete key events one at a time
-            for _ in 0..<count {
-                // Check for cancellation between deletions
-                try? Task.checkCancellation()
-
-                // Re-check focus between deletions — if the user switched apps
-                // mid-stream, wait for return or timeout
-                guard await self?.ensureTargetFocused() == true else { return }
-
-                // Create key-down and key-up events for the Delete key
-                if let keyDown = CGEvent(
-                    keyboardEventSource: source,
-                    virtualKey: Self.deleteKeyCode,
-                    keyDown: true
-                ),
-                   let keyUp = CGEvent(
-                    keyboardEventSource: source,
-                    virtualKey: Self.deleteKeyCode,
-                    keyDown: false
-                ) {
-                    keyDown.post(tap: .cghidEventTap)
-                    keyUp.post(tap: .cghidEventTap)
-
-                    // Small delay to ensure the app processes the deletion
-                    try? await Task.sleep(
-                        nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000
-                    )
-                }
-            }
+            _ = await self?.deleteCharsAsync(count, operationId: operationId)
         }
     }
 
@@ -282,7 +372,15 @@ final class TextInserter: TextInserting {
     /// Note: Unlike `insertText(_:)` and `deleteChars(_:)`, this does not
     /// increment the queue count (not bounded by `maxQueuedTextInsertions`).
     func pressEnterKey() {
+        let operationId = nextOperationId()
         let previousTask = textInsertionTask
+        observabilityEvent(
+            "press_enter_queued",
+            metadata: [
+                "operationId": String(operationId),
+                "queueDepthBefore": String(queuedInsertionCount)
+            ]
+        )
 
         textInsertionTask = Task { [weak self] in
             await previousTask?.value
@@ -309,6 +407,10 @@ final class TextInserter: TextInserting {
             ) {
                 keyUp.post(tap: .cghidEventTap)
             }
+            self?.observabilityEvent(
+                "press_enter_emitted",
+                metadata: ["operationId": String(operationId)]
+            )
         }
     }
 
@@ -356,6 +458,77 @@ final class TextInserter: TextInserting {
 
     // MARK: - Private Helpers
 
+    private func sanitizeTextForInsertion(_ text: String) -> String {
+        // Sanitize: only allow safe printable characters and whitespace
+        let sanitized = text.filter {
+            $0.isLetter || $0.isNumber || $0.isPunctuation ||
+            $0.isSymbol || $0.isWhitespace || $0 == "\n" || $0 == "\t"
+        }
+
+        // Truncate to safety limit if needed
+        if sanitized.count > Self.maxTextInsertionLength {
+            return String(sanitized.prefix(Self.maxTextInsertionLength))
+        }
+        return sanitized
+    }
+
+    private func deleteCharsAsync(_ count: Int, operationId: UInt64) async -> Bool {
+        guard count > 0 else { return true }
+        observabilityEvent(
+            "delete_chars_started",
+            metadata: [
+                "operationId": String(operationId),
+                "deleteCount": String(count)
+            ]
+        )
+
+        // Ensure the target element has focus before deleting
+        guard await ensureTargetFocused() else { return false }
+
+        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+            return false
+        }
+
+        // Send Delete key events one at a time
+        for _ in 0..<count {
+            // Check for cancellation between deletions
+            try? Task.checkCancellation()
+            if Task.isCancelled { return false }
+
+            // Re-check focus between deletions — if the user switched apps
+            // mid-stream, wait for return or timeout
+            guard await ensureTargetFocused() else { return false }
+
+            // Create key-down and key-up events for the Delete key
+            if let keyDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: Self.deleteKeyCode,
+                keyDown: true
+            ),
+               let keyUp = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: Self.deleteKeyCode,
+                keyDown: false
+            ) {
+                keyDown.post(tap: .cghidEventTap)
+                keyUp.post(tap: .cghidEventTap)
+
+                // Small delay to ensure the app processes the deletion
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000
+                )
+            }
+        }
+        observabilityEvent(
+            "delete_chars_completed",
+            metadata: [
+                "operationId": String(operationId),
+                "deleteCount": String(count)
+            ]
+        )
+        return true
+    }
+
     /// Delay between focus checks while waiting for the user to return (200ms).
     private static let focusWaitInterval: UInt64 = 200_000_000
 
@@ -391,12 +564,20 @@ final class TextInserter: TextInserting {
         let startTime = ContinuousClock.now
 
         Logger.audio.info("Target app lost focus — waiting up to \(timeout)s for user to return")
+        observabilityEvent(
+            "focus_lost_waiting",
+            metadata: [
+                "timeoutSeconds": String(timeout),
+                "targetPid": String(targetPid)
+            ]
+        )
 
         // Poll until focus returns, timeout expires, or the task is cancelled
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: Self.focusWaitInterval)
             if isTargetAppFrontmost() {
                 Logger.audio.info("Target app regained focus — resuming text insertion")
+                observabilityEvent("focus_regained", metadata: ["targetPid": String(targetPid)])
                 return true
             }
 
@@ -408,6 +589,14 @@ final class TextInserter: TextInserting {
             let elapsed = ContinuousClock.now - startTime
             if elapsed > .seconds(timeout) {
                 Logger.audio.warning("Focus wait timed out after \(timeout)s — discarding pending text")
+                observabilityEvent(
+                    "focus_wait_timeout",
+                    level: .warning,
+                    metadata: [
+                        "timeoutSeconds": String(timeout),
+                        "targetPid": String(targetPid)
+                    ]
+                )
                 return false
             }
         }
@@ -517,7 +706,14 @@ final class TextInserter: TextInserting {
     /// 4. Yields between batches so mouse/keyboard input and event taps stay responsive
     ///
     /// - Parameter text: The sanitized text to type. Should not contain control characters.
-    private func typeTextAsync(_ text: String) async {
+    private func typeTextAsync(_ text: String, operationId: UInt64) async {
+        observabilityEvent(
+            "type_text_started",
+            metadata: [
+                "operationId": String(operationId)
+            ]
+            .merging(metadataForTextPayload(text), uniquingKeysWith: { _, new in new })
+        )
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             return
         }
@@ -531,6 +727,8 @@ final class TextInserter: TextInserting {
         let chars = Array(text)
         var index = 0
         var typedSinceYield = 0
+        var batchIndex = 0
+        var currentBatch = ""
 
         while index < chars.count {
             do { try Task.checkCancellation() } catch { return }
@@ -583,17 +781,53 @@ final class TextInserter: TextInserting {
                 nanoseconds: UInt64(Self.keystrokeDelayMicroseconds) * 1000
             )
 
+            currentBatch.append(chars[index])
             index += 1
             typedSinceYield += 1
 
             // Yield between batches so the run-loop can process pending events
             if typedSinceYield >= Self.typingBatchSize {
                 typedSinceYield = 0
+                if !currentBatch.isEmpty {
+                    emitTypingBatch(
+                        operationId: operationId,
+                        batchIndex: batchIndex,
+                        text: currentBatch
+                    )
+                    batchIndex += 1
+                    currentBatch.removeAll(keepingCapacity: true)
+                }
                 if index < chars.count {
                     try? await Task.sleep(nanoseconds: 5_000_000) // 5ms yield
                 }
             }
         }
+
+        if !currentBatch.isEmpty {
+            emitTypingBatch(
+                operationId: operationId,
+                batchIndex: batchIndex,
+                text: currentBatch
+            )
+        }
+        observabilityEvent(
+            "type_text_completed",
+            metadata: [
+                "operationId": String(operationId),
+                "totalChars": String(text.count)
+            ]
+        )
+    }
+
+    private func emitTypingBatch(operationId: UInt64, batchIndex: Int, text: String) {
+        observabilityEvent(
+            "typing_batch_emitted",
+            metadata: [
+                "operationId": String(operationId),
+                "batchIndex": String(batchIndex)
+            ]
+            .merging(metadataForTextPayload(text), uniquingKeysWith: { _, new in new })
+        )
     }
 
     private static func currentHardwareModifierFlags() -> CGEventFlags {

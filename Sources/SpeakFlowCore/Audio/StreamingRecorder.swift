@@ -186,6 +186,10 @@ public final class StreamingRecorder {
     /// Flag to suppress final chunk emission on cancel
     private var isCancelled = false
 
+    /// In-flight async stop pipeline task (drain queue, emit final chunk, teardown).
+    /// Exposed via `waitForStopCompletion()` so callers can await final flush completion.
+    private var stopTask: Task<Void, Never>?
+
     /// Throttle for periodic diagnostic heartbeat (every ~2s)
     private var lastHeartbeatLog: Date = .distantPast
 
@@ -193,6 +197,52 @@ public final class StreamingRecorder {
 
     public init(settings: any SettingsProviding = Settings.shared) {
         self.settings = settings
+    }
+
+    private static func isTestRuntime() -> Bool {
+        Bundle.main.bundlePath.contains(".xctest")
+            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
+    }
+
+    private static func shouldIsolateTestAudioCapture() -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        let isolate = env["SPEAKFLOW_ISOLATE_TEST_AUDIO"] ?? "1"
+        let allowAudioEngine = env["SPEAKFLOW_ALLOW_TEST_AUDIO_ENGINE"] == "1"
+        return isTestRuntime() && isolate != "0" && !allowAudioEngine
+    }
+
+    private func observabilityEvent(
+        _ name: String,
+        level: ObservabilityEventLevel = .debug,
+        metadata: @autoclosure () -> [String: String] = [:]
+    ) {
+        guard settings.observabilityEnabled,
+              settings.observabilityVerbosity.includes(level) else { return }
+        let payload = metadata()
+        Task {
+            await ObservabilityStore.shared.record(
+                component: "StreamingRecorder",
+                name: name,
+                level: level,
+                metadata: payload
+            )
+        }
+    }
+
+    private func startTimers() {
+        // Timer to process queued samples on main actor
+        processingTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.processQueuedSamples()
+            }
+        }
+
+        // Timer for periodic chunk/auto-end checks
+        checkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.periodicCheck()
+            }
+        }
     }
 
     /// Update the transcript text used for thinking-pause detection.
@@ -214,32 +264,27 @@ public final class StreamingRecorder {
         stop()
     }
 
+    /// Wait for an in-flight stop pipeline to finish draining/enqueuing final audio.
+    ///
+    /// Used by `RecordingController` batch finalization to avoid racing completion
+    /// before the recorder has had a chance to enqueue its final chunk.
+    public func waitForStopCompletion() async {
+        await stopTask?.value
+    }
+
     /// Start recording audio.
     /// Returns `true` if the audio engine started successfully, `false` on failure.
     /// On failure, all state is rolled back (engine, buffer, flags cleaned up).
     @discardableResult
     public func start() async -> Bool {
         sessionStartDate = Date()
-        audioEngine = AVAudioEngine()
-        guard let engine = audioEngine else { return false }
-
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-        guard let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            Logger.audio.error("Failed to create output audio format")
-            audioEngine = nil
-            return false
-        }
-        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            Logger.audio.error("Failed to create audio converter")
-            audioEngine = nil
-            return false
-        }
+        observabilityEvent(
+            "start_requested",
+            metadata: [
+                "skipSilentChunks": settings.skipSilentChunks ? "true" : "false",
+                "chunkDuration": String(settings.chunkDuration.rawValue)
+            ]
+        )
 
         audioBuffer = AudioBuffer(sampleRate: sampleRate)
         state.setRecording(true)
@@ -266,6 +311,40 @@ public final class StreamingRecorder {
             turnClassifier = nil
             audioEngine = nil
             audioBuffer = nil
+            return false
+        }
+
+        if Self.shouldIsolateTestAudioCapture() {
+            Logger.audio.info("Test runtime detected — starting recorder without audio engine")
+            observabilityEvent(
+                "start_succeeded_test_isolated",
+                level: .warning,
+                metadata: ["reason": "test_runtime_audio_isolation"]
+            )
+            startTimers()
+            return true
+        }
+
+        audioEngine = AVAudioEngine()
+        guard let engine = audioEngine else { return false }
+
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            Logger.audio.error("Failed to create output audio format")
+            observabilityEvent("start_failed_output_format", level: .error)
+            audioEngine = nil
+            return false
+        }
+        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            Logger.audio.error("Failed to create audio converter")
+            observabilityEvent("start_failed_converter", level: .error)
+            audioEngine = nil
             return false
         }
 
@@ -297,23 +376,22 @@ public final class StreamingRecorder {
             } else {
                 Logger.audio.info("Recording started (min \(settings.minChunkDuration)s, max \(settings.maxChunkDuration)s chunks)")
             }
-
-            // Timer to process queued samples on main actor
-            processingTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    await self?.processQueuedSamples()
-                }
-            }
-
-            // Timer for periodic chunk/auto-end checks
-            checkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    await self?.periodicCheck()
-                }
-            }
+            observabilityEvent(
+                "start_succeeded",
+                metadata: [
+                    "isFullRecording": isFullRecording ? "true" : "false",
+                    "maxChunkDuration": String(settings.maxChunkDuration)
+                ]
+            )
+            startTimers()
             return true
         } catch {
             Logger.audio.error("Failed to start audio engine: \(error.localizedDescription)")
+            observabilityEvent(
+                "start_failed_audio_engine",
+                level: .error,
+                metadata: ["error": error.localizedDescription]
+            )
             // Rollback all state on failure
             engine.inputNode.removeTap(onBus: 0)
             audioEngine = nil
@@ -700,6 +778,7 @@ public final class StreamingRecorder {
     }
 
     public func stop() {
+        observabilityEvent("stop_requested")
         checkTimer?.invalidate()
         checkTimer = nil
         processingTimer?.invalidate()
@@ -719,7 +798,7 @@ public final class StreamingRecorder {
         let wasCancelled = isCancelled
         isCancelled = false
 
-        Task { [self] in
+        let stopTask = Task { [self] in
             await filter?.stop()
             idleNudgeController = nil
             turnClassifier = nil
@@ -730,6 +809,10 @@ public final class StreamingRecorder {
             let pendingSamples = self.sampleQueue.dequeueAll()
             if !pendingSamples.isEmpty {
                 Logger.audio.debug("Flushing \(pendingSamples.count) pending sample batches on stop")
+                self.observabilityEvent(
+                    "stop_flush_pending_samples",
+                    metadata: ["pendingBatches": String(pendingSamples.count)]
+                )
             }
             for sample in pendingSamples {
                 await buffer.append(frames: sample)
@@ -743,6 +826,11 @@ public final class StreamingRecorder {
 
             guard !wasCancelled else {
                 Logger.audio.info("Recording cancelled, discarding \(String(format: "%.1f", duration))s of audio")
+                self.observabilityEvent(
+                    "stop_cancelled_discard",
+                    level: .warning,
+                    metadata: ["durationSeconds": String(format: "%.3f", duration)]
+                )
                 return
             }
 
@@ -779,18 +867,45 @@ public final class StreamingRecorder {
             if shouldSend {
                 Logger.audio.info("Final chunk: \(String(format: "%.1f", duration))s, speech=\(String(format: "%.0f", speechProbability * 100))%")
                 let wavData = self.createWav(from: finalSamples)
+                self.observabilityEvent(
+                    "stop_final_chunk_sent",
+                    metadata: [
+                        "durationSeconds": String(format: "%.3f", duration),
+                        "speechProbability": String(format: "%.3f", speechProbability),
+                        "bytes": String(wavData.count)
+                    ]
+                )
                 let chunk = AudioChunk(wavData: wavData, durationSeconds: duration, speechProbability: speechProbability)
                 await MainActor.run {
                     self.onChunkReady?(chunk)
                 }
             } else if duration < minDuration {
                 Logger.audio.debug("Recording too short (\(String(format: "%.2f", duration))s < \(String(format: "%.2f", minDuration))s)")
+                self.observabilityEvent(
+                    "stop_final_chunk_skipped_too_short",
+                    level: .warning,
+                    metadata: [
+                        "durationSeconds": String(format: "%.3f", duration),
+                        "minDuration": String(format: "%.3f", minDuration)
+                    ]
+                )
             } else if !hasEnoughSpeech && skipSilentChunks {
                 // Log when chunk is skipped due to low speech - helps diagnose VAD issues
                 Logger.audio.warning("Final chunk SKIPPED: duration=\(String(format: "%.1f", duration))s, speech=\(String(format: "%.0f", speechProbability * 100))% < \(String(format: "%.0f", skipThreshold * 100))% threshold (vadActive=\(hadVADActive), skipSilentChunks=true)")
+                self.observabilityEvent(
+                    "stop_final_chunk_skipped_low_speech",
+                    level: .warning,
+                    metadata: [
+                        "durationSeconds": String(format: "%.3f", duration),
+                        "speechProbability": String(format: "%.3f", speechProbability),
+                        "skipThreshold": String(format: "%.3f", skipThreshold)
+                    ]
+                )
             }
             Logger.audio.info("Recording stopped")
+            self.observabilityEvent("stop_completed")
         }
+        self.stopTask = stopTask
     }
 
     /// Encode PCM Float32 samples as a WAV file.

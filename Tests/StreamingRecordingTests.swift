@@ -30,6 +30,9 @@ struct StreamingRecordingTests {
         let providerRegistry = SpyProviderRegistry()
         let settings = SpySettings()
 
+        // Zero trailing-final timeout so stop tasks complete without a real wait.
+        settings.streamingTrailingFinalTimeout = 0.0
+
         let mockSession = MockStreamingSession()
         let mockProvider = MockStreamingProvider()
         mockProvider.isConfigured = providerConfigured
@@ -126,6 +129,44 @@ struct StreamingRecordingTests {
 
         #expect(ctx.controller.fullTranscript.contains("hello world"),
                 "Full transcript should accumulate final text")
+    }
+
+    @MainActor @Test
+    func streamingRecording_trailingFinalCountsTowardSessionMetrics() async throws {
+        let ctx = makeController()
+        ctx.controller.startRecording()
+
+        guard let sessionId = ctx.controller._testCurrentMetricsSessionId else {
+            Issue.record("Metrics session was not started")
+            return
+        }
+        guard let lsc = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created")
+            return
+        }
+
+        ctx.controller.stopRecording(reason: .hotkey)
+        lsc.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "much higher",
+            confidence: 0.99,
+            words: [],
+            speechFinal: true
+        )))
+
+        try await waitUntil(timeout: .seconds(5)) { !ctx.controller.isProcessingFinal }
+        try await waitUntilAsync(timeout: .seconds(5), interval: .milliseconds(20)) {
+            let completed = await SessionMetricsStore.shared.recentCompletedSessions(limit: 50)
+            return completed.contains(where: { $0.sessionId == sessionId })
+        }
+
+        let completed = await SessionMetricsStore.shared.recentCompletedSessions(limit: 50)
+        guard let metrics = completed.last(where: { $0.sessionId == sessionId }) else {
+            Issue.record("Completed metrics session not found")
+            return
+        }
+
+        #expect(metrics.wordsProduced == 2, "Trailing final words must be counted before session end")
+        #expect(metrics.endReason == RecordingController.StopReason.hotkey.rawValue)
     }
 
     // MARK: - Stop / Cancel

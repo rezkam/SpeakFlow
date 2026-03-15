@@ -6,6 +6,7 @@ import Testing
 final class SpyTextInserter: TextInserting {
     enum Operation: Equatable {
         case captureTarget
+        case replaceTail(replacingChars: Int, text: String)
         case insertText(String)
         case deleteChars(Int)
         case pressEnterKey
@@ -21,8 +22,14 @@ final class SpyTextInserter: TextInserting {
     var enterKeyPressed = false
     var cancelCalled = false
     var resetCalled = false
+    var replaceTailCallCount = 0
     var pendingTask: Task<Void, Never>?
     var operations: [Operation] = []
+    var observabilitySessionId: UUID?
+
+    func setObservabilitySessionId(_ sessionId: UUID?) {
+        observabilitySessionId = sessionId
+    }
 
     func captureTarget() {
         captureTargetCalled = true
@@ -32,6 +39,17 @@ final class SpyTextInserter: TextInserting {
     func insertText(_ text: String) {
         insertedTexts.append(text)
         operations.append(.insertText(text))
+    }
+
+    func replaceTail(replacingChars: Int, with text: String) {
+        replaceTailCallCount += 1
+        operations.append(.replaceTail(replacingChars: replacingChars, text: text))
+        if replacingChars > 0 {
+            deleteChars(replacingChars)
+        }
+        if !text.isEmpty {
+            insertText(text)
+        }
     }
 
     func deleteChars(_ count: Int) {
