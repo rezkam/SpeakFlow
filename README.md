@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" width="128" height="128" alt="SpeakFlow">
+  <img src="Sources/Resources/logo.png" width="128" height="128" alt="SpeakFlow">
 </p>
 
 <h1 align="center">SpeakFlow</h1>
