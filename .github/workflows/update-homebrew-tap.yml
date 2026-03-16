@@ -1,0 +1,137 @@
+name: Update Homebrew Tap
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate tag format
+        id: validate_tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Tag $TAG matches vX.Y.Z"
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Tag '$TAG' does not match vX.Y.Z — skipping tap update"
+          fi
+
+      - name: Extract version from tag
+        if: steps.validate_tag.outputs.valid == 'true'
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "📦 Version: $VERSION"
+          echo "🏷️  Tag: $TAG"
+
+      - name: Download DMG and calculate SHA256
+        if: steps.validate_tag.outputs.valid == 'true'
+        id: dmg
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          DMG_URL="https://github.com/$REPO/releases/download/$TAG/SpeakFlow.dmg"
+          echo "dmg_url=$DMG_URL" >> "$GITHUB_OUTPUT"
+          echo "🔗 DMG URL: $DMG_URL"
+
+          echo "📥 Downloading DMG and calculating SHA256..."
+          SHA256=""
+          for i in {1..5}; do
+            if curl -fsSL "$DMG_URL" -o /tmp/SpeakFlow.dmg 2>/dev/null; then
+              SHA256=$(shasum -a 256 /tmp/SpeakFlow.dmg | awk '{print $1}')
+              echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+              echo "🔐 SHA256: $SHA256"
+              rm -f /tmp/SpeakFlow.dmg
+              break
+            fi
+            echo "⚠️  Retry $i/5 — waiting for release asset to be available..."
+            sleep 10
+          done
+
+          if [ -z "$SHA256" ]; then
+            echo "❌ Failed to download DMG after 5 retries"
+            exit 1
+          fi
+
+      - name: Checkout tap repository
+        if: steps.validate_tag.outputs.valid == 'true'
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: rezkam/homebrew-speakflow
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap-repo
+
+      - name: Update cask in tap repository
+        if: steps.validate_tag.outputs.valid == 'true'
+        run: |
+          CASK_FILE="tap-repo/Casks/speakflow.rb"
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.dmg.outputs.sha256 }}"
+
+          echo "📝 Updating cask..."
+
+          sed -i "s@^  version \"[^\"]*\"@  version \"$VERSION\"@" "$CASK_FILE"
+          sed -i "s@^  sha256 \"[^\"]*\"@  sha256 \"$SHA256\"@" "$CASK_FILE"
+
+          echo "🔍 Verifying cask updates..."
+          if ! grep -q "^  version \"$VERSION\"" "$CASK_FILE"; then
+            echo "❌ Failed to update version in cask"
+            exit 1
+          fi
+          if ! grep -q "^  sha256 \"$SHA256\"" "$CASK_FILE"; then
+            echo "❌ Failed to update sha256 in cask"
+            exit 1
+          fi
+
+          echo "✅ Cask updated:"
+          echo "   Version: $VERSION"
+          echo "   SHA256:  $SHA256"
+
+      - name: Commit and push to tap repository
+        if: steps.validate_tag.outputs.valid == 'true'
+        working-directory: tap-repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/speakflow.rb
+          if git diff --staged --quiet; then
+            echo "ℹ️  No changes to commit"
+          else
+            git commit -m "Update cask to version ${{ steps.version.outputs.version }}" \
+              -m "Auto-generated from rezkam/SpeakFlow@${{ steps.version.outputs.tag }}"
+            git push
+            echo "✅ Cask pushed to homebrew-speakflow"
+          fi
+
+      - name: Release summary
+        if: steps.validate_tag.outputs.valid == 'true'
+        run: |
+          echo "## 🎉 Homebrew tap updated to ${{ steps.version.outputs.tag }}!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**SHA256:** \`${{ steps.dmg.outputs.sha256 }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**DMG:** [SpeakFlow.dmg](${{ steps.dmg.outputs.dmg_url }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Installation" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "brew tap rezkam/speakflow" >> $GITHUB_STEP_SUMMARY
+          echo "brew install --cask speakflow" >> $GITHUB_STEP_SUMMARY
+          echo "# or upgrade:" >> $GITHUB_STEP_SUMMARY
+          echo "brew upgrade --cask speakflow" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Tap updated at [rezkam/homebrew-speakflow](https://github.com/rezkam/homebrew-speakflow)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Skip summary
+        if: steps.validate_tag.outputs.valid != 'true'
+        run: |
+          echo "Tag ${GITHUB_REF#refs/tags/} does not match vX.Y.Z — tap update skipped."
