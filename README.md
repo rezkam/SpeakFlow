@@ -48,7 +48,26 @@ SpeakFlow supports four transcription modes across three providers. Switch betwe
 
 ## Installation
 
-### From DMG (recommended)
+### Homebrew (recommended)
+
+```sh
+brew tap rezkam/speakflow
+brew install --cask speakflow
+```
+
+To update to the latest version:
+
+```sh
+brew upgrade --cask speakflow
+```
+
+To uninstall:
+
+```sh
+brew uninstall --cask speakflow
+```
+
+### From DMG
 
 1. Download `SpeakFlow.dmg` from the [Releases](https://github.com/rezkam/SpeakFlow/releases) page
 2. Open the DMG and drag SpeakFlow to Applications
@@ -64,7 +83,7 @@ cd SpeakFlow
 swift build -c release --product SpeakFlow
 
 # Or build the full .app bundle + DMG:
-bash scripts/build-release.sh 0.1.0
+bash scripts/build-release.sh rc
 ```
 
 Requires **macOS 15+** and **Swift 6.1+** (Xcode 16.4 or later).

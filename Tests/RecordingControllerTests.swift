@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
@@ -209,4 +210,129 @@ struct RecordingControllerStateSyncTests {
         controller.isProcessingFinal = false
         #expect(!banner.isProcessingFinal, "Clearing isProcessingFinal should sync to appState")
     }
+}
+
+// MARK: - Error banner & batch provider dispatch tests
+
+@Suite("RecordingController — Error Banners & Batch Provider Dispatch")
+@MainActor
+struct RecordingControllerErrorBannerTests {
+
+    @Test
+    func onChunkErrorShowsErrorBanner() {
+        let (controller, _, _, banner) = makeTestRecordingController()
+        controller.transcription.queueBridge.onChunkError?(
+            TranscriptionError.httpError(statusCode: 403, body: "Forbidden")
+        )
+        #expect(banner.bannerMessages.count == 1, "Error banner must appear on chunk failure")
+        #expect(banner.bannerMessages.first?.1 == .error, "Banner style must be .error")
+    }
+
+    @Test
+    func onChunkErrorBannerMessageContainsActionableText() {
+        let providerSettings = SpyProviderSettings()
+        providerSettings.activeProviderId = ProviderId.chatGPT
+        let (controller, _, _, banner) = makeTestRecordingController(providerSettings: providerSettings)
+
+        controller.transcription.queueBridge.onChunkError?(
+            TranscriptionError.httpError(statusCode: 403, body: "Forbidden")
+        )
+
+        let message = banner.bannerMessages.first?.0 ?? ""
+        #expect(message.localizedCaseInsensitiveContains("ChatGPT"),
+                "Auth error for ChatGPT must mention ChatGPT in the banner")
+        #expect(message.localizedCaseInsensitiveContains("re-login") ||
+                message.localizedCaseInsensitiveContains("expired"),
+                "Auth error must suggest re-login or mention expiry")
+    }
+
+    @Test
+    func successfulTranscriptionDismissesErrorBanner() {
+        let (controller, _, _, banner) = makeTestRecordingController()
+        // Fire an error first
+        controller.transcription.queueBridge.onChunkError?(
+            TranscriptionError.httpError(statusCode: 500, body: "err")
+        )
+        #expect(banner.bannerMessages.count == 1)
+
+        // Now simulate a successful text delivery
+        controller.transcription.queueBridge.onTextReady?("hello")
+        #expect(banner.dismissCount == 1,
+                "Successful transcription must dismiss the previous error banner")
+    }
+
+    @Test
+    func startBatchRecordingSetsBatchProviderOnTranscription() {
+        let providerSettings = SpyProviderSettings()
+        providerSettings.activeProviderId = ProviderId.mistralBatch
+        let registry = SpyProviderRegistry()
+        let mockProvider = MockBatchProvider()
+        mockProvider.isConfigured = true
+        registry.register(mockProvider)
+        let spyTranscription = SpyTranscription()
+        let (controller, _, _, _) = makeTestRecordingController(
+            providerSettings: providerSettings,
+            providerRegistry: registry,
+            transcription: spyTranscription
+        )
+
+        controller.startRecording()
+
+        #expect(spyTranscription.activeBatchProvider != nil,
+                "startBatchRecording must set activeBatchProvider on the transcription coordinator")
+    }
+
+    @Test
+    func userFacingMessageAuthChatGPT() {
+        let msg = RecordingController.userFacingMessage(
+            for: TranscriptionError.httpError(statusCode: 403, body: ""),
+            providerId: ProviderId.chatGPT
+        )
+        #expect(msg.localizedCaseInsensitiveContains("ChatGPT"))
+        #expect(msg.localizedCaseInsensitiveContains("re-login") ||
+                msg.localizedCaseInsensitiveContains("expired"))
+    }
+
+    @Test
+    func userFacingMessageAuthMistral() {
+        let msg = RecordingController.userFacingMessage(
+            for: TranscriptionError.httpError(statusCode: 401, body: ""),
+            providerId: ProviderId.mistral
+        )
+        #expect(msg.localizedCaseInsensitiveContains("Mistral"))
+        #expect(msg.localizedCaseInsensitiveContains("API key") ||
+                msg.localizedCaseInsensitiveContains("expired"))
+    }
+
+    @Test
+    func userFacingMessageRateLimited() {
+        let msg = RecordingController.userFacingMessage(
+            for: TranscriptionError.rateLimited(retryAfter: nil),
+            providerId: ProviderId.deepgram
+        )
+        #expect(msg.localizedCaseInsensitiveContains("rate limit") ||
+                msg.localizedCaseInsensitiveContains("wait"))
+    }
+
+    @Test
+    func userFacingMessageNetwork() {
+        let msg = RecordingController.userFacingMessage(
+            for: TranscriptionError.networkError(underlying: URLError(.notConnectedToInternet)),
+            providerId: ProviderId.mistral
+        )
+        #expect(msg.localizedCaseInsensitiveContains("network") ||
+                msg.localizedCaseInsensitiveContains("internet"))
+    }
+}
+
+// MARK: - Mock batch provider for tests
+
+private final class MockBatchProvider: BatchTranscriptionProvider, @unchecked Sendable {
+    let id = ProviderId.mistralBatch
+    let displayName = "Mock Batch"
+    let mode: ProviderMode = .batch
+    let authRequirement: ProviderAuthRequirement = .apiKey(providerId: ProviderId.mistralBatch)
+    var isConfigured = false
+    func transcribe(audio: Data) async throws -> String { "" }
+    func validateAPIKey(_ key: String) async -> String? { nil }
 }

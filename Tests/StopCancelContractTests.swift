@@ -9,7 +9,7 @@ import Testing
 
 /// Covers §3.3.2 (hotkey stop streaming), §3.3.3 (Enter stop streaming),
 /// and §3.3.1 (Escape cancel) for the streaming (real-time) model.
-@Suite("RecordingController — Streaming Stop/Cancel Contract")
+@Suite("RecordingController — Streaming Stop/Cancel Contract", .serialized)
 struct StreamingStopContractTests {
 
     // MARK: Helpers
@@ -179,7 +179,7 @@ struct StreamingStopContractTests {
     /// after that activity has gone quiet.
     @MainActor @Test
     func stopReturnsEarlyAfterTrailingEventQuietsDown() async throws {
-        let (controller, lsc, _, _) = makeStreamingContext(trailingFinalTimeout: 10.0)
+        let (controller, lsc, _, _) = makeStreamingContext(trailingFinalTimeout: 60.0)
         let startedAt = ContinuousClock.now
 
         controller.stopRecording(reason: .hotkey)
@@ -190,7 +190,10 @@ struct StreamingStopContractTests {
             words: [],
             speechFinal: true
         )))
-        try await waitUntil(timeout: .seconds(3)) { !controller.isProcessingFinal }
+        // waitUntil up to 30s — the quiet-window exit happens in ~0.22s under normal load;
+        // threshold of 20s is still far below the 60s full timeout, proving early-exit,
+        // while absorbing extreme MainActor scheduling jitter under heavy parallel tests.
+        try await waitUntil(timeout: .seconds(30)) { !controller.isProcessingFinal }
 
         let elapsed = startedAt.duration(to: ContinuousClock.now)
         let elapsedSeconds =
@@ -198,7 +201,7 @@ struct StreamingStopContractTests {
             (Double(elapsed.components.attoseconds) / 1_000_000_000_000_000_000.0)
 
         #expect(
-            elapsedSeconds < 3.0,
+            elapsedSeconds < 20.0,
             "Stop should close after trailing activity quiets instead of waiting the full timeout; elapsed \(elapsedSeconds)s"
         )
     }
