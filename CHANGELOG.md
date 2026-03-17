@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.4 — Error Banners & Batch Provider Fixes
+
+### Bug Fixes
+
+* **Batch provider dispatch** — Fixed a critical bug where batch recordings were always sent to the ChatGPT endpoint regardless of the user's selected provider. Mistral Batch now correctly routes audio to Mistral's transcription API.
+* **Transcription error banners** — When a transcription fails (due to an expired token, invalid API key, rate limit, or network error), SpeakFlow no longer just plays an error sound and silently fails. It now displays an actionable, user-friendly error banner explaining exactly what went wrong and how to fix it. These banners automatically dismiss upon the next successful transcription.
+
+### Documentation
+
+* **Homebrew installation** — Added official `brew tap` installation, upgrade, and uninstall instructions to the README.
+
+---
+
 ## 0.7.3 — Structured Observability & Reliability
 
 ### Features
