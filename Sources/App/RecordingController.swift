@@ -129,6 +129,8 @@ final class RecordingController {
             if self.isRecording || self.isProcessingFinal {
                 self.textInserter.insertText(text + " ")
             }
+            // Successful transcription — dismiss any previous error banner
+            self.appState.dismissBanner()
             // Update the VAD session controller for thinking-pause detection
             Task { [weak self] in
                 await self?.recorder?.updateTranscript(self?.fullTranscript ?? "")
@@ -140,6 +142,52 @@ final class RecordingController {
             // isProcessingFinal guard, so racing with the deadline task is safe.
             self?.observabilityEvent("batch_queue_all_complete", level: .debug)
             Task { @MainActor in await self?.completeBatchFinalization() }
+        }
+        transcription.queueBridge.onChunkError = { [weak self] error in
+            guard let self else { return }
+            let message = Self.userFacingMessage(for: error, providerId: self.providerSettings.activeProviderId)
+            self.observabilityEvent(
+                "transcription_error_banner_shown",
+                level: .warning,
+                metadata: [
+                    "errorKind": String(describing: TranscriptionErrorKind.classify(error)),
+                    "providerId": self.providerSettings.activeProviderId,
+                    "error": error.localizedDescription
+                ]
+            )
+            self.appState.showBanner(message, style: .error, duration: 8)
+        }
+    }
+
+    // MARK: - User-Facing Error Messages
+
+    /// Maps a transcription error to an actionable, user-friendly message.
+    static func userFacingMessage(for error: Error, providerId: String) -> String {
+        let kind = TranscriptionErrorKind.classify(error)
+        switch kind {
+        case .authentication:
+            if providerId == ProviderId.chatGPT {
+                return "Transcription failed — your ChatGPT session has expired. Please re-login in Accounts."
+            } else {
+                let name = providerDisplayName(for: providerId)
+                return "Transcription failed — your \(name) API key is invalid or expired. Check Accounts settings."
+            }
+        case .rateLimited:
+            return "Transcription rate limited — please wait a moment and try again."
+        case .network:
+            return "Transcription failed — network error. Check your internet connection."
+        case .other:
+            return "Transcription failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Human-readable provider name for error messages.
+    private static func providerDisplayName(for providerId: String) -> String {
+        switch providerId {
+        case ProviderId.deepgram: return "Deepgram"
+        case ProviderId.mistral, ProviderId.mistralBatch: return "Mistral"
+        case ProviderId.chatGPT: return "ChatGPT"
+        default: return providerId
         }
     }
 
@@ -247,16 +295,17 @@ final class RecordingController {
 
         if let streaming = provider as? any StreamingTranscriptionProvider {
             startStreamingRecording(provider: streaming)
-        } else if provider is any BatchTranscriptionProvider {
-            startBatchRecording()
+        } else if let batch = provider as? any BatchTranscriptionProvider {
+            startBatchRecording(provider: batch)
         }
         onStateChanged?()
     }
 
     // MARK: - Batch Recording
 
-    private func startBatchRecording() {
-        observabilityEvent("batch_recording_starting")
+    private func startBatchRecording(provider: any BatchTranscriptionProvider) {
+        transcription.setActiveBatchProvider(provider)
+        observabilityEvent("batch_recording_starting", metadata: ["providerId": provider.id])
         recorder = StreamingRecorder()
         recorder?.onChunkReady = { [weak self] chunk in
             Task { @MainActor in
@@ -628,6 +677,7 @@ final class RecordingController {
         lifecycleCoordinator.stop()
         isProcessingFinal = false
         hasCapturedSubmitEnter = false
+        transcription.setActiveBatchProvider(nil)
         observabilityEvent(
             "batch_finalization_completed",
             metadata: ["hadTranscript": fullTranscript.isEmpty ? "false" : "true"]

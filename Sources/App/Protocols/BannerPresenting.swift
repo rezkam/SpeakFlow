@@ -4,6 +4,7 @@
 @MainActor
 protocol BannerPresenting: AnyObject {
     func showBanner(_ message: String, style: AppState.BannerStyle, duration: Double)
+    func dismissBanner()
     func refresh()
     var isRecording: Bool { get set }
     var isProcessingFinal: Bool { get set }
