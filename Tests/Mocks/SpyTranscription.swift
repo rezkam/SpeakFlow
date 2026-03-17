@@ -7,6 +7,7 @@ final class SpyTranscription: TranscriptionCoordinating {
     let queueBridge = TranscriptionQueueBridge()
     var transcribeCalls: [(TranscriptionTicket, AudioChunk)] = []
     var cancelAllCount = 0
+    var activeBatchProvider: (any BatchTranscriptionProvider)?
 
     func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk) {
         transcribeCalls.append((ticket, chunk))
@@ -14,5 +15,9 @@ final class SpyTranscription: TranscriptionCoordinating {
 
     func cancelAll() {
         cancelAllCount += 1
+    }
+
+    func setActiveBatchProvider(_ provider: (any BatchTranscriptionProvider)?) {
+        activeBatchProvider = provider
     }
 }

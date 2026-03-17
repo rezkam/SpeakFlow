@@ -213,6 +213,9 @@ public final class TranscriptionQueueBridge {
 
     public var onTextReady: ((String) -> Void)?
     public var onAllComplete: (() -> Void)?
+    /// Called on the main actor when a chunk fails with a non-cancellation error.
+    /// The error is passed so the UI can show targeted guidance.
+    public var onChunkError: ((Error) -> Void)?
 
     public init() {}
 

@@ -10,6 +10,10 @@ public final class Transcription {
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
     private let statistics: any StatisticsProviding
     private let service: any TranscriptionServiceProviding
+    /// When set, batch transcription dispatches through this provider instead of the
+    /// default `service` (which is ChatGPT-only). Set by RecordingController at the
+    /// start of each batch session and cleared on stop/cancel.
+    private var activeBatchProvider: (any BatchTranscriptionProvider)?
     private var metricsSessionId: UUID?
 #if DEBUG
     private var testErrorSoundPlayCount = 0
@@ -96,7 +100,12 @@ public final class Transcription {
             let latencyStart = ContinuousClock.now
 
             do {
-                let text = try await service.transcribe(audio: chunk.wavData)
+                let text: String
+                if let batchProvider = self.activeBatchProvider {
+                    text = try await batchProvider.transcribe(audio: chunk.wavData)
+                } else {
+                    text = try await service.transcribe(audio: chunk.wavData)
+                }
                 let latencySeconds = Self.elapsedSeconds(since: latencyStart)
                 statistics.recordSTTLatency(seconds: latencySeconds)
                 if let metricsId {
@@ -172,6 +181,9 @@ public final class Transcription {
 #endif
                 SoundEffect.error.play()
 
+                // Notify UI so it can show an actionable error banner
+                self.queueBridge.onChunkError?(error)
+
                 // Failed chunks don't yield text to the stream, so check completion
                 // here — the stream consumer won't see this chunk.
                 await queueBridge.checkCompletion()
@@ -190,9 +202,23 @@ public final class Transcription {
             task.cancel()
         }
         processingTasks.removeAll()
+        activeBatchProvider = nil
         // Note: Individual transcription tasks are tracked here in processingTasks.
         // Cancelling them above is sufficient — the underlying URLSession requests
         // will be cancelled via cooperative Task cancellation.
+    }
+
+    /// Set the batch provider to use for transcription dispatch.
+    /// When set, chunks are sent to this provider instead of the default ChatGPT service.
+    /// Pass `nil` to revert to the default service.
+    public func setActiveBatchProvider(_ provider: (any BatchTranscriptionProvider)?) {
+        let providerId = provider?.id ?? "nil"
+        observabilityEvent(
+            "active_batch_provider_set",
+            level: .debug,
+            metadata: ["providerId": providerId]
+        )
+        activeBatchProvider = provider
     }
 
     private static func isCancellation(_ error: Error) -> Bool {
