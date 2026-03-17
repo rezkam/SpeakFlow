@@ -2,7 +2,7 @@
 
 **Branch:** `fix/transcription-error-banners-and-batch-provider-dispatch`
 **Date started:** 2026-03-17
-**Status:** In progress — code changes done, tests need verification + additional tests needed
+**Status:** Complete — all tests passing (869/869)
 
 ---
 

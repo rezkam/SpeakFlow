@@ -133,3 +133,107 @@ struct TranscriptionCancellationBehaviorTests {
                 "Failed requests should still record observed STT latency")
     }
 }
+
+// MARK: - onChunkError callback tests
+
+@Suite("Transcription onChunkError callback", .serialized)
+struct TranscriptionOnChunkErrorTests {
+
+    @MainActor
+    private func awaitQueueDrain(_ bridge: TranscriptionQueueBridge) async {
+        for _ in 0..<80 {
+            if await bridge.getPendingCount() == 0 { return }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
+    @MainActor @Test
+    func nonCancellationErrorFiresOnChunkError() async {
+        let service = StubTranscriptionService(mode: .failure)
+        let transcription = Transcription(statistics: TestStatistics(), service: service)
+        defer { transcription.queueBridge.stopListening() }
+
+        var capturedError: Error?
+        transcription.queueBridge.onChunkError = { capturedError = $0 }
+
+        let ticket = await transcription.queueBridge.nextSequence()
+        transcription.transcribe(ticket: ticket,
+                                 chunk: AudioChunk(wavData: Data([0x00]), durationSeconds: 0.1))
+        await awaitQueueDrain(transcription.queueBridge)
+
+        #expect(capturedError != nil, "onChunkError must fire on non-cancellation failure")
+    }
+
+    @MainActor @Test
+    func cancellationErrorDoesNotFireOnChunkError() async {
+        let service = StubTranscriptionService(mode: .cancelled)
+        let transcription = Transcription(statistics: TestStatistics(), service: service)
+        defer { transcription.queueBridge.stopListening() }
+
+        var errorFired = false
+        transcription.queueBridge.onChunkError = { _ in errorFired = true }
+
+        let ticket = await transcription.queueBridge.nextSequence()
+        transcription.transcribe(ticket: ticket,
+                                 chunk: AudioChunk(wavData: Data([0x00]), durationSeconds: 0.1))
+        await awaitQueueDrain(transcription.queueBridge)
+
+        #expect(!errorFired, "onChunkError must NOT fire for cancellation errors")
+    }
+
+    @MainActor @Test
+    func activeBatchProviderDispatchesChunks() async {
+        let service = StubTranscriptionService(mode: .failure) // should never be called
+        let transcription = Transcription(statistics: TestStatistics(), service: service)
+        defer { transcription.queueBridge.stopListening() }
+
+        let batchProvider = StubBatchProvider(result: "hello from batch")
+        transcription.setActiveBatchProvider(batchProvider)
+
+        var received: [String] = []
+        transcription.queueBridge.onTextReady = { received.append($0) }
+
+        let ticket = await transcription.queueBridge.nextSequence()
+        transcription.transcribe(ticket: ticket,
+                                 chunk: AudioChunk(wavData: Data([0x00]), durationSeconds: 0.1))
+        await awaitQueueDrain(transcription.queueBridge)
+
+        #expect(received == ["hello from batch"],
+                "Active batch provider must be used instead of default service")
+    }
+
+    @MainActor @Test
+    func cancelAllClearsActiveBatchProvider() async {
+        let service = StubTranscriptionService(mode: .success("fallback"))
+        let transcription = Transcription(statistics: TestStatistics(), service: service)
+        defer { transcription.queueBridge.stopListening() }
+
+        transcription.setActiveBatchProvider(StubBatchProvider(result: "batch"))
+        transcription.cancelAll()
+
+        var received: [String] = []
+        transcription.queueBridge.onTextReady = { received.append($0) }
+
+        let ticket = await transcription.queueBridge.nextSequence()
+        transcription.transcribe(ticket: ticket,
+                                 chunk: AudioChunk(wavData: Data([0x00]), durationSeconds: 0.1))
+        await awaitQueueDrain(transcription.queueBridge)
+
+        #expect(received == ["fallback"],
+                "cancelAll must clear activeBatchProvider so default service is used")
+    }
+}
+
+// MARK: - Stub batch provider
+
+private final class StubBatchProvider: BatchTranscriptionProvider, @unchecked Sendable {
+    let id = "stub-batch"
+    let displayName = "Stub Batch"
+    let mode: ProviderMode = .batch
+    let authRequirement: ProviderAuthRequirement = .apiKey(providerId: "stub-batch")
+    var isConfigured: Bool { true }
+    private let result: String
+    init(result: String) { self.result = result }
+    func transcribe(audio: Data) async throws -> String { result }
+    func validateAPIKey(_ key: String) async -> String? { nil }
+}

@@ -12,3 +12,4 @@ DerivedData/
 AppIcon.iconset/
 .deep-dive/
 docs/
+.playwright-cli/
