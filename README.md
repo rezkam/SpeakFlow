@@ -17,7 +17,17 @@
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-15%2B-blue" alt="macOS 15+">
   <img src="https://img.shields.io/badge/Swift-6-orange" alt="Swift 6">
+  <img src="https://img.shields.io/badge/Homebrew-install-orange?logo=homebrew" alt="Install with Homebrew">
 </p>
+
+<p align="center">
+  <strong>Install with Homebrew</strong>
+</p>
+
+```sh
+brew tap rezkam/speakflow
+brew install --cask speakflow
+```
 
 ## Transcription Providers
 
