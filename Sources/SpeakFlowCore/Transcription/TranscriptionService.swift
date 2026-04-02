@@ -96,15 +96,31 @@ public actor TranscriptionService {
             timeout: Config.requestTimeout
         )
 
+        // Use withTaskCancellationHandler so that when our deadline Task cancels
+        // the parent, the underlying URLSessionDataTask is explicitly cancelled too.
+        // Simply cancelling a Swift Task does NOT cancel URLSession.shared requests —
+        // the HTTP connection stays alive until the OS timeout fires (which can be
+        // 30-47s even with timeoutInterval set, because the server holds the TCP conn).
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
-                group.addTask {
-                    try await URLSession.shared.data(for: request)
-                }
+                // Deadline task: fires after requestTimeout and cancels the group
                 group.addTask {
                     try await Task.sleep(for: .seconds(Config.requestTimeout))
                     throw URLError(.timedOut)
+                }
+                // Network task: wrapped so URLSessionDataTask is cancelled on Task cancel
+                group.addTask {
+                    let sessionConfig = URLSessionConfiguration.ephemeral
+                    sessionConfig.timeoutIntervalForRequest = Config.requestTimeout
+                    sessionConfig.timeoutIntervalForResource = Config.requestTimeout
+                    let session = URLSession(configuration: sessionConfig)
+                    return try await withTaskCancellationHandler {
+                        defer { session.invalidateAndCancel() }
+                        return try await session.data(for: request)
+                    } onCancel: {
+                        session.invalidateAndCancel()
+                    }
                 }
                 let result = try await group.next()!
                 group.cancelAll()
