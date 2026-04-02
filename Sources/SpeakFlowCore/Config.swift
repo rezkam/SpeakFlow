@@ -37,19 +37,33 @@ public enum Config {
     // MARK: - API Settings
     /// Minimum seconds between API requests (rate limiting)
     public static let minTimeBetweenRequests: Double = 10.0
-    /// Base request timeout in seconds for small audio files (≤ baseTimeoutDataSize).
-    /// 10s is comfortable for typical 15s chunks (~480KB WAV) — OpenAI usually
-    /// responds in 2–5s, but cold starts and network hiccups can push to 8s.
-    public static let timeout: Double = 10.0
-    /// Maximum request timeout in seconds, used for the largest allowed files.
-    public static let maxTimeout: Double = 30.0
-    /// Data size (bytes) at or below which the base timeout applies.
-    /// ~480KB ≈ 15 seconds of 16kHz mono 16-bit PCM WAV.
+    /// Hard wall-clock timeout per request attempt (seconds).
+    ///
+    /// Based on 303 real ChatGPT transcription sessions:
+    ///   p50=2.6s  p90=5.5s  p95=7.1s  p99=9.2s  max(success)=25s
+    ///
+    /// 15s comfortably covers p99 while killing the ~38s server stalls
+    /// (which never recover) early enough to fit 3 retries within a
+    /// reasonable total wait. URLRequest.timeoutInterval is also set to
+    /// this value but is unreliable for stalled HTTP responses — the task
+    /// group timeout enforces it as a hard wall-clock deadline.
+    public static let requestTimeout: Double = 15.0
+
+    /// Total number of attempts (initial + retries).
+    /// 3 attempts × 15s + 2 × 1s delay = 47s worst-case wall clock.
+    public static let maxAttempts: Int = 3
+
+    /// Flat delay between retry attempts (seconds).
+    /// Kept flat (not exponential) because the failure mode is a server
+    /// stall, not overload — retrying quickly gets a fresh connection.
+    public static let retryDelay: Double = 1.0
+
+    // --- legacy aliases kept for MistralBatchProvider timeout calculation ---
+    public static let timeout: Double = requestTimeout
+    public static let maxTimeout: Double = requestTimeout
     public static let baseTimeoutDataSize: Int = 480_000
-    /// Maximum retry attempts for failed requests
-    public static let maxRetries: Int = 3
-    /// Base delay for exponential backoff (seconds)
-    public static let retryBaseDelay: Double = 1.5
+    public static let maxRetries: Int = maxAttempts - 1
+    public static let retryBaseDelay: Double = retryDelay
 
     // MARK: - Text Insertion Limits
     /// Maximum queued text insertions to prevent unbounded task chains.
