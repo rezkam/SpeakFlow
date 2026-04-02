@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.5 — ChatGPT Reliability Fix
+
+### Bug Fixes
+
+* **ChatGPT transcription no longer hangs on a stalled API** — The ChatGPT transcription endpoint sometimes accepts a connection but never sends a response back, causing recordings to silently fail after 35–47 seconds. SpeakFlow now enforces a hard 15-second deadline per attempt using a dedicated `URLSession` that is forcibly invalidated when the deadline fires (simply cancelling a Swift Task was not enough — the OS-level HTTP connection stayed alive regardless). On timeout, the request is retried up to 3 times with a 1-second pause between attempts. Total worst-case wait is 47 seconds instead of one silent failure, and if all retries are exhausted, a clear error banner explains what happened.
+
+---
+
 ## 0.7.4 — Error Banners & Batch Provider Fixes
 
 ### Bug Fixes
