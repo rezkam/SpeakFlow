@@ -24,72 +24,54 @@ public actor TranscriptionService {
 
     private let rateLimiter = RateLimiter()
 
-    /// Compute timeout scaled to audio data size.
-    ///
-    /// Small files (≤ `baseTimeoutDataSize`, ~480KB / ~15s) use the base 10s timeout.
-    /// Larger files scale linearly up to `maxTimeout` (30s) at `maxAudioSizeBytes` (25MB).
-    /// This keeps short chunks snappy while giving large uploads enough time.
-    ///
-    /// Formula (above threshold):
-    ///   timeout = base + (max - base) × (size - baseSize) / (maxSize - baseSize)
+    /// Kept for MistralBatchProvider which scales timeout by file size.
+    /// ChatGPT now uses a flat per-attempt timeout (Config.requestTimeout).
     public static func timeout(forDataSize dataSize: Int) -> Double {
         guard dataSize > Config.baseTimeoutDataSize else {
-            return Config.timeout
+            return Config.requestTimeout
         }
         let range = Double(Config.maxAudioSizeBytes - Config.baseTimeoutDataSize)
         let excess = Double(min(dataSize, Config.maxAudioSizeBytes) - Config.baseTimeoutDataSize)
-        let scaled = Config.timeout + (Config.maxTimeout - Config.timeout) * (excess / range)
+        let scaled = Config.requestTimeout + (Config.maxTimeout - Config.requestTimeout) * (excess / range)
         return min(scaled, Config.maxTimeout)
     }
 
-    /// Transcribe audio with automatic retry and rate limiting
+    /// Transcribe audio.
+    ///
+    /// Retry strategy — bounded total wall-clock time:
+    ///   • Each attempt has a hard deadline of `Config.requestTimeout` (15s).
+    ///     This is enforced by a task-group race so stalled HTTP responses
+    ///     are cancelled promptly — URLRequest.timeoutInterval alone is not
+    ///     reliable for server stalls that accept TCP but never send bytes.
+    ///   • On timeout or network error, waits `Config.retryDelay` (1s) then
+    ///     retries on a fresh connection (flat delay, not exponential, because
+    ///     the failure mode is a stall not server overload).
+    ///   • Total worst-case wall clock:
+    ///       maxAttempts(3) × requestTimeout(15s) + (maxAttempts-1) × retryDelay(1s) = 47s
+    ///   • Non-retryable errors (auth, 4xx, decode) fail on the first attempt.
     public func transcribe(audio: Data) async throws -> String {
-        // Wait for rate limit and record request atomically
-        do {
-            try await rateLimiter.waitAndRecord()
-        } catch is CancellationError {
-            throw TranscriptionError.cancelled
-        }
+        do { try await rateLimiter.waitAndRecord() }
+        catch is CancellationError { throw TranscriptionError.cancelled }
 
-        let requestTimeout = Self.timeout(forDataSize: audio.count)
-
-        // Perform request with retry
-        return try await withRetry(maxAttempts: Config.maxRetries) {
-            try await self.performRequest(audio: audio, timeout: requestTimeout)
-        }
-    }
-
-    // MARK: - Private Methods
-
-    /// Retry helper with exponential backoff and jitter
-    private func withRetry<T: Sendable>(
-        maxAttempts: Int,
-        operation: @Sendable @escaping () async throws -> T
-    ) async throws -> T {
         var lastError: Error?
 
-        for attempt in 1...maxAttempts {
+        for attempt in 1...Config.maxAttempts {
+            try Task.checkCancellation()
+
             do {
-                // Check for cancellation before each attempt
-                try Task.checkCancellation()
-                return try await operation()
+                return try await performRequestWithDeadline(audio: audio)
             } catch is CancellationError {
                 throw TranscriptionError.cancelled
-            } catch let error as TranscriptionError where !error.isRetryable {
-                // Non-retryable errors fail immediately
-                throw error
+            } catch let err as TranscriptionError where !err.isRetryable {
+                throw err
             } catch {
                 lastError = error
-                Logger.transcription.warning("Attempt \(attempt)/\(maxAttempts) failed: \(error.localizedDescription)")
-
-                if attempt < maxAttempts {
-                    // Exponential backoff with jitter
-                    let baseDelay = Config.retryBaseDelay * pow(2.0, Double(attempt - 1))
-                    let jitter = Double.random(in: 0...0.5) * baseDelay
-                    let delay = baseDelay + jitter
-
-                    Logger.transcription.debug("Retrying in \(String(format: "%.1f", delay))s...")
-                    try? await Task.sleep(for: .seconds(delay))
+                Logger.transcription.warning(
+                    "ChatGPT attempt \(attempt)/\(Config.maxAttempts) failed: \(error.localizedDescription)"
+                )
+                if attempt < Config.maxAttempts {
+                    Logger.transcription.debug("Retrying in \(Config.retryDelay)s…")
+                    try? await Task.sleep(for: .seconds(Config.retryDelay))
                 }
             }
         }
@@ -97,14 +79,37 @@ public actor TranscriptionService {
         throw lastError ?? TranscriptionError.networkError(underlying: URLError(.unknown))
     }
 
-    /// Perform the actual network request
-    private func performRequest(audio: Data, timeout: Double = Config.timeout) async throws -> String {
+    // MARK: - Private
+
+    /// Perform one attempt with a hard task-level deadline.
+    ///
+    /// The deadline races the URLSession request against a timer set to
+    /// `Config.requestTimeout`. Whichever finishes first wins; the other is
+    /// cancelled. This reliably kills stalled HTTP responses that never send
+    /// bytes — URLRequest.timeoutInterval only fires on idle (no I/O), so
+    /// a server that accepts the connection but stalls can hang indefinitely.
+    private func performRequestWithDeadline(audio: Data) async throws -> String {
         let credentials = try await AuthCredentials.load()
-        let request = try buildRequest(audio: audio, credentials: credentials, timeout: timeout)
+        let request = try buildRequest(
+            audio: audio,
+            credentials: credentials,
+            timeout: Config.requestTimeout
+        )
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+                group.addTask {
+                    try await URLSession.shared.data(for: request)
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(Config.requestTimeout))
+                    throw URLError(.timedOut)
+                }
+                let result = try await group.next()!
+                group.cancelAll()
+                return result
+            }
         } catch let urlError as URLError {
             throw TranscriptionError.networkError(underlying: urlError)
         } catch {
