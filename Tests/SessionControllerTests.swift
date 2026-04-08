@@ -255,40 +255,51 @@ struct SessionControllerTests {
         #expect(await c.currentChunkDuration < d1)
     }
 
-    /// Regression: chunkSent() must clear lastSpeechEndTime so the auto-end
-    /// silence clock restarts from zero at every chunk boundary.
+    /// Regression: after an early chunk send, the configured silence duration must
+    /// still be respected.
     ///
-    /// Before the fix, the silence that triggered shouldSendChunk() (which
-    /// requires !isUserSpeaking) persisted as a stale lastSpeechEndTime into
-    /// the next chunk window. If the user resumed talking but VAD hadn't yet
-    /// fired .started (async processing delay), the stale timestamp kept
-    /// counting and could fire auto-end within silenceDuration even though the
-    /// user never actually stopped talking across the chunk boundary.
-    @Test func testChunkSentClearsSilenceClock() async {
+    /// Before the fix, `chunkSent()` set `lastSpeechEndTime = nil`. On long sessions,
+    /// the next auto-end poll fell into the fallback path (`sessionDuration >=
+    /// silenceDuration + minSessionDuration`) and stopped almost immediately after
+    /// speech ended, instead of waiting the full configured silence.
+    @Test func testChunkSentRestartsSilenceClockAtChunkBoundary() async {
+        let clock = MockDateProvider()
         let config = AutoEndConfiguration(
             enabled: true,
-            silenceDuration: 2.0,
-            minSessionDuration: 0.0,
-            requireSpeechFirst: false
+            silenceDuration: 5.0,
+            minSessionDuration: 2.0,
+            requireSpeechFirst: true,
+            noSpeechTimeout: 100.0
         )
-        let c = SessionController(autoEndConfig: config)
+        let c = SessionController(autoEndConfig: config, dateProvider: clock.date)
         await c.startSession()
 
-        // Simulate speech → pause (chunk boundary condition)
+        // Simulate a long dictation where the session age already exceeds the
+        // fallback threshold. This matches the installed-app regression:
+        // speechEnd -> early chunk -> immediate fallback auto-end.
         await c.onSpeechEvent(.started(at: 0))
-        await c.onSpeechEvent(.ended(at: 1))
+        clock.now += 62.5
+        await c.onSpeechEvent(.ended(at: 62.5))
 
-        // Brief silence accumulates (but less than silenceDuration)
-        try? await Task.sleep(for: .milliseconds(100))
-
-        // Chunk is sent at this silence boundary
+        // Early chunk is sent shortly after speech end.
+        clock.now += 0.4
         await c.chunkSent()
 
-        // Auto-end must NOT fire immediately after chunkSent —
-        // lastSpeechEndTime was cleared so silence clock is at zero.
-        let shouldEnd = await c.shouldAutoEndSession()
-        #expect(!shouldEnd,
-            "Auto-end must not fire immediately after chunkSent — silence clock must restart from zero")
+        let silenceAfterChunk = await c.currentSilenceDuration
+        #expect(silenceAfterChunk != nil,
+                "chunkSent() must keep a real silence clock so auto-end uses the normal path")
+        #expect((silenceAfterChunk ?? 999) < 0.001,
+                "Silence must restart from the chunk boundary, not from the old speech end")
+        #expect(await c.shouldAutoEndSession() == false,
+                "Auto-end must not fire immediately after an early chunk send")
+
+        clock.now += 4.9
+        #expect(await c.shouldAutoEndSession() == false,
+                "Configured 5s silence must still be respected after chunkSent()")
+
+        clock.now += 0.2
+        #expect(await c.shouldAutoEndSession() == true,
+                "Auto-end should fire only after the full post-chunk silence duration")
     }
 
     @Test func testShouldSendChunkNotWhileSpeaking() async {
