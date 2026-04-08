@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.6 — Auto-End Silence Fix
+
+### Bug Fixes
+
+* **Auto-end now respects the full silence duration after speech ends** — Fixed a regression in batch dictation where recording could stop almost immediately after the user finished speaking, even though auto-end was configured to wait 5 seconds. This happened in the early-chunk path after `speechEnd`, where the session could fall into a fallback auto-end path instead of honoring the configured silence boundary.
+* **Early chunk emission no longer causes premature session end** — After a chunk is sent at a speech boundary, SpeakFlow now restarts silence timing from that chunk boundary. This preserves the intended behavior: transcription can still start early for better responsiveness, but recording will not stop until the full post-speech silence threshold has actually elapsed.
+
+### Test Coverage
+
+* **Added regression coverage for premature auto-end after chunk send** — New tests reproduce the real installed-app failure mode: long dictation → speech end → early chunk send → auto-end poll. SpeakFlow now verifies that recording does not stop immediately and only auto-ends after the full configured silence duration.
+
+---
+
 ## 0.7.5 — ChatGPT Reliability Fix
 
 ### Bug Fixes

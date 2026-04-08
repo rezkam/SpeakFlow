@@ -218,8 +218,8 @@ public actor SessionController {
     /// Called after an intermediate audio chunk is drained and sent to the API.
     ///
     /// Resets the chunk start time so the next chunk duration window begins fresh.
-    /// Also clears `lastSpeechEndTime` so the auto-end silence clock restarts from
-    /// zero at every chunk boundary.
+    /// Also restarts `lastSpeechEndTime` from "now" so the auto-end silence clock
+    /// is measured from the chunk boundary.
     ///
     /// Without this, the silence that triggered the chunk send (required by
     /// `shouldSendChunk` — it only sends on `!isUserSpeaking`) persists into the
@@ -228,14 +228,19 @@ public actor SessionController {
     /// system may be busy uploading + typing the previous chunk), the stale
     /// `lastSpeechEndTime` keeps counting and can fire auto-end within 5s even
     /// though the user never actually stopped talking.
+    ///
+    /// We intentionally do NOT set `lastSpeechEndTime = nil` here. Doing so routes
+    /// the next auto-end evaluation into the "VAD never fired speechEnd" fallback
+    /// path, which can terminate a long-running session immediately after an early
+    /// chunk send and ignore the configured silence duration.
     public func chunkSent() {
         let now = dateProvider()
         chunkStartTime = now
-        // Clear the stale speech-end timestamp so the silence clock starts from zero.
-        // If the user is already speaking again, the next VAD `.ended` event will
-        // set a fresh lastSpeechEndTime. If the user is silent, the silence clock
-        // begins from this moment — which is the correct measurement point.
-        lastSpeechEndTime = nil
+        // Restart silence timing from the chunk boundary.
+        // If the user stays silent, auto-end now measures silence from this moment.
+        // If speech resumes, `speechStart`/potential-speech activity will block
+        // auto-end until the next real `speechEnd`.
+        lastSpeechEndTime = now
     }
 
     // MARK: - Auto-end decision
