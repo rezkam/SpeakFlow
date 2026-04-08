@@ -255,6 +255,42 @@ struct SessionControllerTests {
         #expect(await c.currentChunkDuration < d1)
     }
 
+    /// Regression: chunkSent() must clear lastSpeechEndTime so the auto-end
+    /// silence clock restarts from zero at every chunk boundary.
+    ///
+    /// Before the fix, the silence that triggered shouldSendChunk() (which
+    /// requires !isUserSpeaking) persisted as a stale lastSpeechEndTime into
+    /// the next chunk window. If the user resumed talking but VAD hadn't yet
+    /// fired .started (async processing delay), the stale timestamp kept
+    /// counting and could fire auto-end within silenceDuration even though the
+    /// user never actually stopped talking across the chunk boundary.
+    @Test func testChunkSentClearsSilenceClock() async {
+        let config = AutoEndConfiguration(
+            enabled: true,
+            silenceDuration: 2.0,
+            minSessionDuration: 0.0,
+            requireSpeechFirst: false
+        )
+        let c = SessionController(autoEndConfig: config)
+        await c.startSession()
+
+        // Simulate speech → pause (chunk boundary condition)
+        await c.onSpeechEvent(.started(at: 0))
+        await c.onSpeechEvent(.ended(at: 1))
+
+        // Brief silence accumulates (but less than silenceDuration)
+        try? await Task.sleep(for: .milliseconds(100))
+
+        // Chunk is sent at this silence boundary
+        await c.chunkSent()
+
+        // Auto-end must NOT fire immediately after chunkSent —
+        // lastSpeechEndTime was cleared so silence clock is at zero.
+        let shouldEnd = await c.shouldAutoEndSession()
+        #expect(!shouldEnd,
+            "Auto-end must not fire immediately after chunkSent — silence clock must restart from zero")
+    }
+
     @Test func testShouldSendChunkNotWhileSpeaking() async {
         let vadConfig = VADConfiguration(minSilenceAfterSpeech: 0.2)
         let c = SessionController(vadConfig: vadConfig, maxChunkDuration: 1.0)

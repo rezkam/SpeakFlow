@@ -215,7 +215,28 @@ public actor SessionController {
         return false
     }
 
-    public func chunkSent() { chunkStartTime = dateProvider() }
+    /// Called after an intermediate audio chunk is drained and sent to the API.
+    ///
+    /// Resets the chunk start time so the next chunk duration window begins fresh.
+    /// Also clears `lastSpeechEndTime` so the auto-end silence clock restarts from
+    /// zero at every chunk boundary.
+    ///
+    /// Without this, the silence that triggered the chunk send (required by
+    /// `shouldSendChunk` — it only sends on `!isUserSpeaking`) persists into the
+    /// new chunk window. If the user resumes talking but VAD hasn't yet emitted
+    /// `.started` (audio tap fires every ~21ms but processing is async and the
+    /// system may be busy uploading + typing the previous chunk), the stale
+    /// `lastSpeechEndTime` keeps counting and can fire auto-end within 5s even
+    /// though the user never actually stopped talking.
+    public func chunkSent() {
+        let now = dateProvider()
+        chunkStartTime = now
+        // Clear the stale speech-end timestamp so the silence clock starts from zero.
+        // If the user is already speaking again, the next VAD `.ended` event will
+        // set a fresh lastSpeechEndTime. If the user is silent, the silence clock
+        // begins from this moment — which is the correct measurement point.
+        lastSpeechEndTime = nil
+    }
 
     // MARK: - Auto-end decision
 
