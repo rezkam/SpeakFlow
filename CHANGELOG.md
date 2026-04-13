@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.7 — Batch Dictation Auto-End Reliability
+
+### Bug Fixes
+
+* **Batch dictation no longer idles out while speech is still being captured** — Fixed a failure mode where long or quiet dictation could accumulate valid speech audio and still be treated as "no speech detected," causing sessions to auto-stop at the 10-second idle timeout. Recent speech-like VAD activity now suppresses that idle timeout instead of letting a missed formal `speechStart` kill the session.
+* **Resumed speech after a thinking pause now resets the silence clock** — Fixed a regression where SpeakFlow could detect `speechEnd`, extend the wait using thinking-pause logic, then continue counting stale silence even after the user started talking again. Speech-like activity after a pause now restarts the post-speech silence window so auto-end requires a fresh full silence period.
+
+### Dependencies
+
+* **Updated FluidAudio to 0.13.6** — Refreshed the bundled audio/VAD dependency while validating SpeakFlow against the newer release.
+
+### Test Coverage
+
+* **Added regressions for missed speech-start and resumed-speech auto-end bugs** — New tests cover both bad production patterns: active speech that would previously trip the 10-second no-speech timeout, and resumed speech after a thinking pause that would previously inherit a stale silence timer.
+
+---
+
 ## 0.7.6 — Auto-End Silence Fix
 
 ### Bug Fixes
