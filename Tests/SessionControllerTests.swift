@@ -87,6 +87,65 @@ struct SessionControllerTests {
         #expect(await c.shouldAutoEndSession() == true)
     }
 
+    @Test func testAutoEndIdleTimeoutBlockedByRecentPotentialSpeechActivity() async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(enabled: true, silenceDuration: 5.0, minSessionDuration: 2.0,
+                                       requireSpeechFirst: true, noSpeechTimeout: 10.0)
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+
+        // No formal speechStart has fired, but a fresh speech-like frame arrives
+        // right as the idle timeout would otherwise trigger.
+        clock.now += 10.1
+        await c.onPotentialSpeechActivity()
+        #expect(await c.shouldAutoEndSession() == false,
+                "Recent speech-like activity must suppress the no-speech idle timeout")
+
+        // If the speech-like activity does not continue, the idle timeout should
+        // become eligible again once the short hold window expires.
+        clock.now += 1.1
+        #expect(await c.shouldAutoEndSession() == true,
+                "Idle timeout should fire after the recent-potential-speech hold expires")
+    }
+
+    @Test func testThinkingPauseSilenceRestartsOnPotentialSpeechWithoutFormalRestart() async {
+        let clock = MockDateProvider()
+        let cfg = AutoEndConfiguration(
+            enabled: true,
+            silenceDuration: 5.0,
+            minSessionDuration: 0.1,
+            requireSpeechFirst: true,
+            noSpeechTimeout: 100.0,
+            thinkingPauseEnabled: true,
+            thinkingPauseExtensionSeconds: 5.0
+        )
+        let c = SessionController(autoEndConfig: cfg, dateProvider: clock.date)
+        await c.startSession()
+
+        await c.onSpeechEvent(.started(at: 0))
+        clock.now += 2.0
+        await c.onSpeechEvent(.ended(at: 2.0))
+        await c.set(lastTranscript: "Here we only have research agents and")
+
+        // The transcript is incomplete, so the silence threshold is extended to 10s.
+        clock.now += 8.0
+        #expect(await c.shouldAutoEndSession() == false)
+
+        // User resumes talking, but the formal speechStart event is missed.
+        // Potential-speech activity must restart the post-speech silence clock.
+        await c.onPotentialSpeechActivity()
+        #expect(await c.shouldAutoEndSession() == false,
+                "Potential resumed speech must cancel a stale thinking-pause silence window")
+
+        clock.now += 9.9
+        #expect(await c.shouldAutoEndSession() == false,
+                "After resumed speech, a fresh full extended silence window is still required")
+
+        clock.now += 0.2
+        #expect(await c.shouldAutoEndSession() == true,
+                "Auto-end should fire only after the full extended silence since the last potential speech")
+    }
+
     @Test func testAutoEndIdleTimeoutDoesNotFireWhenSpeechDetected() async {
         // Even with a short idle timeout, once speech occurs, normal path should be used
         let clock = MockDateProvider()
@@ -356,8 +415,13 @@ struct SessionControllerTests {
             "Recent potential speech activity should block auto-end even after base silence threshold"
         )
 
-        // Once the short hold window passes, auto-end should proceed normally.
-        clock.now += 1.1
+        // The silence clock should restart from the most recent speech-like activity,
+        // not continue from the old speechEnd.
+        clock.now += 4.9
+        #expect(await c.shouldAutoEndSession() == false,
+                "Potential speech after speechEnd must require a fresh full silence window")
+
+        clock.now += 0.2
         #expect(await c.shouldAutoEndSession() == true)
     }
 

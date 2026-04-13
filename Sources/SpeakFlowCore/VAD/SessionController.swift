@@ -177,8 +177,18 @@ public actor SessionController {
     ///
     /// This guards against edge cases where the user is audibly speaking but a
     /// conservative gate delays or suppresses the formal speech-start transition.
+    ///
+    /// If we already observed speech earlier in the session and are currently in a
+    /// post-speech silence window, treat this as evidence that the silence window is
+    /// stale and restart it from "now". This prevents premature auto-end when the
+    /// user resumes talking after a short thinking pause but the formal `speechStart`
+    /// event fails to re-fire.
     public func onPotentialSpeechActivity() {
-        lastPotentialSpeechActivityTime = dateProvider()
+        let now = dateProvider()
+        lastPotentialSpeechActivityTime = now
+        if hasSpeechOccurredInSession && !isUserSpeaking {
+            lastSpeechEndTime = now
+        }
     }
 
     // MARK: - Chunk decision
@@ -290,6 +300,12 @@ public actor SessionController {
            let start = sessionStartTime {
             let idleDuration = now.timeIntervalSince(start)
             if idleDuration >= autoEndConfig.noSpeechTimeout {
+                if hasRecentPotentialSpeechActivity(now: now) {
+                    logger.debug(
+                        "autoEnd: BLOCKED (idle timeout suppressed by recent speech-like activity < \(String(format: "%.1f", self.potentialSpeechHoldDuration), privacy: .public)s)"
+                    )
+                    return false
+                }
                 logger.warning("🛑 AUTO-END IDLE: no speech detected after \(String(format: "%.1f", idleDuration), privacy: .public)s (timeout=\(String(format: "%.1f", self.autoEndConfig.noSpeechTimeout), privacy: .public)s)")
                 return true
             }
