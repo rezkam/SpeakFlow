@@ -50,11 +50,12 @@ final class TextInserter: TextInserting {
     /// accommodating edge cases without truncation.
     private static let maxTextInsertionLength = 100_000
 
-    /// Delay in microseconds between individual keystrokes (5ms).
-    /// This prevents overwhelming the receiving application and ensures
-    /// keystrokes are processed in the correct order. Some apps (especially
-    /// web views) drop characters if events arrive too quickly.
-    private static let keystrokeDelayMicroseconds: UInt32 = 5000
+    /// Delay in microseconds between individual keystrokes (12ms).
+    /// This gives editors and browser-based inputs more time to settle layout,
+    /// selection, and internal input state between synthesized key events.
+    /// Faster rates were observed to be vulnerable to caret jumps in some apps,
+    /// causing later characters to land in the middle of the already-typed text.
+    private static let keystrokeDelayMicroseconds: UInt32 = 12_000
 
     /// Delay in nanoseconds between modifier key release checks (10ms).
     /// When detecting if Cmd/Ctrl/Option/Shift are released, we poll
@@ -693,9 +694,14 @@ final class TextInserter: TextInserting {
     }
 
     /// Number of characters to type before yielding to the run-loop.
-    /// Batching prevents flooding the WindowServer event queue (which would
-    /// block mouse clicks) and gives CGEvent tap callbacks a chance to fire.
-    private static let typingBatchSize = 20
+    /// Smaller batches reduce the chance that the receiving app will move the
+    /// caret or reflow the document while we are still flooding it with events.
+    private static let typingBatchSize = 8
+
+    /// Delay between typing batches (12ms).
+    /// This extra yield gives the target app time to process the just-emitted
+    /// keystrokes before the next burst arrives.
+    private static let typingBatchYieldNanoseconds: UInt64 = 12_000_000
 
     /// Types the given text using CGEvent Unicode synthesis in small batches.
     ///
@@ -798,7 +804,7 @@ final class TextInserter: TextInserting {
                     currentBatch.removeAll(keepingCapacity: true)
                 }
                 if index < chars.count {
-                    try? await Task.sleep(nanoseconds: 5_000_000) // 5ms yield
+                    try? await Task.sleep(nanoseconds: Self.typingBatchYieldNanoseconds)
                 }
             }
         }
@@ -879,7 +885,19 @@ final class TextInserter: TextInserting {
 #if DEBUG
 extension TextInserter {
     // swiftlint:disable:next identifier_name
+    static func _testMakeIsolatedInstance() -> TextInserter { TextInserter() }
+
+    // swiftlint:disable:next identifier_name
     var _testQueuedInsertionCount: Int { queuedInsertionCount }
+
+    // swiftlint:disable:next identifier_name
+    static var _testKeystrokeDelayMicroseconds: UInt32 { keystrokeDelayMicroseconds }
+
+    // swiftlint:disable:next identifier_name
+    static var _testTypingBatchSize: Int { typingBatchSize }
+
+    // swiftlint:disable:next identifier_name
+    static var _testTypingBatchYieldNanoseconds: UInt64 { typingBatchYieldNanoseconds }
 
     // swiftlint:disable:next identifier_name
     static func _testHasActiveModifiers(_ flags: CGEventFlags) -> Bool {
@@ -896,6 +914,29 @@ extension TextInserter {
             flagsProvider: flagsProvider,
             sleep: { _ in }
         )
+    }
+
+    // swiftlint:disable:next identifier_name
+    func _testEnqueueSimulatedOperation(
+        label: String,
+        delayNanoseconds: UInt64 = 0,
+        recorder: @escaping @MainActor (String) -> Void
+    ) {
+        queuedInsertionCount += 1
+        let previousTask = textInsertionTask
+        textInsertionTask = Task { @MainActor [weak self] in
+            defer {
+                if let self {
+                    self.queuedInsertionCount = max(0, self.queuedInsertionCount - 1)
+                }
+            }
+            await previousTask?.value
+            recorder("start:\(label)")
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            recorder("end:\(label)")
+        }
     }
 }
 #endif
