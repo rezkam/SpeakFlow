@@ -5,7 +5,7 @@ import Testing
 
 // MARK: - Behavioral Tests (SpyTextInserter through RecordingController)
 
-@Suite("TextInserter Focus — Streaming Text Operations")
+@Suite("TextInserter Focus — Streaming Text Operations", .serialized)
 struct TextInserterFocusBehavioralTests {
 
     /// Creates a streaming test context with a configured mock provider.
@@ -149,7 +149,7 @@ struct TextInserterFocusBehavioralTests {
     }
 }
 
-@Suite("TextInserter Focus — Bundle Matching")
+@Suite("TextInserter Focus — Bundle Matching", .serialized)
 struct TextInserterBundleMatchingTests {
     @Test
     func exactBundleMatchIsTrue() {
@@ -389,33 +389,26 @@ struct TextInserterPidFocusTests {
             return
         }
 
-        let inserter = TextInserter.shared
-        inserter.cancelAndReset()
+        let inserter = TextInserter._testMakeIsolatedInstance()
 
         // Force isTargetAppFrontmost() to return false deterministically.
         // Without this override, CI runners can flakily promote the target app
         // (e.g. Finder) to frontmost when the test process yields the main actor,
         // causing ensureTargetFocused to return immediately with true.
         inserter._testIsTargetFrontmost = false
-        defer { inserter._testIsTargetFrontmost = nil; inserter.cancelAndReset() }
+        defer { inserter._testIsTargetFrontmost = nil }
 
         // Set the target to a running app so the "is still alive" guard passes.
         inserter.targetElement = AXUIElementCreateApplication(backgroundApp.processIdentifier)
         inserter.targetPid = backgroundApp.processIdentifier
 
-        // ensureTargetFocused should NOT return immediately — it should poll.
-        // We verify this by spawning the function, waiting 400 ms (≥ 2 poll cycles),
-        // then cancelling and checking that it returned false, not true.
-        let task = Task { @MainActor in
-            await inserter.ensureTargetFocused()
-        }
+        // ensureTargetFocused should NOT return immediately — it should poll and
+        // then fail once the focus wait timeout expires.
+        let originalTimeout = Settings.shared.focusWaitTimeout
+        Settings.shared.focusWaitTimeout = 0.3
+        defer { Settings.shared.focusWaitTimeout = originalTimeout }
 
-        // Give the function time to poll at least once (200 ms per cycle).
-        try await Task.sleep(for: .milliseconds(400))
-
-        // Cancel and collect the result.
-        task.cancel()
-        let result = await task.value
+        let result = await inserter.ensureTargetFocused()
 
         // The result must be false: true would mean the function incorrectly
         // treated the target as frontmost (regression: was returning immediately
@@ -522,8 +515,31 @@ struct TextInserterPidFocusTests {
     }
 }
 
-@Suite("TextInserter Queue Guard")
+@Suite("TextInserter Queue Guard", .serialized)
 struct TextInserterQueueGuardTests {
+    @MainActor @Test
+    func queuedOperationsRemainSerializedWhenSecondChunkArrivesMidTyping() async {
+        let inserter = TextInserter._testMakeIsolatedInstance()
+
+        var trace: [String] = []
+
+        inserter._testEnqueueSimulatedOperation(
+            label: "chunk1",
+            delayNanoseconds: 50_000_000
+        ) { trace.append($0) }
+
+        inserter._testEnqueueSimulatedOperation(label: "chunk2") { trace.append($0) }
+
+        await inserter.waitForPendingInsertions()
+
+        #expect(
+            trace == ["start:chunk1", "end:chunk1", "start:chunk2", "end:chunk2"],
+            "A second queued chunk must not start typing until the first queued chunk fully completes"
+        )
+        #expect(inserter._testQueuedInsertionCount == 0,
+                "Queue depth should return to zero after all serialized work completes")
+    }
+
     @MainActor @Test
     func replaceTailQueuesDeleteAndInsertAtomically() {
         let inserter = TextInserter.shared

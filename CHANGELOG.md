@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.8 — Typing Stability & Queue Serialization
+
+### Bug Fixes
+
+* **More conservative synthesized typing cadence** — Slowed per-character typing, reduced batch size, and increased the pause between bursts of synthesized keystrokes. This gives slower editors and browser-backed fields more time to settle between events, reducing cases where the caret jumps and later dictated text lands in the middle of already-inserted text.
+
+### Test Coverage
+
+* **Added a regression for multi-chunk typing serialization** — New coverage verifies that if a second chunk arrives while the first chunk is still typing, SpeakFlow keeps the work strictly serialized instead of starting the second insertion early.
+* **Locked in the safer typing defaults** — Added assertions for the slower keystroke delay, smaller typing batches, and longer inter-batch yield so future refactors do not silently restore the more aggressive pacing.
+
+---
+
 ## 0.7.7 — Batch Dictation Auto-End Reliability
 
 ### Bug Fixes

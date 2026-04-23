@@ -6,6 +6,14 @@ import Testing
 struct TextInserterModifierSafetyTests {
     @MainActor
     @Test
+    func typingUsesMoreConservativePacingDefaults() {
+        #expect(TextInserter._testKeystrokeDelayMicroseconds == 12_000)
+        #expect(TextInserter._testTypingBatchSize == 8)
+        #expect(TextInserter._testTypingBatchYieldNanoseconds == 12_000_000)
+    }
+
+    @MainActor
+    @Test
     func hasActiveModifiersDetectsPressedFlags() {
         #expect(!TextInserter._testHasActiveModifiers([]))
         #expect(TextInserter._testHasActiveModifiers(.maskCommand))
