@@ -214,11 +214,23 @@ if [[ "$MODE" == "release" ]]; then
     fi
     ok "GitHub CLI authenticated"
 
-    # 1d. Notary profile
-    if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" &>/dev/null 2>&1; then
-        fail "Notary profile '$NOTARY_PROFILE' not found in keychain"
+    # 1d. Notary profile + service access
+    set +e
+    NOTARY_CHECK_OUTPUT="$(xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" 2>&1)"
+    NOTARY_CHECK_STATUS=$?
+    set -e
+    if [ "$NOTARY_CHECK_STATUS" -ne 0 ]; then
+        if printf '%s' "$NOTARY_CHECK_OUTPUT" | grep -qiE "(not found in the keychain|No Keychain password item found|keychain profile.*not found|The specified item could not be found in the keychain)"; then
+            fail "Notary profile '$NOTARY_PROFILE' not found in keychain"
+        elif printf '%s' "$NOTARY_CHECK_OUTPUT" | grep -qi "required agreement is missing or has expired"; then
+            printf '%s\n' "$NOTARY_CHECK_OUTPUT" | sed 's/^/  /'
+            fail "Apple notary service rejected profile '$NOTARY_PROFILE' because a required Apple Developer agreement is missing or expired. Sign in to developer.apple.com / App Store Connect, accept the pending agreement for team $SPEAKFLOW_TEAM_ID, then rerun release."
+        else
+            printf '%s\n' "$NOTARY_CHECK_OUTPUT" | sed 's/^/  /'
+            fail "Could not validate notary profile '$NOTARY_PROFILE' against Apple's notary service"
+        fi
     fi
-    ok "Notary profile found"
+    ok "Notary profile found and Apple notary access works"
 
     # 1e. Clean git working tree
     if [ -n "$(git status --porcelain)" ]; then

@@ -1,19 +1,38 @@
 name: Update Homebrew Tap
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to sync into the tap (for example v0.7.7)
+        required: true
+        type: string
 
 jobs:
   update-tap:
+    if: github.event_name != 'release' || github.event.release.prerelease != true
     runs-on: ubuntu-latest
 
     steps:
+      - name: Resolve release tag
+        id: resolve_tag
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "🔖 Resolved tag: $TAG"
+
       - name: Validate tag format
         id: validate_tag
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ steps.resolve_tag.outputs.tag }}"
           if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "valid=true" >> "$GITHUB_OUTPUT"
             echo "✅ Tag $TAG matches vX.Y.Z"
@@ -26,8 +45,8 @@ jobs:
         if: steps.validate_tag.outputs.valid == 'true'
         id: version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ steps.resolve_tag.outputs.tag }}"
+          VERSION="${TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "📦 Version: $VERSION"
@@ -134,4 +153,4 @@ jobs:
       - name: Skip summary
         if: steps.validate_tag.outputs.valid != 'true'
         run: |
-          echo "Tag ${GITHUB_REF#refs/tags/} does not match vX.Y.Z — tap update skipped."
+          echo "Tag ${{ steps.resolve_tag.outputs.tag }} does not match vX.Y.Z — tap update skipped."
