@@ -282,7 +282,7 @@ struct ConfigVADTests {
         #expect(Config.vadThreshold == 0.15)
         #expect(Config.vadMinSilenceAfterSpeech == 3.0)
         #expect(Config.vadMinSpeechDuration == 0.25)
-        #expect(Config.autoEndSilenceDuration == 5.0)
+        #expect(Config.autoEndSilenceDuration == 10.0)
         #expect(Config.autoEndMinSessionDuration == 2.0)
     }
 

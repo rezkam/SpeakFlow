@@ -514,7 +514,7 @@ public final class LiveStreamingController {
         // It is possible we're already inactive (e.g. during a reconnect window).
         // But we still need to tear down the session and timers.
         isActive = false
-        cancelSilenceTimer()
+        cancelSilenceTimer(reason: "stopRequested")
         cancelKeepAliveTimer()
 
         logger.info("Stopping live streaming...")
@@ -564,7 +564,7 @@ public final class LiveStreamingController {
 
         // Just like stop(), tear down the rest even if already inactive.
         isActive = false
-        cancelSilenceTimer()
+        cancelSilenceTimer(reason: "cancelRequested")
         cancelKeepAliveTimer()
 
         try? await session?.close()
@@ -647,7 +647,7 @@ public final class LiveStreamingController {
 
             // Speech activity — cancel any silence timer
             hasSpeechOccurred = true
-            cancelSilenceTimer()
+            cancelSilenceTimer(reason: "interimTranscript")
 
             // Smart diff: only delete/retype the suffix that changed
             let (charsToDelete, suffixToType) = diffFromEnd(
@@ -691,7 +691,7 @@ public final class LiveStreamingController {
             // Speech activity — cancel silence timer (will restart on utteranceEnd)
             if !newText.isEmpty {
                 hasSpeechOccurred = true
-                cancelSilenceTimer()
+                cancelSilenceTimer(reason: "finalTranscript")
             }
 
             // Smart diff: update only what changed from the last interim
@@ -720,7 +720,7 @@ public final class LiveStreamingController {
             if result.speechFinal {
                 logger.info("speech_final detected — user stopped speaking")
                 onUtteranceEnd?()
-                startSilenceTimer()
+                startSilenceTimer(source: "speechFinal")
                 resetTurnStartState()
             }
 
@@ -728,13 +728,13 @@ public final class LiveStreamingController {
             logger.info("UtteranceEnd — user stopped speaking")
             observabilityEvent("event_utterance_end", level: .debug)
             onUtteranceEnd?()
-            startSilenceTimer()
+            startSilenceTimer(source: "utteranceEnd")
             resetTurnStartState()
 
         case .speechStarted:
             // Speech resumed — cancel silence timer
             hasSpeechOccurred = true
-            cancelSilenceTimer()
+            cancelSilenceTimer(reason: "speechStarted")
             observabilityEvent("event_speech_started", level: .debug)
             onSpeechStarted?()
 
@@ -750,7 +750,7 @@ public final class LiveStreamingController {
         case .closed:
             logger.info("Provider session closed")
             observabilityEvent("event_closed")
-            cancelSilenceTimer()
+            cancelSilenceTimer(reason: "providerClosed")
             cancelKeepAliveTimer()
             resetTurnStartState()
 
@@ -852,15 +852,32 @@ public final class LiveStreamingController {
     /// Start (or restart) the silence timer. If no speech event arrives within
     /// `autoEndSilenceDuration` seconds, fires `onAutoEnd`.
     /// Only fires if the user has spoken at least once (don't auto-end pure silence).
-    private func startSilenceTimer() {
+    private func startSilenceTimer(source: String) {
         guard autoEndSilenceDuration > 0, hasSpeechOccurred else { return }
-        cancelSilenceTimer()
+        cancelSilenceTimer(reason: "timerRestartedBy\(source.capitalized)")
         let duration = autoEndSilenceDuration
+        observabilityEvent(
+            "streaming_silence_timer_started",
+            level: .debug,
+            metadata: [
+                "source": source,
+                "durationSeconds": String(format: "%.3f", duration),
+                "durationMilliseconds": String(format: "%.0f", duration * 1000.0)
+            ]
+        )
         silenceTimer = Task { [weak self] in
             do {
                 try await Task.sleep(for: .seconds(duration))
                 guard let self, self.isActive, !Task.isCancelled else { return }
                 self.logger.info("Silence auto-end: \(duration)s of silence after speech")
+                self.observabilityEvent(
+                    "streaming_silence_timer_fired",
+                    metadata: [
+                        "source": source,
+                        "durationSeconds": String(format: "%.3f", duration),
+                        "durationMilliseconds": String(format: "%.0f", duration * 1000.0)
+                    ]
+                )
                 self.onAutoEnd?()
             } catch {
                 // Task cancelled — speech resumed before timer fired
@@ -868,9 +885,17 @@ public final class LiveStreamingController {
         }
     }
 
-    private func cancelSilenceTimer() {
+    private func cancelSilenceTimer(reason: String) {
+        let hadTimer = silenceTimer != nil
         silenceTimer?.cancel()
         silenceTimer = nil
+        if hadTimer {
+            observabilityEvent(
+                "streaming_silence_timer_cancelled",
+                level: .debug,
+                metadata: ["reason": reason]
+            )
+        }
     }
 
     private func resetTurnStartState() {
@@ -1212,7 +1237,7 @@ extension LiveStreamingController {
     // swiftlint:disable:next identifier_name
     public func _testArmSilenceTimer() {
         self.hasSpeechOccurred = true
-        self.startSilenceTimer()
+        self.startSilenceTimer(source: "test")
     }
     // swiftlint:enable identifier_name
 }

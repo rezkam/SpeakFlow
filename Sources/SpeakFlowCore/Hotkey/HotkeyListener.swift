@@ -1,3 +1,4 @@
+import ApplicationServices
 import AppKit
 import os
 import OSLog
@@ -17,6 +18,7 @@ public final class HotkeyListener {
         var eventTap: CFMachPort?
         var runLoopSource: CFRunLoopSource?
         var globalMonitor: Any?
+        var activeHotkeyType: HotkeyType?
     }
 
     private let tapState = OSAllocatedUnfairLock(initialState: DoubleTapState())
@@ -58,9 +60,14 @@ public final class HotkeyListener {
     public func start(type: HotkeyType) {
         stop()
 
+        HotkeyDiagnostics.record(
+            "hotkey_registration_started",
+            metadata: registrationMetadata(for: type)
+        )
+
         switch type {
         case .doubleTapControl:
-            startDoubleTapDetection()
+            startDoubleTapDetection(type: type)
 
         case .controlOptionD, .controlOptionSpace, .commandShiftD:
             startKeyComboDetection(type: type)
@@ -77,6 +84,7 @@ public final class HotkeyListener {
             s.eventTap = nil
             s.runLoopSource = nil
             s.globalMonitor = nil
+            s.activeHotkeyType = nil
             s.lastControlReleaseTime = nil
             s.controlWasDown = false
             return result
@@ -85,13 +93,31 @@ public final class HotkeyListener {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
         if let monitor { NSEvent.removeMonitor(monitor) }
+
+        let metadata = [
+            "hadEventTap": tap == nil ? "false" : "true",
+            "hadRunLoopSource": source == nil ? "false" : "true",
+            "hadGlobalMonitor": monitor == nil ? "false" : "true"
+        ]
+        if tap != nil || source != nil || monitor != nil {
+            HotkeyDiagnostics.record("hotkey_registration_stopped", metadata: metadata)
+        } else {
+            HotkeyDiagnostics.record("hotkey_registration_stop_noop", level: .debug, metadata: metadata)
+        }
     }
 
     // MARK: - Double-tap Control Detection (using CGEvent tap)
 
-    private func startDoubleTapDetection() {
+    private func startDoubleTapDetection(type: HotkeyType) {
         let alreadyActive = tapState.withLockUnchecked { $0.eventTap != nil }
-        guard !alreadyActive else { return }
+        guard !alreadyActive else {
+            HotkeyDiagnostics.record(
+                "hotkey_registration_skipped_already_active",
+                level: .warning,
+                metadata: registrationMetadata(for: type)
+            )
+            return
+        }
 
         let eventMask = (1 << CGEventType.flagsChanged.rawValue)
 
@@ -100,9 +126,13 @@ public final class HotkeyListener {
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
-            callback: { (_, _, event, refcon) -> Unmanaged<CGEvent>? in
+            callback: { (_, eventType, event, refcon) -> Unmanaged<CGEvent>? in
                 guard let refcon else { return Unmanaged.passRetained(event) }
                 let listener = Unmanaged<HotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
+                if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
+                    listener.handleEventTapDisabled(eventType: eventType)
+                    return Unmanaged.passRetained(event)
+                }
                 listener.handleFlagsChanged(event: event)
                 return Unmanaged.passRetained(event)
             },
@@ -110,21 +140,48 @@ public final class HotkeyListener {
         )
 
         guard let tap else {
-            Logger.hotkey.error("Could not create event tap (need Accessibility permission)")
+            HotkeyDiagnostics.record(
+                "hotkey_registration_failed",
+                level: .error,
+                metadata: registrationMetadata(for: type).merging([
+                    "reason": "eventTapCreateReturnedNil",
+                    "accessibilityTrusted": accessibilityTrustedValue()
+                ]) { _, new in new }
+            )
             return
         }
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        guard let source else { return }
+        guard let source else {
+            CFMachPortInvalidate(tap)
+            HotkeyDiagnostics.record(
+                "hotkey_registration_failed",
+                level: .error,
+                metadata: registrationMetadata(for: type).merging([
+                    "reason": "runLoopSourceCreateReturnedNil",
+                    "accessibilityTrusted": accessibilityTrustedValue()
+                ]) { _, new in new }
+            )
+            return
+        }
 
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         tapState.withLockUnchecked {
             $0.eventTap = tap
             $0.runLoopSource = source
+            $0.activeHotkeyType = type
         }
 
-        Logger.hotkey.info("Double-tap Control listener started")
+        HotkeyDiagnostics.record(
+            "hotkey_registration_succeeded",
+            metadata: registrationMetadata(for: type).merging([
+                "eventTap": "cgSessionEventTap",
+                "tapPlacement": "headInsertEventTap",
+                "eventMask": "flagsChanged",
+                "accessibilityTrusted": accessibilityTrustedValue()
+            ]) { _, new in new }
+        )
     }
 
     func handleFlagsChanged(event: CGEvent) {
@@ -153,6 +210,12 @@ public final class HotkeyListener {
         }
 
         if doubleTapDetected {
+            HotkeyDiagnostics.record(
+                "hotkey_activation_detected",
+                metadata: registrationMetadata(for: .doubleTapControl).merging([
+                    "trigger": "controlDoubleTap"
+                ]) { _, new in new }
+            )
             #if DEBUG
             _testDoubleTapDetected?()
             #endif
@@ -168,49 +231,118 @@ public final class HotkeyListener {
         let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleKeyDown(event: event, type: type)
         }
-        tapState.withLockUnchecked { $0.globalMonitor = monitor }
+        tapState.withLockUnchecked {
+            $0.globalMonitor = monitor
+            $0.activeHotkeyType = type
+        }
 
         if monitor != nil {
-            Logger.hotkey.info("Key combo listener started for \(type.displayName)")
+            HotkeyDiagnostics.record(
+                "hotkey_registration_succeeded",
+                metadata: registrationMetadata(for: type).merging([
+                    "eventMonitor": "NSEventGlobalKeyDown",
+                    "exclusiveRegistration": "false",
+                    "accessibilityTrusted": accessibilityTrustedValue()
+                ]) { _, new in new }
+            )
         } else {
-            Logger.hotkey.error("Could not create key monitor (need Accessibility permission)")
+            HotkeyDiagnostics.record(
+                "hotkey_registration_failed",
+                level: .error,
+                metadata: registrationMetadata(for: type).merging([
+                    "reason": "globalMonitorCreateReturnedNil",
+                    "accessibilityTrusted": accessibilityTrustedValue()
+                ]) { _, new in new }
+            )
         }
     }
 
     private func handleKeyDown(event: NSEvent, type: HotkeyType) {
-        let flags = event.modifierFlags
+        guard matches(event: event, type: type) else { return }
+        HotkeyDiagnostics.record(
+            "hotkey_activation_detected",
+            metadata: registrationMetadata(for: type).merging([
+                "trigger": "keyCombo",
+                "keyCode": String(event.keyCode),
+                "modifiers": modifierDescription(event.modifierFlags)
+            ]) { _, new in new }
+        )
+        Task { @MainActor [weak self] in
+            self?.onActivate?()
+        }
+    }
 
+    private func handleEventTapDisabled(eventType: CGEventType) {
+        let (tap, type) = tapState.withLockUnchecked { ($0.eventTap, $0.activeHotkeyType ?? .doubleTapControl) }
+        let metadata = registrationMetadata(for: type).merging([
+            "eventType": eventTypeName(eventType),
+            "willAttemptReenable": tap == nil ? "false" : "true"
+        ]) { _, new in new }
+        HotkeyDiagnostics.record("hotkey_event_tap_disabled", level: .warning, metadata: metadata)
+        guard let tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        HotkeyDiagnostics.record("hotkey_event_tap_reenabled", metadata: metadata)
+    }
+
+    private func registrationMetadata(for type: HotkeyType) -> [String: String] {
+        [
+            "hotkeyType": type.rawValue,
+            "displayName": type.displayName,
+            "detectionMode": detectionMode(for: type)
+        ]
+    }
+
+    private func detectionMode(for type: HotkeyType) -> String {
+        switch type {
+        case .doubleTapControl:
+            return "cgEventTap"
+        case .controlOptionD, .controlOptionSpace, .commandShiftD:
+            return "globalKeyMonitor"
+        }
+    }
+
+    private func matches(event: NSEvent, type: HotkeyType) -> Bool {
+        let flags = event.modifierFlags
         switch type {
         case .controlOptionD:
-            if flags.contains(.control) && flags.contains(.option) &&
-               !flags.contains(.command) && !flags.contains(.shift) &&
-               event.keyCode == KeyCode.d {
-                Task { @MainActor [weak self] in
-                    self?.onActivate?()
-                }
-            }
-
+            return flags.contains(.control) && flags.contains(.option) &&
+                !flags.contains(.command) && !flags.contains(.shift) &&
+                event.keyCode == KeyCode.d
         case .controlOptionSpace:
-            if flags.contains(.control) && flags.contains(.option) &&
-               !flags.contains(.command) && !flags.contains(.shift) &&
-               event.keyCode == KeyCode.space {
-                Task { @MainActor [weak self] in
-                    self?.onActivate?()
-                }
-            }
-
+            return flags.contains(.control) && flags.contains(.option) &&
+                !flags.contains(.command) && !flags.contains(.shift) &&
+                event.keyCode == KeyCode.space
         case .commandShiftD:
-            if flags.contains(.command) && flags.contains(.shift) &&
-               !flags.contains(.control) && !flags.contains(.option) &&
-               event.keyCode == KeyCode.d {
-                Task { @MainActor [weak self] in
-                    self?.onActivate?()
-                }
-            }
-
+            return flags.contains(.command) && flags.contains(.shift) &&
+                !flags.contains(.control) && !flags.contains(.option) &&
+                event.keyCode == KeyCode.d
         case .doubleTapControl:
-            break // Handled by CGEvent tap
+            return false
         }
+    }
+
+    private func modifierDescription(_ flags: NSEvent.ModifierFlags) -> String {
+        var names: [String] = []
+        if flags.contains(.control) { names.append("control") }
+        if flags.contains(.option) { names.append("option") }
+        if flags.contains(.command) { names.append("command") }
+        if flags.contains(.shift) { names.append("shift") }
+        return names.isEmpty ? "none" : names.joined(separator: "+")
+    }
+
+    private func eventTypeName(_ type: CGEventType) -> String {
+        switch type {
+        case .tapDisabledByTimeout:
+            return "tapDisabledByTimeout"
+        case .tapDisabledByUserInput:
+            return "tapDisabledByUserInput"
+        default:
+            return String(type.rawValue)
+        }
+    }
+
+    private func accessibilityTrustedValue() -> String {
+        AXIsProcessTrusted() ? "true" : "false"
     }
 
 }

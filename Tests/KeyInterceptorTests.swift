@@ -1,5 +1,6 @@
 import Testing
 @testable import SpeakFlow
+@testable import SpeakFlowCore
 
 @Suite("KeyInterceptor — Enter One-Shot Capture", .serialized)
 struct KeyInterceptorEnterCaptureTests {
@@ -47,5 +48,33 @@ struct KeyInterceptorEnterCaptureTests {
         #expect(!interceptor._testConsumeEnterCaptureToken())
 
         interceptor.stop()
+    }
+
+    @MainActor @Test
+    func enterCaptureRecordsDiagnostics() {
+        let interceptor = KeyInterceptor.shared
+        interceptor.stop()
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer {
+            HotkeyDiagnostics._testEventHook = nil
+            interceptor.stop()
+        }
+
+        interceptor._testArmEnterCaptureForTests(active: true)
+
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Armed Enter should be captured and suppressed")
+        #expect(events.contains { event in
+            event.name == "key_interceptor_enter_captured" &&
+                event.metadata["keyName"] == "enter"
+        })
+
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Second Enter should pass through after the one-shot token is consumed")
+        #expect(events.contains { event in
+            event.name == "key_interceptor_enter_passed_capture_not_armed" &&
+                event.metadata["keyName"] == "enter"
+        })
     }
 }

@@ -10,10 +10,16 @@
 * **Text insertion queue depth is protected against stale completions** - Queue depth bookkeeping now stays synchronous and session-generation guarded, preventing reset or cancel races from corrupting later queue limits.
 * **Batch session metrics now stay open through finalization** - Batch dictation now records submitted chunks, successful chunks, STT latency, and produced words before ending the metrics session.
 * **Normal recording stops no longer appear as errors** - Routine stop requests now log at info level instead of polluting system error logs.
+* **Silence auto-end no longer reports itself as VAD-only** - Auto-ended recordings now use the generic `SILENCE_AUTO_END` reason so streaming provider silence timers are not mislabeled as local VAD decisions.
+* **Default silence auto-end now waits longer** - The default silence threshold is now 10 seconds, reducing premature stops during thinking pauses or delayed streaming provider boundary events.
 
 ### Diagnostics
 
 * **Structured observability logs now rotate** - Verbosity is unchanged, but `events.jsonl` now rotates at a bounded size and keeps a small set of backups to prevent unbounded growth when verbose diagnostics or text payload capture are enabled.
+* **Hotkey and Enter interception now emit structured diagnostics** - Activation listener registration, registration failures, event tap disable/reenable events, hotkey detection, handler invocation, Enter capture, Enter pass-through, and focus-mismatch pass-through are now recorded in hotkey logs and observability events.
+* **Observability timestamps now include milliseconds** - JSONL event timestamps now preserve millisecond precision, making provider boundary events, silence timers, and stop ordering easier to compare.
+* **Observability events now include build provenance** - Each structured event now records the build git description, exact git commit, and display version, including RC suffixes.
+* **Streaming silence timers now log start, cancel, and fire events** - Streaming auto-end diagnostics now show whether timers came from `speechFinal` or `utteranceEnd`, how long they were armed for, and why they were cancelled.
 
 ### CI / Release Process
 

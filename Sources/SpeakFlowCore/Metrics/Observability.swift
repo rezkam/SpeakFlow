@@ -43,11 +43,52 @@ public struct ObservabilityEvent: Codable, Sendable {
     public let profile: String
     public let processId: Int32
     public let processName: String
+    public let buildGitDescribe: String
+    public let buildGitCommit: String
+    public let buildDisplayVersion: String
     public let component: String
     public let name: String
     public let level: ObservabilityEventLevel
     public let sessionId: UUID?
     public let metadata: [String: String]
+}
+
+private struct ObservabilityBuildMetadata: Sendable {
+    let gitDescribe: String
+    let gitCommit: String
+    let displayVersion: String
+
+    static let current = ObservabilityBuildMetadata()
+
+    private init() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let environment = ProcessInfo.processInfo.environment
+        gitDescribe = Self.nonEmpty(
+            info["SpeakFlowBuildGitDescribe"] as? String,
+            environment["SPEAKFLOW_BUILD_GIT_DESCRIBE"],
+            "unknown"
+        )
+        gitCommit = Self.nonEmpty(
+            info["SpeakFlowBuildGitCommit"] as? String,
+            environment["SPEAKFLOW_BUILD_GIT_COMMIT"],
+            "unknown"
+        )
+        displayVersion = Self.nonEmpty(
+            info["SpeakFlowDisplayVersion"] as? String,
+            info["CFBundleShortVersionString"] as? String,
+            environment["SPEAKFLOW_DISPLAY_VERSION"],
+            "unknown"
+        )
+    }
+
+    private static func nonEmpty(_ candidates: String?...) -> String {
+        for candidate in candidates {
+            if let value = candidate, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return "unknown"
+    }
 }
 
 public struct ObservabilityPathInfo: Sendable {
@@ -199,6 +240,9 @@ public actor ObservabilityStore {
             profile: RuntimePaths.profileName,
             processId: ProcessInfo.processInfo.processIdentifier,
             processName: ProcessInfo.processInfo.processName,
+            buildGitDescribe: ObservabilityBuildMetadata.current.gitDescribe,
+            buildGitCommit: ObservabilityBuildMetadata.current.gitCommit,
+            buildDisplayVersion: ObservabilityBuildMetadata.current.displayVersion,
             component: component,
             name: name,
             level: level,
@@ -261,7 +305,12 @@ public actor ObservabilityStore {
     private func append(_ event: ObservabilityEvent) {
         do {
             let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
+            encoder.dateEncodingStrategy = .custom { date, encoder in
+                var container = encoder.singleValueContainer()
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                try container.encode(formatter.string(from: date))
+            }
             let data = try encoder.encode(event)
             try rotateIfNeeded(additionalBytes: UInt64(data.count + 1))
             guard let handle else { return }

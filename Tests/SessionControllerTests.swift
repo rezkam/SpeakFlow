@@ -8,7 +8,7 @@ struct AutoEndConfigurationTests {
     @Test func testDefaults() {
         let c = AutoEndConfiguration()
         #expect(c.enabled == true)
-        #expect(c.silenceDuration == 5.0)
+        #expect(c.silenceDuration == 10.0)
         #expect(c.minSessionDuration == 2.0)
         #expect(c.requireSpeechFirst == true)
         #expect(c.noSpeechTimeout == 10.0)
