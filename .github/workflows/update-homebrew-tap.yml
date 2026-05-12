@@ -7,16 +7,24 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to sync into the tap (for example v0.7.7)
+        description: Release tag to sync into the tap (for example v0.7.9)
         required: true
         type: string
 
 jobs:
-  update-tap:
+  validate-release-artifact:
     if: github.event_name != 'release' || github.event.release.prerelease != true
-    runs-on: ubuntu-latest
+    runs-on: macos-15
+    outputs:
+      valid: ${{ steps.validate_tag.outputs.valid }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      dmg_url: ${{ steps.dmg.outputs.dmg_url }}
+      sha256: ${{ steps.dmg.outputs.sha256 }}
 
     steps:
+      - uses: actions/checkout@v4.2.2
+
       - name: Resolve release tag
         id: resolve_tag
         run: |
@@ -27,7 +35,7 @@ jobs:
           fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "🔖 Resolved tag: $TAG"
+          echo "Resolved tag: $TAG"
 
       - name: Validate tag format
         id: validate_tag
@@ -35,10 +43,10 @@ jobs:
           TAG="${{ steps.resolve_tag.outputs.tag }}"
           if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "valid=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Tag $TAG matches vX.Y.Z"
+            echo "Tag $TAG matches vX.Y.Z"
           else
             echo "valid=false" >> "$GITHUB_OUTPUT"
-            echo "⚠️ Tag '$TAG' does not match vX.Y.Z — skipping tap update"
+            echo "Tag '$TAG' does not match vX.Y.Z. Skipping tap update."
           fi
 
       - name: Extract version from tag
@@ -49,8 +57,8 @@ jobs:
           VERSION="${TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "📦 Version: $VERSION"
-          echo "🏷️  Tag: $TAG"
+          echo "Version: $VERSION"
+          echo "Tag: $TAG"
 
       - name: Download DMG and calculate SHA256
         if: steps.validate_tag.outputs.valid == 'true'
@@ -60,29 +68,45 @@ jobs:
           REPO="${{ github.repository }}"
           DMG_URL="https://github.com/$REPO/releases/download/$TAG/SpeakFlow.dmg"
           echo "dmg_url=$DMG_URL" >> "$GITHUB_OUTPUT"
-          echo "🔗 DMG URL: $DMG_URL"
+          echo "DMG URL: $DMG_URL"
 
-          echo "📥 Downloading DMG and calculating SHA256..."
+          echo "Downloading DMG and calculating SHA256..."
           SHA256=""
           for i in {1..5}; do
             if curl -fsSL "$DMG_URL" -o /tmp/SpeakFlow.dmg 2>/dev/null; then
               SHA256=$(shasum -a 256 /tmp/SpeakFlow.dmg | awk '{print $1}')
               echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
-              echo "🔐 SHA256: $SHA256"
-              rm -f /tmp/SpeakFlow.dmg
+              echo "SHA256: $SHA256"
               break
             fi
-            echo "⚠️  Retry $i/5 — waiting for release asset to be available..."
+            echo "Retry $i/5, waiting for release asset to be available..."
             sleep 10
           done
 
           if [ -z "$SHA256" ]; then
-            echo "❌ Failed to download DMG after 5 retries"
+            echo "Failed to download DMG after 5 retries"
             exit 1
           fi
 
-      - name: Checkout tap repository
+      - name: Verify signed and notarized release artifact
         if: steps.validate_tag.outputs.valid == 'true'
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/verify-release-artifact.sh \
+            --expected-version "$EXPECTED_VERSION" \
+            --expected-display-version "$EXPECTED_VERSION" \
+            --expected-bundle-id "nu.rez.speakflow" \
+            --expected-team-id "K22477S8CF" \
+            /tmp/SpeakFlow.dmg
+
+  update-tap:
+    needs: validate-release-artifact
+    if: needs.validate-release-artifact.outputs.valid == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tap repository
         uses: actions/checkout@v4.2.2
         with:
           repository: rezkam/homebrew-speakflow
@@ -90,67 +114,66 @@ jobs:
           path: tap-repo
 
       - name: Update cask in tap repository
-        if: steps.validate_tag.outputs.valid == 'true'
         run: |
           CASK_FILE="tap-repo/Casks/speakflow.rb"
-          VERSION="${{ steps.version.outputs.version }}"
-          SHA256="${{ steps.dmg.outputs.sha256 }}"
+          VERSION="${{ needs.validate-release-artifact.outputs.version }}"
+          SHA256="${{ needs.validate-release-artifact.outputs.sha256 }}"
 
-          echo "📝 Updating cask..."
+          echo "Updating cask..."
 
           sed -i "s@^  version \"[^\"]*\"@  version \"$VERSION\"@" "$CASK_FILE"
           sed -i "s@^  sha256 \"[^\"]*\"@  sha256 \"$SHA256\"@" "$CASK_FILE"
 
-          echo "🔍 Verifying cask updates..."
+          echo "Verifying cask updates..."
           if ! grep -q "^  version \"$VERSION\"" "$CASK_FILE"; then
-            echo "❌ Failed to update version in cask"
+            echo "Failed to update version in cask"
             exit 1
           fi
           if ! grep -q "^  sha256 \"$SHA256\"" "$CASK_FILE"; then
-            echo "❌ Failed to update sha256 in cask"
+            echo "Failed to update sha256 in cask"
             exit 1
           fi
 
-          echo "✅ Cask updated:"
-          echo "   Version: $VERSION"
-          echo "   SHA256:  $SHA256"
+          echo "Cask updated:"
+          echo "  Version: $VERSION"
+          echo "  SHA256:  $SHA256"
 
       - name: Commit and push to tap repository
-        if: steps.validate_tag.outputs.valid == 'true'
         working-directory: tap-repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/speakflow.rb
           if git diff --staged --quiet; then
-            echo "ℹ️  No changes to commit"
+            echo "No changes to commit"
           else
-            git commit -m "Update cask to version ${{ steps.version.outputs.version }}" \
-              -m "Auto-generated from rezkam/SpeakFlow@${{ steps.version.outputs.tag }}"
+            git commit -m "Update cask to version ${{ needs.validate-release-artifact.outputs.version }}" \
+              -m "Auto-generated from rezkam/SpeakFlow@${{ needs.validate-release-artifact.outputs.tag }}"
             git push
-            echo "✅ Cask pushed to homebrew-speakflow"
+            echo "Cask pushed to homebrew-speakflow"
           fi
 
       - name: Release summary
-        if: steps.validate_tag.outputs.valid == 'true'
         run: |
-          echo "## 🎉 Homebrew tap updated to ${{ steps.version.outputs.tag }}!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**SHA256:** \`${{ steps.dmg.outputs.sha256 }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**DMG:** [SpeakFlow.dmg](${{ steps.dmg.outputs.dmg_url }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 Installation" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "brew tap rezkam/speakflow" >> $GITHUB_STEP_SUMMARY
-          echo "brew install --cask speakflow" >> $GITHUB_STEP_SUMMARY
-          echo "# or upgrade:" >> $GITHUB_STEP_SUMMARY
-          echo "brew upgrade --cask speakflow" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Tap updated at [rezkam/homebrew-speakflow](https://github.com/rezkam/homebrew-speakflow)" >> $GITHUB_STEP_SUMMARY
+          echo "## Homebrew tap updated to ${{ needs.validate-release-artifact.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version:** \`${{ needs.validate-release-artifact.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**SHA256:** \`${{ needs.validate-release-artifact.outputs.sha256 }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**DMG:** [SpeakFlow.dmg](${{ needs.validate-release-artifact.outputs.dmg_url }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Installation" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
+          echo "brew tap rezkam/speakflow" >> "$GITHUB_STEP_SUMMARY"
+          echo "brew install --cask speakflow" >> "$GITHUB_STEP_SUMMARY"
+          echo "# or upgrade:" >> "$GITHUB_STEP_SUMMARY"
+          echo "brew upgrade --cask speakflow" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tap updated at [rezkam/homebrew-speakflow](https://github.com/rezkam/homebrew-speakflow)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Skip summary
-        if: steps.validate_tag.outputs.valid != 'true'
-        run: |
-          echo "Tag ${{ steps.resolve_tag.outputs.tag }} does not match vX.Y.Z — tap update skipped."
+  skip-invalid-tag:
+    needs: validate-release-artifact
+    if: needs.validate-release-artifact.outputs.valid != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Tag did not match vX.Y.Z. Tap update skipped."

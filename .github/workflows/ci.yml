@@ -39,6 +39,9 @@ jobs:
       - name: Resolve dependencies
         run: swift package resolve
 
+      - name: Validate release scripts
+        run: bash -n scripts/build-release.sh scripts/verify-release-artifact.sh
+
       - name: Build
         run: swift build --build-tests
 

@@ -80,6 +80,20 @@ install_and_verify() {
         | sed 's/^/  /' || fail "Installed app signature invalid"
     ok "Installed app signature valid"
 
+    VERIFY_NOTARY_FLAG="--require-notarization"
+    if [[ "$MODE" == "rc" ]]; then
+        VERIFY_NOTARY_FLAG="--skip-notarization"
+    fi
+    ./scripts/verify-release-artifact.sh \
+        "$VERIFY_NOTARY_FLAG" \
+        --expected-version "$MARKETING_VERSION" \
+        --expected-display-version "$DISPLAY_VERSION" \
+        --expected-bundle-id "$BUNDLE_ID" \
+        --expected-team-id "$SPEAKFLOW_TEAM_ID" \
+        "/Applications/$APP_NAME.app" 2>&1 | sed 's/^/  /' \
+        || fail "Installed app artifact validation failed"
+    ok "Installed app artifact validation passed"
+
     INSTALLED_VERSION=$(defaults read \
         "/Applications/$APP_NAME.app/Contents/Info" \
         CFBundleShortVersionString 2>/dev/null || echo "unknown")
@@ -129,6 +143,32 @@ confirm() {
     fi
 }
 
+notarize_file() {
+    # notarize_file <artifact-path> <label>
+    local artifact_path="$1"
+    local label="$2"
+
+    NOTARIZE_LOG="$(mktemp)"
+    set +e
+    xcrun notarytool submit "$artifact_path" \
+        --keychain-profile "$NOTARY_PROFILE" \
+        --wait 2>&1 | tee "$NOTARIZE_LOG" | sed 's/^/  /'
+    NOTARIZE_STATUS=${PIPESTATUS[0]}
+    set -e
+
+    if [ "$NOTARIZE_STATUS" -eq 0 ] && grep -q "status: Accepted" "$NOTARIZE_LOG"; then
+        ok "$label notarization accepted by Apple"
+    else
+        SUBMISSION_ID=$(grep -E "^[[:space:]]*id:" "$NOTARIZE_LOG" | head -1 | awk '{print $2}')
+        [ -n "$SUBMISSION_ID" ] && \
+            xcrun notarytool log "$SUBMISSION_ID" \
+                --keychain-profile "$NOTARY_PROFILE" 2>&1 | sed 's/^/  /'
+        rm -f "$NOTARIZE_LOG"
+        fail "$label notarization rejected, see log above"
+    fi
+    rm -f "$NOTARIZE_LOG"
+}
+
 # ── Mode & flags ──────────────────────────────────────────────────────────────
 MODE="${1:-}"
 YES=0
@@ -161,9 +201,21 @@ SIGNING_IDENTITY="$SPEAKFLOW_SIGNING_IDENTITY"
 NOTARY_PROFILE="${SPEAKFLOW_NOTARY_PROFILE:-}"
 
 # ── Version ───────────────────────────────────────────────────────────────────
-LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]' | head -1 2>/dev/null || true)
-BASE_VERSION="${LATEST_TAG#v}"
+# Version comes from the release notes, not from tags. This prevents orphan tags
+# from becoming the source of truth. A GitHub release will create the tag when it
+# does not already exist.
+CHANGELOG_VERSION=$(awk '/^## [0-9]+\.[0-9]+\.[0-9]+( |$)/ { print $2; exit }' CHANGELOG.md 2>/dev/null || true)
+BASE_VERSION="${SPEAKFLOW_RELEASE_VERSION:-$CHANGELOG_VERSION}"
+
+if [[ -z "$BASE_VERSION" ]]; then
+    LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]' | head -1 2>/dev/null || true)
+    BASE_VERSION="${LATEST_TAG#v}"
+fi
+
 BASE_VERSION="${BASE_VERSION:-0.0.0}"
+if [[ ! "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fail "Invalid release version '$BASE_VERSION'. Use SPEAKFLOW_RELEASE_VERSION=X.Y.Z or add a top CHANGELOG.md section."
+fi
 
 if [[ "$MODE" == "rc" ]]; then
     RC_TIMESTAMP=$(date +%Y%m%d%H%M)
@@ -232,21 +284,46 @@ if [[ "$MODE" == "release" ]]; then
     fi
     ok "Notary profile found and Apple notary access works"
 
-    # 1e. Clean git working tree
+    # 1e. Clean git working tree. Release artifacts must match an immutable
+    # GitHub commit, not local uncommitted changes.
     if [ -n "$(git status --porcelain)" ]; then
-        warn "Working directory has uncommitted changes"
-        confirm "Release anyway?"
+        git status --short | sed 's/^/  /'
+        fail "Working directory has uncommitted changes. Commit and push before release."
     else
         ok "Git working tree clean"
     fi
 
-    # 1f. Tag exists on origin (checked via gh API — no SSH needed)
-    if ! gh api "repos/{owner}/{repo}/git/refs/tags/v${DISPLAY_VERSION}" \
-            --silent &>/dev/null 2>&1; then
-        warn "Tag v${DISPLAY_VERSION} not found on origin"
-        confirm "Continue without tag on origin?"
+    RELEASE_HEAD_SHA=$(git rev-parse HEAD)
+    if gh api "repos/{owner}/{repo}/git/commits/$RELEASE_HEAD_SHA" --silent &>/dev/null 2>&1; then
+        ok "HEAD exists on GitHub: $RELEASE_HEAD_SHA"
     else
-        ok "Tag v${DISPLAY_VERSION} exists on origin"
+        fail "HEAD $RELEASE_HEAD_SHA is not present on GitHub. Push main before release."
+    fi
+
+    # 1f. Release/tag safety.
+    # The release is the source of truth. If the tag is absent, gh release create
+    # will create it at HEAD. If it already exists, it must point at HEAD.
+    RELEASE_TAG="v${DISPLAY_VERSION}"
+
+    if gh release view "$RELEASE_TAG" &>/dev/null 2>&1; then
+        fail "GitHub release $RELEASE_TAG already exists. Bump CHANGELOG.md or SPEAKFLOW_RELEASE_VERSION."
+    fi
+    ok "GitHub release $RELEASE_TAG does not exist yet"
+
+    if TAG_TYPE=$(gh api "repos/{owner}/{repo}/git/refs/tags/$RELEASE_TAG" --jq '.object.type' 2>/dev/null); then
+        TAG_SHA=$(gh api "repos/{owner}/{repo}/git/refs/tags/$RELEASE_TAG" --jq '.object.sha')
+        if [ "$TAG_TYPE" = "tag" ]; then
+            TAG_COMMIT_SHA=$(gh api "repos/{owner}/{repo}/git/tags/$TAG_SHA" --jq '.object.sha')
+        else
+            TAG_COMMIT_SHA="$TAG_SHA"
+        fi
+
+        if [ "$TAG_COMMIT_SHA" != "$RELEASE_HEAD_SHA" ]; then
+            fail "Tag $RELEASE_TAG already exists but points at $TAG_COMMIT_SHA, not HEAD $RELEASE_HEAD_SHA. Bump the version instead of reusing the tag."
+        fi
+        ok "Existing tag $RELEASE_TAG points at HEAD"
+    else
+        ok "Tag $RELEASE_TAG does not exist yet, GitHub release creation will create it"
     fi
 fi
 
@@ -255,7 +332,7 @@ fi
 # =============================================================================
 step "Running test suite"
 TEST_LOG="$(mktemp /tmp/speakflow-release-tests-XXXXXX.log)"
-TEST_TIMEOUT_SECONDS="${SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS:-2400}"
+TEST_TIMEOUT_SECONDS="${SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS:-900}"
 SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-/tmp/speakflow-rc-build}"
 OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-rc-tests-$(date +%Y%m%d%H%M%S)-$$}"
 OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-/tmp/speakflow-observability-tests/$OBS_PROFILE}"
@@ -278,6 +355,7 @@ test_cmd=(
     SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
     swift
     test
+    --no-parallel
 )
 if [[ -n "$SCRATCH_PATH" ]]; then
     test_cmd+=(--scratch-path "$SCRATCH_PATH")
@@ -328,7 +406,10 @@ else
     else
         warn "Tests failed — see log: $TEST_LOG"
     fi
-    confirm "Release anyway?"
+    if [[ "$MODE" == "release" ]]; then
+        fail "Release blocked because the test suite did not pass"
+    fi
+    confirm "Continue with RC build anyway?"
 fi
 
 # =============================================================================
@@ -497,8 +578,47 @@ BINARY_SHA256=$(shasum -a 256 "$APP_NAME.app/Contents/MacOS/$APP_NAME" | awk '{p
 ok "App signed and verified"
 info "Signed binary SHA-256: $BINARY_SHA256"
 
+./scripts/verify-release-artifact.sh \
+    --skip-notarization \
+    --expected-version "$MARKETING_VERSION" \
+    --expected-display-version "$DISPLAY_VERSION" \
+    --expected-bundle-id "$BUNDLE_ID" \
+    --expected-team-id "$SPEAKFLOW_TEAM_ID" \
+    "$APP_NAME.app" 2>&1 | sed 's/^/  /' \
+    || fail "Signed app artifact validation failed"
+ok "Signed app artifact validation passed"
+
 # =============================================================================
-# STAGE 6 — DMG
+# STAGE 6 — App notarization (release only)
+# =============================================================================
+if [[ "$MODE" == "release" ]]; then
+    step "Notarizing app bundle"
+    info "Submitting app bundle to Apple notary service before DMG packaging..."
+
+    APP_ZIP="$(mktemp /tmp/speakflow-app-XXXXXX).zip"
+    ditto -c -k --keepParent "$APP_NAME.app" "$APP_ZIP" \
+        || fail "Failed to create app notarization zip"
+
+    notarize_file "$APP_ZIP" "App"
+    rm -f "$APP_ZIP"
+
+    xcrun stapler staple "$APP_NAME.app" 2>&1 | sed 's/^/  /' \
+        || fail "App stapling failed"
+    xcrun stapler validate "$APP_NAME.app" 2>&1 | sed 's/^/  /' \
+        || fail "App stapler validation failed"
+
+    ./scripts/verify-release-artifact.sh \
+        --expected-version "$MARKETING_VERSION" \
+        --expected-display-version "$DISPLAY_VERSION" \
+        --expected-bundle-id "$BUNDLE_ID" \
+        --expected-team-id "$SPEAKFLOW_TEAM_ID" \
+        "$APP_NAME.app" 2>&1 | sed 's/^/  /' \
+        || fail "Notarized app artifact validation failed"
+    ok "App ticket stapled and validated"
+fi
+
+# =============================================================================
+# STAGE 7 — DMG
 # =============================================================================
 step "Creating DMG"
 
@@ -527,41 +647,41 @@ DMG_SIZE=$(du -sh "$APP_NAME.dmg" | awk '{print $1}')
 ok "DMG created and signed ($DMG_SIZE)"
 info "DMG SHA-256: $DMG_SHA256"
 
+./scripts/verify-release-artifact.sh \
+    --skip-notarization \
+    --expected-version "$MARKETING_VERSION" \
+    --expected-display-version "$DISPLAY_VERSION" \
+    --expected-bundle-id "$BUNDLE_ID" \
+    --expected-team-id "$SPEAKFLOW_TEAM_ID" \
+    "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
+    || fail "Signed DMG artifact validation failed"
+ok "Signed DMG artifact validation passed"
+
 # =============================================================================
-# STAGE 7 — Notarize (release only)
+# STAGE 8 — DMG notarization (release only)
 # =============================================================================
 if [[ "$MODE" == "release" ]]; then
-    step "Notarizing with Apple"
-    info "Submitting to Apple notary service (usually 1–5 minutes)..."
+    step "Notarizing DMG with Apple"
+    info "Submitting DMG to Apple notary service (usually 1–5 minutes)..."
 
-    NOTARIZE_LOG="$(mktemp)"
-    xcrun notarytool submit "$APP_NAME.dmg" \
-        --keychain-profile "$NOTARY_PROFILE" \
-        --wait 2>&1 | tee "$NOTARIZE_LOG" | sed 's/^/  /'
-
-    if grep -q "status: Accepted" "$NOTARIZE_LOG"; then
-        ok "Notarization accepted by Apple"
-    else
-        SUBMISSION_ID=$(grep -E "^\s*id:" "$NOTARIZE_LOG" | head -1 | awk '{print $2}')
-        [ -n "$SUBMISSION_ID" ] && \
-            xcrun notarytool log "$SUBMISSION_ID" \
-                --keychain-profile "$NOTARY_PROFILE" 2>&1 | sed 's/^/  /'
-        fail "Notarization rejected — see log above"
-    fi
-    rm -f "$NOTARIZE_LOG"
+    notarize_file "$APP_NAME.dmg" "DMG"
 
     step "Stapling notarization ticket"
     xcrun stapler staple "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
         || fail "Stapling failed"
     xcrun stapler validate "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
         || fail "Stapler validation failed"
-    ok "Ticket stapled and validated"
+    ok "DMG ticket stapled and validated"
 
-    step "Gatekeeper check"
-    spctl --assess --type open --context context:primary-signature \
+    step "Release artifact validation"
+    ./scripts/verify-release-artifact.sh \
+        --expected-version "$MARKETING_VERSION" \
+        --expected-display-version "$DISPLAY_VERSION" \
+        --expected-bundle-id "$BUNDLE_ID" \
+        --expected-team-id "$SPEAKFLOW_TEAM_ID" \
         "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
-        || fail "Gatekeeper assessment failed"
-    ok "Gatekeeper: Notarized Developer ID"
+        || fail "Final release artifact validation failed"
+    ok "Final release artifact validation passed"
 
     # Re-capture DMG hash after stapling (ticket changes the file)
     DMG_SHA256=$(shasum -a 256 "$APP_NAME.dmg" | awk '{print $1}')
@@ -569,7 +689,7 @@ if [[ "$MODE" == "release" ]]; then
 fi
 
 # =============================================================================
-# STAGE 8 — Install verification (RC) / Release notes confirmation (release)
+# STAGE 9 — Install verification (RC) / Release notes confirmation (release)
 # =============================================================================
 if [[ "$MODE" == "rc" ]]; then
     install_and_verify
@@ -595,24 +715,23 @@ else
     confirm "Publish v${DISPLAY_VERSION} to GitHub with these release notes?"
 
     # ==========================================================================
-    # STAGE 9 — Publish to GitHub
+    # STAGE 10 — Publish to GitHub
     # ==========================================================================
     step "Publishing GitHub release v${DISPLAY_VERSION}"
 
     if gh release view "v${DISPLAY_VERSION}" &>/dev/null 2>&1; then
-        info "Release v${DISPLAY_VERSION} already exists — uploading DMG..."
-        gh release upload "v${DISPLAY_VERSION}" "$APP_NAME.dmg" --clobber \
-            2>&1 | sed 's/^/  /'
-    else
-        info "Creating release v${DISPLAY_VERSION}..."
-        NOTES_FILE="$(mktemp)"
-        printf '%s' "$NOTES" > "$NOTES_FILE"
-        gh release create "v${DISPLAY_VERSION}" "$APP_NAME.dmg" \
-            --title "v${DISPLAY_VERSION}" \
-            --notes-file "$NOTES_FILE" \
-            2>&1 | sed 's/^/  /'
-        rm -f "$NOTES_FILE"
+        fail "Release v${DISPLAY_VERSION} already exists. Refusing to mutate an existing release."
     fi
+
+    info "Creating release v${DISPLAY_VERSION}..."
+    NOTES_FILE="$(mktemp)"
+    printf '%s' "$NOTES" > "$NOTES_FILE"
+    gh release create "v${DISPLAY_VERSION}" "$APP_NAME.dmg" \
+        --target "$(git rev-parse HEAD)" \
+        --title "v${DISPLAY_VERSION}" \
+        --notes-file "$NOTES_FILE" \
+        2>&1 | sed 's/^/  /'
+    rm -f "$NOTES_FILE"
     ok "Published to GitHub"
 
     step "Verifying GitHub release asset"
@@ -628,6 +747,14 @@ else
         if [ "$DOWNLOADED_SHA256" = "$DMG_SHA256" ]; then
             ok "Downloaded DMG hash matches uploaded file"
             info "SHA-256: $DOWNLOADED_SHA256"
+            ./scripts/verify-release-artifact.sh \
+                --expected-version "$MARKETING_VERSION" \
+                --expected-display-version "$DISPLAY_VERSION" \
+                --expected-bundle-id "$BUNDLE_ID" \
+                --expected-team-id "$SPEAKFLOW_TEAM_ID" \
+                "$DOWNLOADED_DMG" 2>&1 | sed 's/^/  /' \
+                || fail "Downloaded GitHub release artifact validation failed"
+            ok "Downloaded GitHub release artifact validation passed"
         else
             fail "Hash mismatch after upload
        Uploaded:   $DMG_SHA256

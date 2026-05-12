@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.9 — Release Validation & Distribution Safety
+
+### Bug Fixes
+
+* **Homebrew-installed app now passes Finder Gatekeeper checks** - Release builds now notarize and staple the app bundle before packaging it into the DMG, then notarize and staple the DMG itself. This prevents Homebrew installs from extracting a valid but unstapled app that Finder refuses to open.
+* **Release versions now come from the changelog instead of loose tags** - The release script now treats the GitHub release as the source of truth. If a release tag is missing, the release creation step creates it at the current commit. If a tag already exists but points somewhere else, the release stops and requires a version bump.
+
+### CI / Release Process
+
+* **Added release artifact validation for GitHub and Homebrew** - A shared validation script checks that the DMG and contained app are Developer ID signed, Gatekeeper accepted, stapled, and have the expected bundle id, team id, and version before the Homebrew tap is updated.
+* **Release builds now fail closed on test uncertainty** - The release script runs the Swift test suite serially with bounded timeouts and heartbeat output, then blocks production releases if tests fail or time out.
+
+---
+
 ## 0.7.8 — Typing Stability & Queue Serialization
 
 ### Bug Fixes
