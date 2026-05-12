@@ -12,20 +12,35 @@ public final class DeepgramProvider: StreamingTranscriptionProvider, @unchecked 
     public var authRequirement: ProviderAuthRequirement { .apiKey(providerId: ProviderId.deepgram) }
 
     public var isConfigured: Bool {
-        UnifiedAuthStorage.shared.apiKey(for: id) != nil
+        hasAPIKey(id)
     }
 
     private let logger = Logger(subsystem: "SpeakFlow", category: "Deepgram")
     private let settings: any StreamingSettingsProviding
     private let providerSettings: any ProviderSettingsProviding
+    private let hasAPIKey: @Sendable (String) -> Bool
 
     @MainActor
-    public init(
+    public convenience init(
         settings: any StreamingSettingsProviding = Settings.shared,
         providerSettings: any ProviderSettingsProviding = ProviderSettings.shared
     ) {
+        self.init(
+            settings: settings,
+            providerSettings: providerSettings,
+            hasAPIKey: { ProviderAPIKeys.hasAPIKey(for: $0) }
+        )
+    }
+
+    @MainActor
+    init(
+        settings: any StreamingSettingsProviding = Settings.shared,
+        providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
+        hasAPIKey: @escaping @Sendable (String) -> Bool
+    ) {
         self.settings = settings
         self.providerSettings = providerSettings
+        self.hasAPIKey = hasAPIKey
     }
 
     @MainActor

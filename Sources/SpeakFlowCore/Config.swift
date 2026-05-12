@@ -82,6 +82,10 @@ public enum Config {
     /// Include raw transcript/keystroke payloads in observability events.
     /// Off by default due sensitivity and log volume.
     public static let observabilityCaptureTextPayloads: Bool = false
+    /// Rotate structured observability logs before they grow without bound.
+    public static let observabilityMaxLogBytes: UInt64 = 25 * 1024 * 1024
+    /// Number of rotated observability log files to retain per profile.
+    public static let observabilityMaxRotatedLogFiles: Int = 3
     /// Default lexical word floor before a non-speechFinal streaming final commits.
     /// Keeping this at 2 avoids one-word clause fragments being committed too early.
     public static let defaultStreamingMinimumFinalWordCount: Int = 2
@@ -469,8 +473,10 @@ public final class Settings {
     /// End session after this many seconds if no speech is detected at all. 0 disables.
     public var autoEndNoSpeechTimeout: Double {
         get {
-            let value = defaults.double(forKey: Keys.autoEndNoSpeechTimeout)
-            return value > 0 ? value : 10.0
+            guard defaults.object(forKey: Keys.autoEndNoSpeechTimeout) != nil else {
+                return 10.0
+            }
+            return max(0.0, min(120.0, defaults.double(forKey: Keys.autoEndNoSpeechTimeout)))
         }
         set {
             defaults.set(max(0.0, min(120.0, newValue)), forKey: Keys.autoEndNoSpeechTimeout)
@@ -480,8 +486,10 @@ public final class Settings {
     /// Safety force-clear threshold for stuck speaking state. 0 disables.
     public var autoEndMaxContinuousSpeechDuration: Double {
         get {
-            let value = defaults.double(forKey: Keys.autoEndMaxContinuousSpeechDuration)
-            return value > 0 ? value : 180.0
+            guard defaults.object(forKey: Keys.autoEndMaxContinuousSpeechDuration) != nil else {
+                return 180.0
+            }
+            return max(0.0, min(1800.0, defaults.double(forKey: Keys.autoEndMaxContinuousSpeechDuration)))
         }
         set {
             defaults.set(max(0.0, min(1800.0, newValue)), forKey: Keys.autoEndMaxContinuousSpeechDuration)

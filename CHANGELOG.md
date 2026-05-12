@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.10 — Runtime Diagnostics & Release Guardrails
+
+### Bug Fixes
+
+* **Environment API keys now count toward provider readiness** - Deepgram and Mistral providers now use the same API key lookup for readiness checks and session startup, so `DEEPGRAM_API_KEY` and `MISTRAL_API_KEY` configurations are not incorrectly blocked before recording starts.
+* **Auto-end timeout settings now preserve `0` as disabled** - No-speech timeout and max continuous speech safety settings now distinguish a stored zero from a missing preference, so users can actually disable those safeguards from settings.
+* **Enter capture now fails closed if active key interception is unavailable** - SpeakFlow no longer falls back to a passive global key monitor when the CGEvent tap cannot be created, avoiding duplicate Enter submission in environments where keys cannot be suppressed.
+* **Text insertion queue depth is protected against stale completions** - Queue depth bookkeeping now stays synchronous and session-generation guarded, preventing reset or cancel races from corrupting later queue limits.
+* **Batch session metrics now stay open through finalization** - Batch dictation now records submitted chunks, successful chunks, STT latency, and produced words before ending the metrics session.
+* **Normal recording stops no longer appear as errors** - Routine stop requests now log at info level instead of polluting system error logs.
+
+### Diagnostics
+
+* **Structured observability logs now rotate** - Verbosity is unchanged, but `events.jsonl` now rotates at a bounded size and keeps a small set of backups to prevent unbounded growth when verbose diagnostics or text payload capture are enabled.
+
+### CI / Release Process
+
+* **Final releases now require explicit local RC test confirmation** - Production release publishing requires the caller to provide the exact HEAD SHA that was locally tested as an RC, in addition to the existing notarization, stapling, and artifact validation gates.
+* **Local `make check` is deterministic across machines** - The default check gate now runs build and tests only. SwiftLint remains available as an explicit `make lint` gate instead of depending on whether SwiftLint is installed locally.
+
+---
+
 ## 0.7.9 — Release Validation & Distribution Safety
 
 ### Bug Fixes

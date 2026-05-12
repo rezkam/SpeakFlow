@@ -14,6 +14,8 @@
 #   SPEAKFLOW_SIGNING_IDENTITY   e.g. "Developer ID Application: Your Name (TEAMID)"
 #   SPEAKFLOW_TEAM_ID            e.g. ABCDE12345
 #   SPEAKFLOW_NOTARY_PROFILE     name of keychain notarytool profile (release only)
+#   SPEAKFLOW_CONFIRMED_LOCAL_RC_TESTED_SHA
+#                                exact HEAD SHA that the user tested as an RC (release only)
 #
 # Add to ~/.bash_profile so every bash login shell sees them:
 #   export SPEAKFLOW_BUNDLE_ID="..."
@@ -299,6 +301,11 @@ if [[ "$MODE" == "release" ]]; then
     else
         fail "HEAD $RELEASE_HEAD_SHA is not present on GitHub. Push main before release."
     fi
+
+    if [ "${SPEAKFLOW_CONFIRMED_LOCAL_RC_TESTED_SHA:-}" != "$RELEASE_HEAD_SHA" ]; then
+        fail "Final release requires user-tested local RC from this exact commit. Build an RC from clean HEAD, have the user test it, then rerun with SPEAKFLOW_CONFIRMED_LOCAL_RC_TESTED_SHA=$RELEASE_HEAD_SHA."
+    fi
+    ok "User-tested local RC confirmed for HEAD"
 
     # 1f. Release/tag safety.
     # The release is the source of truth. If the tag is absent, gh release create

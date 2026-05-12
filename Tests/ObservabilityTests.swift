@@ -111,6 +111,49 @@ struct ObservabilityTests {
         #expect(b1?.sessionSequence == 1)
     }
 
+    @Test func rotatesEventLogWithoutChangingVerbosity() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
+        let store = ObservabilityStore(
+            baseDirectory: base,
+            maxFileBytes: 900,
+            maxRotatedFiles: 2
+        )
+
+        await store.applyConfiguration(
+            enabled: true,
+            verbosity: .verbose,
+            captureSettingsSnapshot: false,
+            captureSystemContext: false,
+            captureTextPayloads: false
+        )
+
+        for index in 0..<12 {
+            await store.record(
+                component: "Test",
+                name: "rotated_\(index)",
+                level: .debug,
+                metadata: ["payload": String(repeating: "x", count: 160)]
+            )
+        }
+
+        let pathInfo = await store.pathInfoValue()
+        let currentEvents = try await loadEvents(from: store)
+        #expect(currentEvents.contains { $0.name == "rotated_11" })
+        #expect(
+            FileManager.default.fileExists(
+                atPath: pathInfo.eventsFile.deletingLastPathComponent()
+                    .appendingPathComponent("events.jsonl.1").path
+            )
+        )
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: pathInfo.eventsFile.deletingLastPathComponent()
+                    .appendingPathComponent("events.jsonl.3").path
+            )
+        )
+    }
+
     private func loadEvents(from store: ObservabilityStore) async throws -> [ObservabilityEvent] {
         let pathInfo = await store.pathInfoValue()
         let data = try Data(contentsOf: pathInfo.eventsFile)

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
@@ -8,6 +9,7 @@ final class SpyTranscription: TranscriptionCoordinating {
     var transcribeCalls: [(TranscriptionTicket, AudioChunk)] = []
     var cancelAllCount = 0
     var activeBatchProvider: (any BatchTranscriptionProvider)?
+    var metricsSessionHistory: [UUID?] = []
 
     func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk) {
         transcribeCalls.append((ticket, chunk))
@@ -15,6 +17,10 @@ final class SpyTranscription: TranscriptionCoordinating {
 
     func cancelAll() {
         cancelAllCount += 1
+    }
+
+    func setMetricsSession(_ sessionId: UUID?) {
+        metricsSessionHistory.append(sessionId)
     }
 
     func setActiveBatchProvider(_ provider: (any BatchTranscriptionProvider)?) {

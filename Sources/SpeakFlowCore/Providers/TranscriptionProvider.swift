@@ -228,6 +228,37 @@ public struct WordInfo: Sendable {
 
 // MARK: - Provider Settings
 
+enum ProviderAPIKeys {
+    static func apiKey(for providerId: String) -> String? {
+        apiKey(
+            for: providerId,
+            storedKey: UnifiedAuthStorage.shared.apiKey(for: providerId),
+            environment: ProcessInfo.processInfo.environment
+        )
+    }
+
+    static func hasAPIKey(for providerId: String) -> Bool {
+        apiKey(for: providerId) != nil
+    }
+
+    static func apiKey(
+        for providerId: String,
+        storedKey: String?,
+        environment: [String: String]
+    ) -> String? {
+        if let storedKey, !storedKey.isEmpty {
+            return storedKey
+        }
+
+        let envName = "\(providerId.uppercased())_API_KEY"
+        if let envKey = environment[envName], !envKey.isEmpty {
+            return envKey
+        }
+
+        return nil
+    }
+}
+
 /// Stores API keys and settings for transcription providers.
 /// Keys are stored in the unified `~/.speakflow/auth.json` via `UnifiedAuthStorage`.
 /// Environment variables (e.g. DEEPGRAM_API_KEY) are checked as fallback for CI/testing.
@@ -270,18 +301,11 @@ public final class ProviderSettings {
     /// Get the API key for a provider.
     /// Checks unified auth storage first, then falls back to environment variable for CI/testing.
     public func apiKey(for providerId: String) -> String? {
-        // 1. Unified file storage (primary — set by the user via settings)
-        if let key = storage.apiKey(for: providerId), !key.isEmpty {
-            return key
-        }
-
-        // 2. Environment variable fallback (for CI/testing only)
-        let envName = "\(providerId.uppercased())_API_KEY"
-        if let envKey = ProcessInfo.processInfo.environment[envName], !envKey.isEmpty {
-            return envKey
-        }
-
-        return nil
+        ProviderAPIKeys.apiKey(
+            for: providerId,
+            storedKey: storage.apiKey(for: providerId),
+            environment: ProcessInfo.processInfo.environment
+        )
     }
 
     /// Save the API key for a provider to unified auth storage.

@@ -20,7 +20,6 @@ final class KeyInterceptor: KeyIntercepting {
     var onEnterPressed: (() -> Void)?
 
     private struct EventTapState: @unchecked Sendable {
-        var keyMonitor: Any?
         var isActive: Bool = false
         var recordingEventTap: CFMachPort?
         var recordingRunLoopSource: CFRunLoopSource?
@@ -41,7 +40,7 @@ final class KeyInterceptor: KeyIntercepting {
 
     func start(targetPid: pid_t) {
         let alreadyActive = state.withLockUnchecked {
-            $0.recordingEventTap != nil || $0.keyMonitor != nil
+            $0.recordingEventTap != nil
         }
         guard !alreadyActive else { return }
         state.withLockUnchecked {
@@ -62,33 +61,14 @@ final class KeyInterceptor: KeyIntercepting {
         )
 
         guard let tap else {
-            Logger.audio.error("Could not create CGEvent tap. Falling back to passive monitor.")
-            let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self else { return }
-                let targetPid = self.state.withLockUnchecked { $0.targetPid }
-                // Mirror event-tap behavior in fallback mode: only react when focus is in
-                // the originally captured app so Enter/Escape in other apps are untouched.
-                if targetPid != 0, !Self.isKeyboardFocusInApp(pid: targetPid) {
-                    return
-                }
-                switch event.keyCode {
-                case 53: Task { @MainActor [weak self] in self?.onEscapePressed?() }
-                case 36:
-                    guard self.consumeEnterCaptureToken() else { return }
-                    Task { @MainActor [weak self] in self?.onEnterPressed?() }
-                default: break
-                }
-            }
-            state.withLockUnchecked {
-                $0.keyMonitor = monitor
-                $0.isActive = true
-            }
+            handleEventTapUnavailable(reason: "Could not create CGEvent tap")
             return
         }
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         guard let source else {
-            state.withLockUnchecked { $0.recordingEventTap = nil }
+            CFMachPortInvalidate(tap)
+            handleEventTapUnavailable(reason: "Could not create CGEvent tap run loop source")
             return
         }
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
@@ -101,19 +81,30 @@ final class KeyInterceptor: KeyIntercepting {
     }
 
     func stop() {
-        let (tap, source, monitor) = state.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?) in
-            let result = (s.recordingEventTap, s.recordingRunLoopSource, s.keyMonitor)
+        let (tap, source) = state.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?) in
+            let result = (s.recordingEventTap, s.recordingRunLoopSource)
             s.isActive = false
             s.targetPid = 0
             s.enterCaptureArmed = false
             s.recordingEventTap = nil
             s.recordingRunLoopSource = nil
-            s.keyMonitor = nil
             return result
         }
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
-        if let monitor { NSEvent.removeMonitor(monitor) }
+    }
+
+    private func handleEventTapUnavailable(reason: String) {
+        Logger.audio.error(
+            "\(reason, privacy: .public). Key interception disabled because passive monitors cannot suppress Enter."
+        )
+        state.withLockUnchecked {
+            $0.isActive = false
+            $0.targetPid = 0
+            $0.enterCaptureArmed = false
+            $0.recordingEventTap = nil
+            $0.recordingRunLoopSource = nil
+        }
     }
 
     // MARK: - Event Handler
@@ -198,6 +189,16 @@ extension KeyInterceptor {
     // swiftlint:disable:next identifier_name
     @MainActor var _testIsEnterCaptureArmed: Bool {
         state.withLockUnchecked { $0.enterCaptureArmed }
+    }
+
+    // swiftlint:disable:next identifier_name
+    @MainActor var _testIsActive: Bool {
+        state.withLockUnchecked { $0.isActive }
+    }
+
+    // swiftlint:disable:next identifier_name
+    @MainActor func _testHandleEventTapUnavailableForTests() {
+        handleEventTapUnavailable(reason: "Test event tap failure")
     }
 }
 #endif

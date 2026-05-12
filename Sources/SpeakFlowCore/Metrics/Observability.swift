@@ -109,18 +109,26 @@ public actor ObservabilityStore {
     }
 
     private let pathInfo: ObservabilityPathInfo
+    private let maxFileBytes: UInt64
+    private let maxRotatedFiles: Int
     private var config = Configuration()
     private var sequence: UInt64 = 0
     private var sessionSequences: [UUID: UInt64] = [:]
     private var handle: FileHandle?
     private var didRecordSystemContext = false
 
-    public init(baseDirectory: URL? = nil) {
+    public init(
+        baseDirectory: URL? = nil,
+        maxFileBytes: UInt64 = Config.observabilityMaxLogBytes,
+        maxRotatedFiles: Int = Config.observabilityMaxRotatedLogFiles
+    ) {
         let base = baseDirectory ?? RuntimePaths.defaultBaseDirectory
         self.pathInfo = ObservabilityPathInfo(
             baseDirectory: base,
             eventsFile: base.appendingPathComponent(Self.eventsFileName)
         )
+        self.maxFileBytes = maxFileBytes
+        self.maxRotatedFiles = max(0, maxRotatedFiles)
         self.handle = Self.prepareStorage(pathInfo: self.pathInfo)
     }
 
@@ -251,15 +259,63 @@ public actor ObservabilityStore {
     }
 
     private func append(_ event: ObservabilityEvent) {
-        guard let handle else { return }
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(event)
+            try rotateIfNeeded(additionalBytes: UInt64(data.count + 1))
+            guard let handle else { return }
             handle.write(data)
             handle.write(Data([0x0A])) // newline
         } catch {
             // Best-effort diagnostics: observability must never crash product flows.
         }
+    }
+
+    private func rotateIfNeeded(additionalBytes: UInt64) throws {
+        guard maxFileBytes > 0 else { return }
+        let currentSize = try currentEventsFileSize()
+        guard currentSize + additionalBytes > maxFileBytes else { return }
+
+        try handle?.close()
+        handle = nil
+
+        let fileManager = FileManager.default
+        if maxRotatedFiles == 0 {
+            try? fileManager.removeItem(at: pathInfo.eventsFile)
+        } else {
+            let oldest = rotatedEventsFile(index: maxRotatedFiles)
+            try? fileManager.removeItem(at: oldest)
+
+            if maxRotatedFiles > 1 {
+                for index in stride(from: maxRotatedFiles - 1, through: 1, by: -1) {
+                    let source = rotatedEventsFile(index: index)
+                    guard fileManager.fileExists(atPath: source.path) else { continue }
+                    let destination = rotatedEventsFile(index: index + 1)
+                    try? fileManager.removeItem(at: destination)
+                    try fileManager.moveItem(at: source, to: destination)
+                }
+            }
+
+            if fileManager.fileExists(atPath: pathInfo.eventsFile.path) {
+                try fileManager.moveItem(at: pathInfo.eventsFile, to: rotatedEventsFile(index: 1))
+            }
+        }
+
+        if !fileManager.fileExists(atPath: pathInfo.eventsFile.path) {
+            fileManager.createFile(atPath: pathInfo.eventsFile.path, contents: nil)
+        }
+        handle = try FileHandle(forWritingTo: pathInfo.eventsFile)
+        try handle?.seekToEnd()
+    }
+
+    private func currentEventsFileSize() throws -> UInt64 {
+        let attributes = try FileManager.default.attributesOfItem(atPath: pathInfo.eventsFile.path)
+        return (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+    }
+
+    private func rotatedEventsFile(index: Int) -> URL {
+        pathInfo.eventsFile.deletingLastPathComponent()
+            .appendingPathComponent("\(pathInfo.eventsFile.lastPathComponent).\(index)")
     }
 }

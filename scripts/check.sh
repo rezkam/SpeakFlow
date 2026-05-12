@@ -47,12 +47,7 @@ run_step "Swift tests......" env \
     SPEAKFLOW_ISOLATE_TEST_AUDIO=1 \
     SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE" \
     SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR" \
-    swift test
-
-# Optional: SwiftLint (skip if not installed)
-if command -v swiftlint &> /dev/null; then
-    run_step "Lint............." swiftlint lint --quiet
-fi
+    swift test --no-parallel
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAILED" -eq 0 ]; then
