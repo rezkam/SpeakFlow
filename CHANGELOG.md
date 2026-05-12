@@ -5,6 +5,7 @@
 ### Bug Fixes
 
 * **Homebrew-installed app now passes Finder Gatekeeper checks** - Release builds now notarize and staple the app bundle before packaging it into the DMG, then notarize and staple the DMG itself. This prevents Homebrew installs from extracting a valid but unstapled app that Finder refuses to open.
+* **Typing cadence is now a middle ground between speed and stability** - The safer typing defaults remain slower than the older caret-jump-prone cadence, but are less sluggish than the first 0.7.9 RC.
 * **Release versions now come from the changelog instead of loose tags** - The release script now treats the GitHub release as the source of truth. If a release tag is missing, the release creation step creates it at the current commit. If a tag already exists but points somewhere else, the release stops and requires a version bump.
 
 ### CI / Release Process

@@ -7,9 +7,9 @@ struct TextInserterModifierSafetyTests {
     @MainActor
     @Test
     func typingUsesMoreConservativePacingDefaults() {
-        #expect(TextInserter._testKeystrokeDelayMicroseconds == 12_000)
-        #expect(TextInserter._testTypingBatchSize == 8)
-        #expect(TextInserter._testTypingBatchYieldNanoseconds == 12_000_000)
+        #expect(TextInserter._testKeystrokeDelayMicroseconds == 8_500)
+        #expect(TextInserter._testTypingBatchSize == 14)
+        #expect(TextInserter._testTypingBatchYieldNanoseconds == 8_500_000)
     }
 
     @MainActor
