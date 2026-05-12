@@ -541,6 +541,30 @@ struct TextInserterQueueGuardTests {
     }
 
     @MainActor @Test
+    func staleQueueCompletionAfterResetCannotMakeDepthNegative() {
+        let inserter = TextInserter._testMakeIsolatedInstance()
+
+        inserter._testSetQueuedInsertionCount(0)
+        inserter._testDecrementQueuedInsertionCount()
+
+        #expect(inserter._testQueuedInsertionCount == 0,
+                "Queue depth must not go negative after reset clears pending state")
+    }
+
+    @MainActor @Test
+    func staleQueueCompletionAfterResetCannotDrainNextSessionDepth() {
+        let inserter = TextInserter._testMakeIsolatedInstance()
+
+        let staleGeneration = inserter._testQueueGeneration
+        inserter.reset()
+        inserter._testSetQueuedInsertionCount(1)
+        inserter._testDecrementQueuedInsertionCount(generation: staleGeneration)
+
+        #expect(inserter._testQueuedInsertionCount == 1,
+                "A stale queue completion must not decrement the next session depth")
+    }
+
+    @MainActor @Test
     func replaceTailQueuesDeleteAndInsertAtomically() {
         let inserter = TextInserter.shared
         inserter.cancelAndReset()

@@ -19,20 +19,35 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
     /// Shares the API key with the Mistral realtime provider — both use the same
     /// Mistral account. Keyed by `ProviderId.mistral` in `UnifiedAuthStorage`.
     public var isConfigured: Bool {
-        UnifiedAuthStorage.shared.apiKey(for: ProviderId.mistral) != nil
+        hasAPIKey(ProviderId.mistral)
     }
 
     private let logger = Logger(subsystem: "SpeakFlow", category: "MistralBatch")
     private let providerSettings: any ProviderSettingsProviding
     private let settings: any MistralSettingsProviding
+    private let hasAPIKey: @Sendable (String) -> Bool
 
     @MainActor
-    public init(
+    public convenience init(
         providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
         settings: any MistralSettingsProviding = Settings.shared
     ) {
+        self.init(
+            providerSettings: providerSettings,
+            settings: settings,
+            hasAPIKey: { ProviderAPIKeys.hasAPIKey(for: $0) }
+        )
+    }
+
+    @MainActor
+    init(
+        providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
+        settings: any MistralSettingsProviding = Settings.shared,
+        hasAPIKey: @escaping @Sendable (String) -> Bool
+    ) {
         self.providerSettings = providerSettings
         self.settings = settings
+        self.hasAPIKey = hasAPIKey
     }
 
     public func transcribe(audio: Data) async throws -> String {

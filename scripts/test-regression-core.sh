@@ -24,6 +24,7 @@ SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-}"
 
 REGRESSION_SUITES=(
   "DictationReadinessTests"
+  "ProviderReadinessTests"
   "AppStateTests"
   "HotkeyListenerTests"
   "HotkeyTests"
@@ -37,6 +38,7 @@ REGRESSION_SUITES=(
   "TextInserterModifierSafetyTests"
   "SoundEffectTests"
   "SessionControllerTests"
+  "SettingsAutoEndTests"
   "ThinkingPauseDetectorTests"
   "VADStateMachineTests"
   "VADIntegrationTests"

@@ -376,6 +376,38 @@ struct BatchStopContractTests {
         #expect(ti.resetCalled, "TextInserter must be reset after finalization")
     }
 
+    @MainActor @Test
+    func batchMetricsSessionStaysActiveUntilFinalizationCompletes() async throws {
+        let settings = SpySettings()
+        settings.batchFinalizationTimeoutBase = 5.0
+        settings.batchFinalizationTimeoutPerChunkSecond = 0.0
+        settings.batchFinalizationMaxTimeout = 30.0
+
+        let spy = SpyTranscription()
+        let (controller, _, _, _) = makeTestRecordingController(
+            settings: settings,
+            transcription: spy
+        )
+        let sessionId = UUID()
+        controller._testSetMetricsSession(sessionId)
+        controller.isRecording = true
+        controller.fullTranscript = "hello world"
+
+        controller.stopRecording(reason: .hotkey)
+
+        #expect(spy.metricsSessionHistory.last.flatMap { $0 } == sessionId,
+                "Batch stop must keep metrics active while final chunks finish")
+
+        try await waitUntil(timeout: .seconds(5)) { !controller.isProcessingFinal }
+
+        guard let lastMetricsSession = spy.metricsSessionHistory.last else {
+            Issue.record("Expected metrics session history to contain at least one value")
+            return
+        }
+        #expect(lastMetricsSession == nil,
+                "Batch metrics should end only after finalization completes")
+    }
+
     // MARK: - §3.3.5 Enter fires after finalization
 
     @MainActor @Test

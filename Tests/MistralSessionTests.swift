@@ -583,6 +583,7 @@ struct MistralProviderConfigTests {
     }
 
     @Test @MainActor func testMistralProvider_notConfiguredWithoutKey() {
+        guard ProcessInfo.processInfo.environment["MISTRAL_API_KEY"] == nil else { return }
         let provider = MistralProvider()
         // In test mode, UnifiedAuthStorage uses isolated temp dir — no key present
         #expect(!provider.isConfigured,
@@ -590,6 +591,7 @@ struct MistralProviderConfigTests {
     }
 
     @Test @MainActor func testMistralBatchProvider_notConfiguredWithoutKey() {
+        guard ProcessInfo.processInfo.environment["MISTRAL_API_KEY"] == nil else { return }
         let provider = MistralBatchProvider()
         #expect(!provider.isConfigured,
                 "Mistral batch should not be configured without an API key")

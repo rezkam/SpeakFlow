@@ -19,20 +19,35 @@ public final class MistralProvider: StreamingTranscriptionProvider, @unchecked S
     public var authRequirement: ProviderAuthRequirement { .apiKey(providerId: ProviderId.mistral) }
 
     public var isConfigured: Bool {
-        UnifiedAuthStorage.shared.apiKey(for: id) != nil
+        hasAPIKey(id)
     }
 
     private let logger = Logger(subsystem: "SpeakFlow", category: "Mistral")
     private let settings: any MistralSettingsProviding
     private let providerSettings: any ProviderSettingsProviding
+    private let hasAPIKey: @Sendable (String) -> Bool
 
     @MainActor
-    public init(
+    public convenience init(
         settings: any MistralSettingsProviding = Settings.shared,
         providerSettings: any ProviderSettingsProviding = ProviderSettings.shared
     ) {
+        self.init(
+            settings: settings,
+            providerSettings: providerSettings,
+            hasAPIKey: { ProviderAPIKeys.hasAPIKey(for: $0) }
+        )
+    }
+
+    @MainActor
+    init(
+        settings: any MistralSettingsProviding = Settings.shared,
+        providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
+        hasAPIKey: @escaping @Sendable (String) -> Bool
+    ) {
         self.settings = settings
         self.providerSettings = providerSettings
+        self.hasAPIKey = hasAPIKey
     }
 
     @MainActor

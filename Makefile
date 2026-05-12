@@ -1,6 +1,6 @@
 .PHONY: build test test-regression-core test-tsan check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise coverage coverage-html clean
 
-# Strict check: build + tests + optional lint, concise output, full log saved
+# Strict check: build + tests, concise output, full log saved
 check:
 	@./scripts/check.sh
 
@@ -93,7 +93,7 @@ test-p2:
 
 help:
 	@echo "Available commands:"
-	@echo "  make check               - Build + tests + optional lint"
+	@echo "  make check               - Build + tests"
 	@echo "  make build               - Build the project"
 	@echo "  make test                - Run all tests (concise), full log path printed"
 	@echo "  make test-regression-core - Run main-feature regression suites + stress loop"

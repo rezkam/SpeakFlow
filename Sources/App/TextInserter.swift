@@ -108,6 +108,7 @@ final class TextInserter: TextInserting {
     /// Number of operations currently queued.
     /// Bounded by `Config.maxQueuedTextInsertions` to prevent unbounded memory growth.
     private var queuedInsertionCount = 0
+    private var queueGeneration: UInt64 = 0
     /// Monotonic operation sequence used to correlate queued text actions.
     private var operationSequence: UInt64 = 0
     private var observabilitySessionId: UUID?
@@ -235,13 +236,12 @@ final class TextInserter: TextInserting {
         )
 
         queuedInsertionCount += 1
+        let generation = queueGeneration
         let previousTask = textInsertionTask
 
-        textInsertionTask = Task { [weak self] in
+        textInsertionTask = Task { @MainActor [weak self] in
             defer {
-                Task { @MainActor in
-                    self?.queuedInsertionCount -= 1
-                }
+                self?.decrementQueuedInsertionCount(for: generation)
             }
             await previousTask?.value
             guard let self else { return }
@@ -299,14 +299,13 @@ final class TextInserter: TextInserting {
             .merging(metadataForTextPayload(textToInsert), uniquingKeysWith: { _, new in new })
         )
         queuedInsertionCount += 1
+        let generation = queueGeneration
         let previousTask = textInsertionTask
 
         // Chain this insertion after the previous operation
-        textInsertionTask = Task { [weak self] in
+        textInsertionTask = Task { @MainActor [weak self] in
             defer {
-                Task { @MainActor in
-                    self?.queuedInsertionCount -= 1
-                }
+                self?.decrementQueuedInsertionCount(for: generation)
             }
             await previousTask?.value
             await self?.typeTextAsync(textToInsert, operationId: operationId)
@@ -349,12 +348,11 @@ final class TextInserter: TextInserting {
         )
         let previousTask = textInsertionTask
         queuedInsertionCount += 1
+        let generation = queueGeneration
 
-        textInsertionTask = Task { [weak self] in
+        textInsertionTask = Task { @MainActor [weak self] in
             defer {
-                Task { @MainActor in
-                    self?.queuedInsertionCount -= 1
-                }
+                self?.decrementQueuedInsertionCount(for: generation)
             }
             await previousTask?.value
             _ = await self?.deleteCharsAsync(count, operationId: operationId)
@@ -431,6 +429,11 @@ final class TextInserter: TextInserting {
         await textInsertionTask?.value
     }
 
+    private func decrementQueuedInsertionCount(for generation: UInt64) {
+        guard generation == queueGeneration else { return }
+        queuedInsertionCount = max(0, queuedInsertionCount - 1)
+    }
+
     /// Cancels any in-flight text operations and resets all state.
     ///
     /// Call this when the user manually stops recording or when an error occurs.
@@ -438,6 +441,7 @@ final class TextInserter: TextInserting {
     func cancelAndReset() {
         textInsertionTask?.cancel()
         textInsertionTask = nil
+        queueGeneration &+= 1
         queuedInsertionCount = 0
         targetElement = nil
         targetPid = 0
@@ -451,6 +455,7 @@ final class TextInserter: TextInserting {
     /// doesn't interrupt any tasks — it just resets state for the next session.
     func reset() {
         textInsertionTask = nil
+        queueGeneration &+= 1
         queuedInsertionCount = 0
         targetElement = nil
         targetPid = 0
@@ -891,6 +896,24 @@ extension TextInserter {
     var _testQueuedInsertionCount: Int { queuedInsertionCount }
 
     // swiftlint:disable:next identifier_name
+    var _testQueueGeneration: UInt64 { queueGeneration }
+
+    // swiftlint:disable:next identifier_name
+    func _testSetQueuedInsertionCount(_ count: Int) {
+        queuedInsertionCount = count
+    }
+
+    // swiftlint:disable:next identifier_name
+    func _testDecrementQueuedInsertionCount() {
+        decrementQueuedInsertionCount(for: queueGeneration)
+    }
+
+    // swiftlint:disable:next identifier_name
+    func _testDecrementQueuedInsertionCount(generation: UInt64) {
+        decrementQueuedInsertionCount(for: generation)
+    }
+
+    // swiftlint:disable:next identifier_name
     static var _testKeystrokeDelayMicroseconds: UInt32 { keystrokeDelayMicroseconds }
 
     // swiftlint:disable:next identifier_name
@@ -923,12 +946,11 @@ extension TextInserter {
         recorder: @escaping @MainActor (String) -> Void
     ) {
         queuedInsertionCount += 1
+        let generation = queueGeneration
         let previousTask = textInsertionTask
         textInsertionTask = Task { @MainActor [weak self] in
             defer {
-                if let self {
-                    self.queuedInsertionCount = max(0, self.queuedInsertionCount - 1)
-                }
+                self?.decrementQueuedInsertionCount(for: generation)
             }
             await previousTask?.value
             recorder("start:\(label)")

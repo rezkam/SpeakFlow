@@ -30,6 +30,7 @@ final class RecordingController {
     private var hasCapturedSubmitEnter = false
     private var currentMetricsSessionId: UUID?
     private var pendingMetricsTask: Task<Void, Never>?
+    private var batchFinalizationReason: String = StopReason.unknown.rawValue
     private let lifecycleCoordinator = RecordingLifecycleCoordinator()
 
     let textInserter: any TextInserting
@@ -499,7 +500,7 @@ final class RecordingController {
 
     func stopRecording(reason: StopReason = .unknown) {
         guard isRecording else { return }
-        Logger.audio.error("🔴 STOP reason=\(reason.rawValue)")
+        Logger.audio.info("Stop requested reason=\(reason.rawValue, privacy: .public)")
         observabilityEvent(
             "recording_stop_requested",
             metadata: [
@@ -558,7 +559,7 @@ final class RecordingController {
             }
         } else {
             isProcessingFinal = true; SoundEffect.stop.play()
-            endMetricsSession(reason: reason.rawValue)
+            batchFinalizationReason = reason.rawValue
             let stoppingRecorder = recorder
             stoppingRecorder?.stop()
             recorder = nil
@@ -678,10 +679,13 @@ final class RecordingController {
         isProcessingFinal = false
         hasCapturedSubmitEnter = false
         transcription.setActiveBatchProvider(nil)
+        let finalizationReason = batchFinalizationReason
+        batchFinalizationReason = StopReason.unknown.rawValue
         observabilityEvent(
             "batch_finalization_completed",
             metadata: ["hadTranscript": fullTranscript.isEmpty ? "false" : "true"]
         )
+        endMetricsSession(reason: finalizationReason)
 
         guard !fullTranscript.isEmpty, !hasPlayedCompletionSound else {
             textInserter.reset()
@@ -867,6 +871,11 @@ final class RecordingController {
 extension RecordingController {
     var _testCurrentMetricsSessionId: UUID? {
         currentMetricsSessionId
+    }
+
+    func _testSetMetricsSession(_ sessionId: UUID?) {
+        currentMetricsSessionId = sessionId
+        transcription.setMetricsSession(sessionId)
     }
 }
 #endif
