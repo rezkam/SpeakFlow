@@ -26,7 +26,33 @@ struct ObservabilityTests {
         let events = try await loadEvents(from: store)
         #expect(events.contains { $0.component == "Test" && $0.name == "event_written" })
         #expect(events.contains { $0.metadata["key"] == "value" })
+        #expect(events.allSatisfy { !$0.buildGitDescribe.isEmpty })
+        #expect(events.allSatisfy { !$0.buildGitCommit.isEmpty })
+        #expect(events.allSatisfy { !$0.buildDisplayVersion.isEmpty })
         #expect(await store.captureTextPayloadsEnabled() == true)
+    }
+
+    @Test func timestampsIncludeMilliseconds() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
+        let store = ObservabilityStore(baseDirectory: base)
+
+        await store.applyConfiguration(
+            enabled: true,
+            verbosity: .verbose,
+            captureSettingsSnapshot: false,
+            captureSystemContext: false,
+            captureTextPayloads: false
+        )
+        await store.record(component: "Test", name: "timestamp_precision", level: .info)
+
+        let pathInfo = await store.pathInfoValue()
+        let lines = try String(contentsOf: pathInfo.eventsFile, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        let timestampPattern = #/"timestamp":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"/#
+
+        #expect(lines.contains { line in line.contains(timestampPattern) })
     }
 
     @Test func minimalVerbosityFiltersInfoAndDebug() async throws {
@@ -161,7 +187,24 @@ struct ObservabilityTests {
             .split(separator: "\n")
             .map(String.init)
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            let fractionalFormatter = ISO8601DateFormatter()
+            fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = fractionalFormatter.date(from: value) {
+                return date
+            }
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            if let date = formatter.date(from: value) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid ISO8601 timestamp: \(value)"
+            )
+        }
         return try lines.map { line in
             try decoder.decode(ObservabilityEvent.self, from: Data(line.utf8))
         }

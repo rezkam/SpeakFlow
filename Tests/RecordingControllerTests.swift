@@ -9,6 +9,11 @@ import Testing
 struct RecordingControllerProviderGateTests {
 
     @MainActor @Test
+    func autoEndStopReasonIsProviderNeutral() {
+        #expect(RecordingController.StopReason.autoEnd.rawValue == "SILENCE_AUTO_END")
+    }
+
+    @MainActor @Test
     func startRecordingWithUnconfiguredProviderDoesNotRecord() {
         let (controller, _, _, _) = makeTestRecordingController()
         controller.startRecording()

@@ -13,7 +13,7 @@ final class SpySettings: SettingsProviding {
     var vadVolumeSmoothingFactor: Float = 0.2
     var vadStateResetInterval: Double = 5.0
     var autoEndEnabled: Bool = true
-    var autoEndSilenceDuration: Double = 5.0
+    var autoEndSilenceDuration: Double = 10.0
     var autoEndMinSessionDuration: Double = 2.0
     var autoEndRequireSpeechFirst: Bool = true
     var autoEndNoSpeechTimeout: Double = 10.0

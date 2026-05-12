@@ -230,6 +230,9 @@ else
     BUNDLE_VERSION="$BASE_VERSION"
 fi
 
+BUILD_GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
+BUILD_GIT_DESCRIBE=$(git describe --tags --always --dirty 2>/dev/null || printf '%s' "$BUILD_GIT_COMMIT")
+
 # ── Header ────────────────────────────────────────────────────────────────────
 if [[ "$MODE" == "rc" ]]; then
     banner "🔨 SpeakFlow $DISPLAY_VERSION — Release Candidate" \
@@ -534,6 +537,8 @@ cat > "$APP_NAME.app/Contents/Info.plist" << PLIST
     <key>CFBundleVersion</key>         <string>$BUNDLE_VERSION</string>
     <key>CFBundleShortVersionString</key> <string>$MARKETING_VERSION</string>
     <key>SpeakFlowDisplayVersion</key> <string>$DISPLAY_VERSION</string>
+    <key>SpeakFlowBuildGitCommit</key> <string>$BUILD_GIT_COMMIT</string>
+    <key>SpeakFlowBuildGitDescribe</key> <string>$BUILD_GIT_DESCRIBE</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>  <string>15.0</string>

@@ -102,16 +102,41 @@ final class RecordingController {
         if testMode != .off {
             hotkeyListener?.stop()
             hotkeyListener = nil
+            HotkeyDiagnostics.record(
+                "hotkey_setup_skipped_test_mode",
+                metadata: ["testMode": String(describing: testMode)]
+            )
             Logger.hotkey.info("UI test mode: skipping global hotkey listener")
             return
         }
         let type = hotkeySettings.currentHotkey
+        HotkeyDiagnostics.record(
+            "hotkey_setup_requested",
+            metadata: [
+                "hotkeyType": type.rawValue,
+                "displayName": type.displayName
+            ]
+        )
         if hotkeyListener == nil {
             hotkeyListener = HotkeyListener()
-            hotkeyListener?.onActivate = { [weak self] in self?.toggle() }
+            hotkeyListener?.onActivate = { [weak self] in self?.handleHotkeyActivation() }
         }
         hotkeyListener?.start(type: type)
         Logger.hotkey.info("Using \(type.displayName) activation")
+    }
+
+    private func handleHotkeyActivation() {
+        let type = hotkeySettings.currentHotkey
+        HotkeyDiagnostics.record(
+            "hotkey_activation_handler_invoked",
+            metadata: [
+                "hotkeyType": type.rawValue,
+                "displayName": type.displayName,
+                "isRecording": isRecording ? "true" : "false",
+                "isProcessingFinal": isProcessingFinal ? "true" : "false"
+            ]
+        )
+        toggle()
     }
 
     // MARK: - Transcription Callbacks
@@ -494,7 +519,7 @@ final class RecordingController {
     // MARK: - Stop / Cancel
 
     enum StopReason: String {
-        case hotkey = "HOTKEY_TOGGLE", autoEnd = "VAD_AUTO_END", enter = "ENTER_SUBMIT"
+        case hotkey = "HOTKEY_TOGGLE", autoEnd = "SILENCE_AUTO_END", enter = "ENTER_SUBMIT"
         case escape = "ESCAPE_CANCEL", ui = "UI_BUTTON", unknown = "UNKNOWN"
     }
 

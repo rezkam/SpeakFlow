@@ -67,6 +67,23 @@ struct HotkeyListenerDoubleTapTests {
     }
 
     @MainActor @Test
+    func doubleTapControl_recordsActivationDiagnostic() {
+        let listener = HotkeyListener()
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        tapControl(on: listener)
+        tapControl(on: listener)
+
+        #expect(events.contains { event in
+            event.name == "hotkey_activation_detected" &&
+                event.metadata["hotkeyType"] == HotkeyType.doubleTapControl.rawValue &&
+                event.metadata["trigger"] == "controlDoubleTap"
+        })
+    }
+
+    @MainActor @Test
     func doubleTapControl_tooSlow_doesNotTrigger() async throws {
         let listener = HotkeyListener()
         var activated = false

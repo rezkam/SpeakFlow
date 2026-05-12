@@ -25,7 +25,7 @@ import Foundation
 /// | Field | Default | What it controls |
 /// |---|---|---|
 /// | `enabled` | `true` | Master switch for all auto-end behaviour |
-/// | `silenceDuration` | `5.0s` | Seconds of confirmed silence before ending |
+/// | `silenceDuration` | `10.0s` | Seconds of confirmed silence before ending |
 /// | `minSessionDuration` | `2.0s` | Minimum session length before any auto-end fires |
 /// | `requireSpeechFirst` | `true` | Do not end if no speech was ever detected |
 /// | `noSpeechTimeout` | `10.0s` | End after N seconds if no speech detected at all |
@@ -128,7 +128,7 @@ public struct AutoEndConfiguration: Sendable {
 
     public init(
         enabled: Bool = true,
-        silenceDuration: TimeInterval = 5.0,
+        silenceDuration: TimeInterval = 10.0,
         minSessionDuration: TimeInterval = 2.0,
         requireSpeechFirst: Bool = true,
         noSpeechTimeout: TimeInterval = 10.0,

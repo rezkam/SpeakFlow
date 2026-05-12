@@ -103,7 +103,7 @@ public enum Config {
     /// for 1-2s between sentences).
     public static let vadMinSilenceAfterSpeech: Double = 3.0
     public static let vadMinSpeechDuration: Double = 0.25
-    public static let autoEndSilenceDuration: Double = 5.0
+    public static let autoEndSilenceDuration: Double = 10.0
     public static let autoEndMinSessionDuration: Double = 2.0
 
     // MARK: - Idle Nudge (pre auto-end)
