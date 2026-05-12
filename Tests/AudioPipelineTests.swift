@@ -467,28 +467,12 @@ struct StreamingRecorderWAVFormatAndAudioChunkTests {
     }
 
     /// Validate WAV header structure produced by createWav().
-    @Test @MainActor func testCreateWavProducesValidHeader() async {
+    @Test @MainActor func testCreateWavProducesValidHeader() {
         let recorder = StreamingRecorder()
-        let buffer = AudioBuffer(sampleRate: 16000)
 
         // 15s of audio with speech
         let samples = [Float](repeating: 0.5, count: 240_000)
-        await buffer.append(frames: samples)
-
-        recorder._testInjectAudioBuffer(buffer)
-        recorder._testSetIsRecording(true)
-
-        var receivedChunk: AudioChunk?
-        recorder.onChunkReady = { chunk in receivedChunk = chunk }
-
-        await recorder._testInvokeSendChunkIfReady(reason: "test wav")
-
-        guard let chunk = receivedChunk else {
-            Issue.record("No chunk produced")
-            return
-        }
-
-        let wav = chunk.wavData
+        let wav = recorder._testCreateWav(from: samples)
 
         // RIFF header
         #expect(String(data: wav.prefix(4), encoding: .ascii) == "RIFF",
@@ -524,29 +508,15 @@ struct StreamingRecorderWAVFormatAndAudioChunkTests {
     }
 
     /// Verify WAV data section size matches sample count (16-bit = 2 bytes per sample).
-    @Test @MainActor func testCreateWavDataSizeMatchesSamples() async {
+    @Test @MainActor func testCreateWavDataSizeMatchesSamples() {
         let recorder = StreamingRecorder()
-        let buffer = AudioBuffer(sampleRate: 16000)
 
         let expectedSamples = 240_000  // 15s at 16kHz
         let samples = [Float](repeating: 0.5, count: expectedSamples)
-        await buffer.append(frames: samples)
-
-        recorder._testInjectAudioBuffer(buffer)
-        recorder._testSetIsRecording(true)
-
-        var receivedChunk: AudioChunk?
-        recorder.onChunkReady = { chunk in receivedChunk = chunk }
-
-        await recorder._testInvokeSendChunkIfReady(reason: "test wav size")
-
-        guard let chunk = receivedChunk else {
-            Issue.record("No chunk produced")
-            return
-        }
+        let wav = recorder._testCreateWav(from: samples)
 
         // WAV total = 44 byte header + N*2 bytes data (16-bit = 2 bytes per sample)
-        let dataSize = chunk.wavData.count - 44
+        let dataSize = wav.count - 44
         #expect(dataSize == expectedSamples * 2,
                 "Data section must be exactly \(expectedSamples * 2) bytes for \(expectedSamples) samples, got \(dataSize)")
     }
