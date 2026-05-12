@@ -50,12 +50,12 @@ final class TextInserter: TextInserting {
     /// accommodating edge cases without truncation.
     private static let maxTextInsertionLength = 100_000
 
-    /// Delay in microseconds between individual keystrokes (12ms).
+    /// Delay in microseconds between individual keystrokes (8.5ms).
     /// This gives editors and browser-based inputs more time to settle layout,
     /// selection, and internal input state between synthesized key events.
-    /// Faster rates were observed to be vulnerable to caret jumps in some apps,
-    /// causing later characters to land in the middle of the already-typed text.
-    private static let keystrokeDelayMicroseconds: UInt32 = 12_000
+    /// The value stays slower than the old 5ms cadence that could trigger caret
+    /// jumps, but avoids the visibly sluggish 12ms RC cadence.
+    private static let keystrokeDelayMicroseconds: UInt32 = 8_500
 
     /// Delay in nanoseconds between modifier key release checks (10ms).
     /// When detecting if Cmd/Ctrl/Option/Shift are released, we poll
@@ -696,12 +696,12 @@ final class TextInserter: TextInserting {
     /// Number of characters to type before yielding to the run-loop.
     /// Smaller batches reduce the chance that the receiving app will move the
     /// caret or reflow the document while we are still flooding it with events.
-    private static let typingBatchSize = 8
+    private static let typingBatchSize = 14
 
-    /// Delay between typing batches (12ms).
+    /// Delay between typing batches (8.5ms).
     /// This extra yield gives the target app time to process the just-emitted
     /// keystrokes before the next burst arrives.
-    private static let typingBatchYieldNanoseconds: UInt64 = 12_000_000
+    private static let typingBatchYieldNanoseconds: UInt64 = 8_500_000
 
     /// Types the given text using CGEvent Unicode synthesis in small batches.
     ///
