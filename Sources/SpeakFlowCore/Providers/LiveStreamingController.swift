@@ -645,9 +645,13 @@ public final class LiveStreamingController {
             )
             let newText = result.transcript
 
-            // Speech activity — cancel any silence timer
+            // Treat every interim as fresh activity: restart the silence countdown
+            // from full duration. This guarantees auto-end fires exactly
+            // `autoEndSilenceDuration` after the last text event — even for
+            // providers (e.g. Mistral) that never emit `speechFinal`/`utteranceEnd`
+            // mid-stream.
             hasSpeechOccurred = true
-            cancelSilenceTimer(reason: "interimTranscript")
+            startSilenceTimer(source: "interim")
 
             // Smart diff: only delete/retype the suffix that changed
             let (charsToDelete, suffixToType) = diffFromEnd(
@@ -688,10 +692,12 @@ public final class LiveStreamingController {
             let newText = result.transcript
             let previousInterimCount = lastInterimCharCount
 
-            // Speech activity — cancel silence timer (will restart on utteranceEnd)
+            // Speech activity — restart silence timer so it counts down from this
+            // event. The full duration always elapses between the last text event
+            // and auto-end firing.
             if !newText.isEmpty {
                 hasSpeechOccurred = true
-                cancelSilenceTimer(reason: "finalTranscript")
+                startSilenceTimer(source: "final")
             }
 
             // Smart diff: update only what changed from the last interim

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.11 — Streaming Auto-End Consistency
+
+### Bug Fixes
+
+* **Streaming auto-end now works for Mistral realtime** - Silence-based auto-end previously only armed when a provider emitted explicit `speech_final` or `utteranceEnd` events. Mistral's realtime API only sends `transcription.text.delta` events while audio is streaming and does not signal an utterance boundary until `input_audio.end` is sent at recording stop, so auto-end never fired for Mistral. Interim transcription events now restart the silence countdown from the configured `autoEndSilenceDuration`, so auto-end fires exactly that many seconds after the last text event for every streaming provider.
+
 ## 0.7.10 — Runtime Diagnostics & Release Guardrails
 
 ### Bug Fixes
