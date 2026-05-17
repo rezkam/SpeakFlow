@@ -1297,17 +1297,17 @@ struct SilenceAutoEndTests {
         c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Wait 100ms, then speech starts again
-        try await Task.sleep(for: .milliseconds(100))
+        // Wait most of the way through the original window, then speech resumes.
+        try await Task.sleep(for: .milliseconds(150))
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.interim(TranscriptionResult(transcript: "World", confidence: 0.9, words: [])))
 
-        // Wait past the 200ms deadline
-        try await Task.sleep(for: .milliseconds(200))
+        // Inside the restarted 200ms window: timer must not yet have fired.
+        try await Task.sleep(for: .milliseconds(100))
         #expect(col.autoEndCount == 0, "Auto-end cancelled because speech resumed")
     }
 
-    @MainActor @Test func testAutoEndCancelledByInterim() async throws {
+    @MainActor @Test func testInterimRestartsSilenceTimer() async throws {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
         col.wire(c, simulateActive: true)
@@ -1317,12 +1317,38 @@ struct SilenceAutoEndTests {
         c.handleEvent(.interim(TranscriptionResult(transcript: "Test", confidence: 0.9, words: [])))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Test.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Timer started. New interim cancels it.
-        try await Task.sleep(for: .milliseconds(100))
+        // Late-arriving interim must restart the countdown from full duration.
+        try await Task.sleep(for: .milliseconds(150))
         c.handleEvent(.interim(TranscriptionResult(transcript: "More", confidence: 0.9, words: [])))
 
-        try await Task.sleep(for: .milliseconds(200))
-        #expect(col.autoEndCount == 0, "Interim text cancels silence timer")
+        // 100ms after the restart — well inside the 200ms window — timer must not yet have fired.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(col.autoEndCount == 0,
+                "Interim must restart the silence countdown so the original 200ms deadline is overridden")
+    }
+
+    /// Spec: the configured `autoEndSilenceDuration` is the *total* wait between
+    /// the last text-bearing event and auto-end firing — regardless of whether
+    /// the provider ever emits `utteranceEnd` or `speechFinal`.
+    ///
+    /// This is the contract Mistral relies on, since its realtime API only emits
+    /// `transcription.text.delta` (→ `.interim`) mid-stream and never sends an
+    /// explicit utterance boundary until `input_audio.end`.
+    @MainActor @Test func testAutoEndFiresAfterInterimsAloneStopArriving() async throws {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c, simulateActive: true)
+        c.autoEndSilenceDuration = 0.3
+
+        // Provider that only emits interims (Mistral mid-stream behavior):
+        // a couple of deltas, then silence — no speechFinal, no utteranceEnd.
+        c.handleEvent(.interim(TranscriptionResult(transcript: "hello", confidence: 0.9, words: [])))
+        try await Task.sleep(for: .milliseconds(50))
+        c.handleEvent(.interim(TranscriptionResult(transcript: "hello world", confidence: 0.9, words: [])))
+
+        try await waitUntil(timeout: .seconds(5)) { col.autoEndCount >= 1 }
+        #expect(col.autoEndCount == 1,
+                "Auto-end must fire after silence even when only interim events have arrived")
     }
 
     @MainActor @Test func testAutoEndFiresOnUtteranceEnd() async throws {
