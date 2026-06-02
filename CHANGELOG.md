@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.12 — Settings Dashboard & Statistics Accuracy
+
+### New
+
+* **Statistics dashboard redesign** - The Statistics tab now shows a 30-day trend hero, four metric cards (total duration, words, API calls, time saved), provider and language breakdowns, a 30-day activity heatmap, and a clear reset action. Recent session data is loaded asynchronously and falls back to per-session metrics when persisted aggregates are missing.
+* **Providers tab consolidates account setup** - Account credentials, OAuth, model selection, and provider readiness now live under a single Providers tab. The old Accounts tab is removed.
+
+### Bug Fixes
+
+* **Streaming dictation now contributes to total duration** - Streaming finals previously recorded `audioDurationSeconds: 0`, so `totalSecondsTranscribed`, per-provider seconds, and the dashboard "time saved" estimate stayed at zero for streaming users while word and recording counters still grew. Each streaming final now contributes its elapsed segment time.
+* **API calls and recordings are tracked separately** - In batch mode, `Transcription.transcribe` runs once per audio chunk; counting each chunk as a "recording" inflated provider, language, daily, and period totals for long dictations. The per-recording counters are now incremented once per user recording (at recording start), while `totalApiCalls` continues to grow per actual provider request (per chunk in batch, per session in streaming). The dashboard metric card is relabeled "API calls" to reflect what is being counted, and the historical breakdown row is annotated the same way.
+* **Resetting statistics no longer leaves pre-reset sessions behind** - The dashboard's recent-sessions fallback now filters by `Statistics.lastResetDate` so provider breakdowns and the 30-day heatmap do not surface sessions from before the reset.
+* **Auto-end silence slider honors 1-second selection** - The Settings storage no longer clamps `autoEndSilenceDuration` to 3 seconds. Selecting 1 s or 2 s in the slider now round-trips correctly.
+* **Speech-ratio slider honors 0% selection** - The Settings storage now distinguishes "explicit zero" from "unset" for `minSpeechRatio`, so dragging the slider to 0% actually disables the speech-ratio gate instead of snapping back to 1%.
+* **Stored Deepgram `nova-2` model migrates to `nova-3`** - Users upgrading with a `nova-2` selection now land on `nova-3` so the redesigned model picker keeps showing Deepgram options instead of falling through to the default branch.
+* **About: Privacy link relabeled "License"** - The link previously labeled "Privacy" points at `LICENSE`. It now says License so the label matches the destination.
+* **Dashboard no longer fabricates "Historical data" rows** - After splitting API calls from recordings, deriving "missing recordings" from `totalApiCalls - knownRecordings` was always positive for any batch dictation, injecting a bogus Historical-data provider row and an Unknown-language row on every dashboard view. Provider and language breakdowns now show only what was actually attributed.
+
+### CI / Tooling
+
+* **SwiftLint is now enforced in CI** - The CI workflow installs SwiftLint and runs `swiftlint lint` so error-level violations fail the build. Existing error-level violations across `MistralAPITests`, `MistralBatchProviderTests`, `MistralRealtimeRegressionTests`, `TextInserter`, `RecordingController`, and `GeneralSettingsView` were cleaned up so the gate passes on a clean tree.
+
 ## 0.7.11 — Streaming Auto-End Consistency
 
 ### Bug Fixes

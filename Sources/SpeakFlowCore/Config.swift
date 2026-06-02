@@ -431,18 +431,17 @@ public final class Settings {
         }
     }
 
-    /// Silence duration before auto-ending session
-    /// Clamped to minimum 3.0s to prevent accidental premature auto-end from stale UserDefaults
+    /// Silence duration (seconds) before auto-ending a session.
+    /// Floor is 1 s, matching the slider's "1 s, snappy" minimum. The UI is
+    /// the only entry point a user can change this through, so a value below
+    /// 1 s in storage is treated as stale and reset to the default.
     public var autoEndSilenceDuration: Double {
         get {
             let value = defaults.double(forKey: Keys.autoEndSilenceDuration)
-            if value > 0 {
-                return max(value, 3.0)  // Safety clamp: never less than 3 seconds
-            }
-            return Config.autoEndSilenceDuration
+            return value >= 1.0 ? value : Config.autoEndSilenceDuration
         }
         set {
-            defaults.set(max(newValue, 3.0), forKey: Keys.autoEndSilenceDuration)
+            defaults.set(max(newValue, 1.0), forKey: Keys.autoEndSilenceDuration)
         }
     }
 
@@ -640,16 +639,20 @@ public final class Settings {
         }
     }
 
-    /// Minimum speech ratio to consider a chunk as containing speech (0.0-1.0)
-    /// Chunks below this threshold are considered silent when skipSilentChunks=true
-    /// Default: 0.03 (3%) - lower values catch quieter speech but may include noise
+    /// Minimum speech ratio to consider a chunk as containing speech (0.0-1.0).
+    /// Chunks below this threshold are considered silent when skipSilentChunks
+    /// is enabled. A value of 0 means "accept any audio" (slider's lower bound)
+    /// and must round-trip from storage; using `defaults.float(...) > 0` as the
+    /// "is set" check would silently snap 0 back to the default.
     public var minSpeechRatio: Float {
         get {
-            let value = defaults.float(forKey: Keys.minSpeechRatio)
-            return value > 0 ? value : Config.minSpeechRatio
+            guard defaults.object(forKey: Keys.minSpeechRatio) != nil else {
+                return Config.minSpeechRatio
+            }
+            return max(defaults.float(forKey: Keys.minSpeechRatio), 0)
         }
         set {
-            defaults.set(newValue, forKey: Keys.minSpeechRatio)
+            defaults.set(max(newValue, 0), forKey: Keys.minSpeechRatio)
         }
     }
 
@@ -902,9 +905,17 @@ public final class Settings {
         set { defaults.set(max(newValue, 100), forKey: DeepgramKeys.endpointingMs) }
     }
 
-    /// Deepgram transcription model
+    /// Deepgram transcription model.
+    ///
+    /// Migration: callers that stored the legacy `nova-2` value before Nova-2
+    /// was removed from the picker land on `nova-3` instead. Otherwise the
+    /// stored value would fall through every model-specific switch in the UI
+    /// and silently hide Deepgram options.
     public var deepgramModel: String {
-        get { defaults.string(forKey: DeepgramKeys.model) ?? "nova-3" }
+        get {
+            let stored = defaults.string(forKey: DeepgramKeys.model) ?? "nova-3"
+            return stored == "nova-2" ? "nova-3" : stored
+        }
         set { defaults.set(newValue, forKey: DeepgramKeys.model) }
     }
 

@@ -108,7 +108,7 @@ struct MistralNormalCloseDoesNotStopRecordingTests {
         c.handleEvent(.closed)
         try await Task.sleep(for: .milliseconds(200))
 
-        #expect(errors.count == 0,
+        #expect(errors.isEmpty,
                 "Normal WebSocket close must never call onError")
         #expect(closes.count == 1,
                 "Normal WebSocket close must call onSessionClosed")
@@ -145,7 +145,7 @@ struct MistralNormalCloseDoesNotStopRecordingTests {
 
         try await Task.sleep(for: .milliseconds(200))
 
-        #expect(errors.count == 0,
+        #expect(errors.isEmpty,
                 "Normal close after transcription must never call onError")
         #expect(closes.count == 1,
                 "Session closed callback must fire once")
@@ -351,8 +351,10 @@ struct MistralRealtimeAPISpecTests {
 // MARK: - Helpers
 
 private final class ErrorCollector: @unchecked Sendable {
-    private(set) var count = 0
-    func record(_ error: Error) { count += 1 }
+    private var errors: [Error] = []
+    var count: Int { errors.count }
+    var isEmpty: Bool { errors.isEmpty }
+    func record(_ error: Error) { errors.append(error) }
 }
 
 private final class ClosedCollector: @unchecked Sendable {

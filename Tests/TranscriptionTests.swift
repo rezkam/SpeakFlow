@@ -9,6 +9,8 @@ private final class TestStatistics: StatisticsProviding {
     var totalWords: Int = 0
     var totalApiCalls: Int = 0
     var recordedLatencies: [TimeInterval] = []
+    /// Each entry captures one `recordRecording(providerId:, language:)` call.
+    var recordedRecordings: [(providerId: String?, language: String?)] = []
     var apiCallCount: Int { totalApiCalls }
     var wordCount: Int { totalWords }
     var formattedDuration: String { "0s" }
@@ -29,6 +31,10 @@ private final class TestStatistics: StatisticsProviding {
         totalApiCalls += 1
     }
 
+    func recordRecording(providerId: String?, language: String?) {
+        recordedRecordings.append((providerId, language))
+    }
+
     func recordSTTLatency(seconds: TimeInterval) {
         recordedLatencies.append(seconds)
     }
@@ -38,6 +44,7 @@ private final class TestStatistics: StatisticsProviding {
         totalCharacters = 0
         totalWords = 0
         totalApiCalls = 0
+        recordedRecordings = []
     }
 }
 
@@ -236,4 +243,81 @@ private final class StubBatchProvider: BatchTranscriptionProvider, @unchecked Se
     init(result: String) { self.result = result }
     func transcribe(audio: Data) async throws -> String { result }
     func validateAPIKey(_ key: String) async -> String? { nil }
+}
+
+// MARK: - Recording-vs-chunk accounting
+
+/// Batch dictation: a single user recording is split into many chunks.
+/// `Transcription` should count each chunk send as one API call, but must NOT
+/// inflate user-recording counters (per-provider, per-language, daily, period)
+/// per chunk: those represent user recordings, which is the caller's concern.
+@Suite("Transcription chunk accounting", .serialized)
+struct TranscriptionChunkRecordingTests {
+    @MainActor
+    private func awaitQueueDrain(_ bridge: TranscriptionQueueBridge) async {
+        for _ in 0..<80 {
+            if await bridge.getPendingCount() == 0 { return }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
+    @MainActor @Test
+    func successfulChunkTranscriptionCountsOneApiCallPerChunk() async {
+        let stats = TestStatistics()
+        let service = StubTranscriptionService(mode: .success("hello"))
+        let transcription = Transcription(statistics: stats, service: service)
+        let previousMute = SoundEffect.isMuted
+        SoundEffect.isMuted = true
+        defer {
+            SoundEffect.isMuted = previousMute
+            transcription.queueBridge.stopListening()
+        }
+
+        for _ in 0..<4 {
+            let ticket = await transcription.queueBridge.nextSequence()
+            transcription.transcribe(
+                ticket: ticket,
+                chunk: AudioChunk(wavData: Data([0x00]), durationSeconds: 0.1)
+            )
+        }
+        await awaitQueueDrain(transcription.queueBridge)
+
+        #expect(
+            stats.totalApiCalls == 4,
+            "Each chunk send is one provider API request; four chunks must report four API calls"
+        )
+        #expect(
+            stats.recordedRecordings.isEmpty,
+            "Transcription must not increment per-recording counters; recording count is the caller's responsibility"
+        )
+    }
+
+    @MainActor @Test
+    func failedChunkTranscriptionStillCountsOneApiCall() async {
+        let stats = TestStatistics()
+        let service = StubTranscriptionService(mode: .failure)
+        let transcription = Transcription(statistics: stats, service: service)
+        let previousMute = SoundEffect.isMuted
+        SoundEffect.isMuted = true
+        defer {
+            SoundEffect.isMuted = previousMute
+            transcription.queueBridge.stopListening()
+        }
+
+        let ticket = await transcription.queueBridge.nextSequence()
+        transcription.transcribe(
+            ticket: ticket,
+            chunk: AudioChunk(wavData: Data([0x00]), durationSeconds: 0.1)
+        )
+        await awaitQueueDrain(transcription.queueBridge)
+
+        #expect(
+            stats.totalApiCalls == 1,
+            "Failed chunk send still consumed one provider request slot, so API-call counter should grow"
+        )
+        #expect(
+            stats.recordedRecordings.isEmpty,
+            "Failed chunks must not add to per-recording counters; chunks are not recordings"
+        )
+    }
 }

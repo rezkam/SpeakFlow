@@ -90,7 +90,10 @@ public final class Transcription {
             // swiftlint:disable:next line_length
             Logger.transcription.debug("Sending chunk #\(ticket.seq) session=\(ticket.session) duration=\(duration)s size=\(chunk.wavData.count)B (timeout: \(timeout)s)")
 
-            // Track API call attempt
+            // Each chunk send is one provider request, so totalApiCalls grows
+            // per chunk. The user-recording count is tracked separately by the
+            // caller via `recordRecording(...)` when the recording starts.
+            let statsContext = statisticsContext()
             statistics.recordApiCall()
             let metricsId = metricsSessionId
             if let metricsId {
@@ -107,7 +110,11 @@ public final class Transcription {
                     text = try await service.transcribe(audio: chunk.wavData)
                 }
                 let latencySeconds = Self.elapsedSeconds(since: latencyStart)
-                statistics.recordSTTLatency(seconds: latencySeconds)
+                statistics.recordSTTLatency(
+                    seconds: latencySeconds,
+                    providerId: statsContext.providerId,
+                    language: statsContext.language
+                )
                 if let metricsId {
                     await SessionMetricsStore.shared.recordSTTLatency(
                         sessionId: metricsId,
@@ -128,7 +135,12 @@ public final class Transcription {
                 Logger.transcription.info("Chunk #\(ticket.seq) success: \(text, privacy: .private)")
 
                 // Track successful transcription statistics
-                statistics.recordTranscription(text: text, audioDurationSeconds: chunk.durationSeconds)
+                statistics.recordTranscription(
+                    text: text,
+                    audioDurationSeconds: chunk.durationSeconds,
+                    providerId: statsContext.providerId,
+                    language: statsContext.language
+                )
 
                 await queueBridge.submitResult(ticket: ticket, text: text)
                 // Note: checkCompletion is called from the stream consumer (startListening)
@@ -152,7 +164,11 @@ public final class Transcription {
                 }
 
                 let latencySeconds = Self.elapsedSeconds(since: latencyStart)
-                statistics.recordSTTLatency(seconds: latencySeconds)
+                statistics.recordSTTLatency(
+                    seconds: latencySeconds,
+                    providerId: statsContext.providerId,
+                    language: statsContext.language
+                )
                 if let metricsId {
                     await SessionMetricsStore.shared.recordSTTLatency(
                         sessionId: metricsId,
@@ -240,6 +256,21 @@ public final class Transcription {
             sessionId: sessionId,
             metadata: ["hasSession": sessionId == nil ? "false" : "true"]
         )
+    }
+
+    private func statisticsContext() -> (providerId: String?, language: String?) {
+        let providerId = activeBatchProvider?.id ?? ProviderSettings.shared.activeProviderId
+        let settings = Settings.shared
+        let language: String?
+        switch providerId {
+        case ProviderId.deepgram:
+            language = settings.deepgramLanguage
+        case ProviderId.mistral, ProviderId.mistralBatch:
+            language = settings.mistralLanguage
+        default:
+            language = ""
+        }
+        return (providerId, language)
     }
 
     private static func elapsedSeconds(since start: ContinuousClock.Instant) -> TimeInterval {
