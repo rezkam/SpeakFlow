@@ -397,7 +397,7 @@ struct MistralSharedValidationTests {
 struct MistralBatchSettingsIntegrationTests {
 
     @Test @MainActor
-    func transcribe_usesInjectedSettings() async {
+    func transcribe_usesInjectedSettings() async throws {
         let spySettings = SpyMistralSettings()
         spySettings.mistralBatchModel = "custom-model"
         spySettings.mistralLanguage = "ja"
@@ -414,7 +414,7 @@ struct MistralBatchSettingsIntegrationTests {
 
         // We can't execute the actual network call, but we can verify the provider
         // reads settings via the injected protocols by testing buildRequest directly.
-        let request = try! provider.buildRequest(
+        let request = try provider.buildRequest(
             audio: Data("x".utf8),
             apiKey: "test-key",
             model: spySettings.mistralBatchModel,

@@ -395,8 +395,8 @@ struct TextInserterPidFocusTests {
         // Without this override, CI runners can flakily promote the target app
         // (e.g. Finder) to frontmost when the test process yields the main actor,
         // causing ensureTargetFocused to return immediately with true.
-        inserter._testIsTargetFrontmost = false
-        defer { inserter._testIsTargetFrontmost = nil }
+        inserter.testIsTargetFrontmost = false
+        defer { inserter.testIsTargetFrontmost = nil }
 
         // Set the target to a running app so the "is still alive" guard passes.
         inserter.targetElement = AXUIElementCreateApplication(backgroundApp.processIdentifier)
@@ -452,8 +452,8 @@ struct TextInserterPidFocusTests {
 
         // Force isTargetAppFrontmost() to return false deterministically so the
         // timeout logic is exercised regardless of live system frontmost state.
-        inserter._testIsTargetFrontmost = false
-        defer { inserter._testIsTargetFrontmost = nil; inserter.cancelAndReset() }
+        inserter.testIsTargetFrontmost = false
+        defer { inserter.testIsTargetFrontmost = nil; inserter.cancelAndReset() }
 
         inserter.targetElement = AXUIElementCreateApplication(backgroundApp.processIdentifier)
         inserter.targetPid = backgroundApp.processIdentifier
@@ -569,14 +569,14 @@ struct TextInserterQueueGuardTests {
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
         defer {
-            inserter._testIsTargetFrontmost = nil
+            inserter.testIsTargetFrontmost = nil
             inserter.cancelAndReset()
         }
 
         // Keep the first queued task blocked so queue depth is stable for assertion.
         inserter.targetElement = AXUIElementCreateSystemWide()
         inserter.targetPid = NSRunningApplication.current.processIdentifier
-        inserter._testIsTargetFrontmost = false
+        inserter.testIsTargetFrontmost = false
 
         inserter.replaceTail(replacingChars: 2, with: "abc")
 
@@ -608,14 +608,14 @@ struct TextInserterQueueGuardTests {
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
         defer {
-            inserter._testIsTargetFrontmost = nil
+            inserter.testIsTargetFrontmost = nil
             inserter.cancelAndReset()
         }
 
         // Keep queued work pending so cap checks are observable.
         inserter.targetElement = AXUIElementCreateSystemWide()
         inserter.targetPid = NSRunningApplication.current.processIdentifier
-        inserter._testIsTargetFrontmost = false
+        inserter.testIsTargetFrontmost = false
 
         let attempts = Config.maxQueuedTextInsertions + 25
         for _ in 0..<attempts {

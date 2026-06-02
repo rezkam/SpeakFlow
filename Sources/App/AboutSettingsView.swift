@@ -22,32 +22,28 @@ struct AboutSettingsView: View {
                 Text("SpeakFlow")
                     .font(.title)
                     .fontWeight(.bold)
+                    .foregroundStyle(Theme.text)
 
-                Text("Version \(appVersion)")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Text("Version \(appVersion) · macOS 15.3+")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text3)
 
-                Text("Voice-to-text transcription for macOS")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
+                Text("Voice-first dictation for the Mac.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text2)
+                    .padding(.top, 4)
             }
             .padding(.top, 16)
 
             // Links
-            HStack(spacing: 16) {
-                Link(destination: Self.githubURL) {
-                    Label("GitHub", systemImage: "link")
-                }
-
-                Text("·")
-                    .foregroundStyle(.quaternary)
-
-                Link(destination: Self.licenseURL) {
-                    Label("Apache 2.0 License", systemImage: "doc.text")
-                }
+            HStack(spacing: 18) {
+                Link("Acknowledgements", destination: Self.githubURL)
+                Link("License", destination: Self.licenseURL)
+                Link("Release Notes", destination: Self.githubURL)
             }
-            .font(.callout)
-            .padding(.top, 16)
+            .font(.system(size: 12.5))
+            .foregroundStyle(Theme.accent)
+            .padding(.top, 18)
 
             Spacer()
         }

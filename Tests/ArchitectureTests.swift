@@ -81,6 +81,52 @@ struct TestIsolationTests {
         #expect(stats.totalWords == 2)
         #expect(stats.totalSecondsTranscribed > 0.9)
     }
+
+    /// Behavioral: users upgrading with a stored `nova-2` Deepgram model must
+    /// land on `nova-3` so the model picker, banner catalog, and provider all
+    /// recognise the value. Nova 2 is no longer offered in the UI, so leaving
+    /// the stored value as-is would hide Deepgram options behind a default
+    /// fallthrough and prevent the user from switching back.
+    @Test @MainActor func testLegacyDeepgramNova2ModelIsMigratedToNova3() {
+        let settings = Settings.shared
+        let orig = settings.deepgramModel
+        defer { settings.deepgramModel = orig }
+
+        settings.deepgramModel = "nova-2"
+        #expect(settings.deepgramModel == "nova-3",
+                "Stored legacy Deepgram model 'nova-2' must be surfaced as 'nova-3' so the redesigned UI keeps showing Deepgram options")
+    }
+
+    /// Behavioral: the auto-end silence-duration slider exposes 1 second as a
+    /// valid choice ("1 s, snappy"). The Settings storage must round-trip that
+    /// value, otherwise selecting 1 silently turns into 3 and the UI lies.
+    @Test @MainActor func testAutoEndSilenceDurationHonorsOneSecondSelection() {
+        let settings = Settings.shared
+        let orig = settings.autoEndSilenceDuration
+        defer { settings.autoEndSilenceDuration = orig }
+
+        settings.autoEndSilenceDuration = 1.0
+        #expect(settings.autoEndSilenceDuration == 1.0,
+                "Slider's 1-second floor must round-trip; got \(settings.autoEndSilenceDuration)")
+
+        settings.autoEndSilenceDuration = 2.0
+        #expect(settings.autoEndSilenceDuration == 2.0,
+                "Slider's 2-second value must round-trip; got \(settings.autoEndSilenceDuration)")
+    }
+
+    /// Behavioral: the minimum-speech-ratio slider exposes 0% as a valid choice
+    /// ("0%, accept any audio"). Settings storage must round-trip 0 so users who
+    /// drag the slider to zero actually disable the speech-ratio gate, rather
+    /// than silently snapping back to the 1% default.
+    @Test @MainActor func testMinSpeechRatioHonorsZeroSelection() {
+        let settings = Settings.shared
+        let orig = settings.minSpeechRatio
+        defer { settings.minSpeechRatio = orig }
+
+        settings.minSpeechRatio = 0
+        #expect(settings.minSpeechRatio == 0,
+                "Slider's 0% floor must round-trip; got \(settings.minSpeechRatio)")
+    }
 }
 
 // MARK: - Text insertion focus verification

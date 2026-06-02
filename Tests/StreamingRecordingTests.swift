@@ -136,7 +136,7 @@ struct StreamingRecordingTests {
         let ctx = makeController()
         ctx.controller.startRecording()
 
-        guard let sessionId = ctx.controller._testCurrentMetricsSessionId else {
+        guard let sessionId = ctx.controller.testCurrentMetricsSessionId else {
             Issue.record("Metrics session was not started")
             return
         }
@@ -224,5 +224,95 @@ struct StreamingRecordingTests {
         #expect(!ctx.controller.isRecording, "Should not start recording")
         #expect(ctx.banner.bannerMessages.count == 1, "Should show error banner")
         #expect(ctx.banner.bannerMessages.first?.1 == .error, "Banner should be error style")
+    }
+}
+
+// MARK: - Streaming Duration Accounting
+
+/// Streaming dictation must contribute its elapsed time to total transcribed
+/// duration. Previously, the streaming final path passed `audioDurationSeconds: 0`
+/// to `recordTranscription`, causing `totalSecondsTranscribed`, per-provider
+/// seconds, and the dashboard "time saved" calculation to stay at zero for
+/// every streaming recording, even while words and recording count increased.
+@Suite("RecordingController: Streaming Duration Accounting", .serialized)
+struct StreamingDurationAccountingTests {
+
+    @MainActor
+    private func makeController() -> StreamingTestContext {
+        let providerSettings = SpyProviderSettings()
+        let providerRegistry = SpyProviderRegistry()
+        let settings = SpySettings()
+        settings.streamingTrailingFinalTimeout = 0.0
+
+        let mockSession = MockStreamingSession()
+        let mockProvider = MockStreamingProvider()
+        mockProvider.isConfigured = true
+        mockProvider.mockSession = mockSession
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        providerRegistry.register(mockProvider)
+
+        let (controller, ki, ti, bp) = makeTestRecordingController(
+            providerSettings: providerSettings,
+            providerRegistry: providerRegistry,
+            settings: settings
+        )
+        return StreamingTestContext(
+            controller: controller, provider: mockProvider, session: mockSession,
+            textInserter: ti, banner: bp, keyInterceptor: ki
+        )
+    }
+
+    @MainActor @Test
+    func streamingFinal_recordsElapsedSegmentDurationNotZero() async throws {
+        let stats = Statistics.shared
+        let baselineSeconds = stats.totalSecondsTranscribed
+        let baselineDeepgramSeconds = stats.providerUsage[ProviderId.deepgram]?.seconds ?? 0
+
+        let ctx = makeController()
+        ctx.controller.startRecording()
+        guard let lsc = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created"); return
+        }
+
+        try await Task.sleep(for: .milliseconds(120))
+        lsc.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "hello world",
+            isFinal: true,
+            speechFinal: true
+        )))
+
+        let delta = stats.totalSecondsTranscribed - baselineSeconds
+        #expect(delta >= 0.1,
+                "Streaming final must contribute at least the elapsed segment time (>= 100ms) to totalSecondsTranscribed; got delta=\(delta)")
+
+        let providerDelta = (stats.providerUsage[ProviderId.deepgram]?.seconds ?? 0) - baselineDeepgramSeconds
+        #expect(providerDelta >= 0.1,
+                "Per-provider seconds must also grow by at least the elapsed segment time; got delta=\(providerDelta)")
+    }
+
+    @MainActor @Test
+    func streamingFinals_accumulateSegmentDurations() async throws {
+        let stats = Statistics.shared
+        let baseline = stats.totalSecondsTranscribed
+
+        let ctx = makeController()
+        ctx.controller.startRecording()
+        guard let lsc = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created"); return
+        }
+
+        try await Task.sleep(for: .milliseconds(80))
+        lsc.handleEvent(.finalResult(TranscriptionResult(transcript: "hello", isFinal: true, speechFinal: true)))
+        let afterFirst = stats.totalSecondsTranscribed - baseline
+
+        try await Task.sleep(for: .milliseconds(80))
+        lsc.handleEvent(.finalResult(TranscriptionResult(transcript: "world again", isFinal: true, speechFinal: true)))
+        let afterSecond = stats.totalSecondsTranscribed - baseline
+
+        #expect(afterSecond > afterFirst,
+                "Second final must add its own segment duration on top of the first; afterFirst=\(afterFirst), afterSecond=\(afterSecond)")
+        #expect(afterSecond >= 0.15,
+                "Two segments of ~80ms each should sum to >= 150ms; got \(afterSecond)")
     }
 }

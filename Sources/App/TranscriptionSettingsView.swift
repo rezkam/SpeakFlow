@@ -1,447 +1,79 @@
 import SwiftUI
 import SpeakFlowCore
 
-/// Unified transcription settings: provider selection on top, provider-specific
-/// audio/API settings below. Streaming and batch modes share reusable sections;
-/// each provider only adds its own model/language picker.
+/// Transcription settings split into Universal, model-specific options, and Advanced.
 struct TranscriptionSettingsView: View {
     @Environment(\.appState) private var state
 
+    let switchTab: (SettingsTab) -> Void
+
     var body: some View {
-        // Read refreshVersion so the view re-evaluates when provider configuration changes
         let _ = state.refreshVersion
         let configured = ProviderRegistry.shared.configuredProviders
+        let activeProvider = activeConfiguredProvider(from: configured)
+        let activeModelId = activeModelId(for: activeProvider?.id ?? state.activeProviderId)
 
-        Form {
-            // MARK: - Provider Selection
-
-            providerSelectionSection(configured: configured)
-
-            // MARK: - Provider-Specific + Shared Settings
-
-            if !configured.isEmpty {
-                let activeMode = ProviderRegistry.shared.provider(for: state.activeProviderId)?.mode
-
-                if activeMode == .streaming {
-                    streamingProviderSettings
-                } else {
-                    batchProviderSettings
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .navigationTitle("Transcription")
-        .onAppear {
-            autoSelectProvider()
-        }
-    }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Provider Selection
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    @ViewBuilder
-    private func providerSelectionSection(configured: [any TranscriptionProvider]) -> some View {
-        if configured.count > 1 {
-            Section {
-                Picker("Transcription Provider", selection: providerBinding) {
-                    ForEach(configured, id: \.id) { provider in
-                        Text(provider.providerDisplayName).tag(provider.id)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-            } header: {
-                Text("Provider")
-            } footer: {
-                Text("Batch providers record audio and transcribe after each chunk. Streaming providers transcribe in real-time as you speak.")
-            }
-        } else if configured.isEmpty {
-            Section {
-                Label(
-                    "Set up a provider in the Accounts tab to configure transcription settings.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .foregroundStyle(.orange)
-                .font(.callout)
-            } header: {
-                Text("Provider")
-            }
-        }
-    }
-
-    private var providerBinding: Binding<String> {
-        Binding(
-            get: { state.activeProviderId },
-            set: { newValue in
-                ProviderSettings.shared.activeProviderId = newValue
-                state.refresh()
-            }
-        )
-    }
-
-    private func autoSelectProvider() {
-        let configured = ProviderRegistry.shared.configuredProviders
-        if !configured.isEmpty, !configured.contains(where: { $0.id == state.activeProviderId }) {
-            ProviderSettings.shared.activeProviderId = configured[0].id
-            state.refresh()
-        }
-    }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Streaming Provider Settings
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /// Settings for streaming providers (Deepgram, Mistral Realtime).
-    /// Layout: Provider-specific API section → Shared auto-end section.
-    @ViewBuilder
-    private var streamingProviderSettings: some View {
-        // Provider-specific API settings
-        switch state.activeProviderId {
-        case ProviderId.deepgram:   deepgramAPISection
-        case ProviderId.mistral:    mistralRealtimeAPISection
-        default:                    EmptyView()
-        }
-
-        // Deepgram has its own streaming-specific options
-        if state.activeProviderId == ProviderId.deepgram {
-            deepgramStreamingOptionsSection
-        }
-
-        // Shared: streaming auto-end
-        streamingAutoEndSection
-
-        // Shared: streaming reliability and commit behavior
-        streamingReliabilitySection
-    }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Batch Provider Settings
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /// Settings for batch providers (ChatGPT, Mistral Batch).
-    /// Layout: Shared recording → Provider-specific API → Shared VAD → Shared auto-end → Speech detection.
-    @ViewBuilder
-    private var batchProviderSettings: some View {
-        // Shared: recording chunk settings (all batch providers)
-        batchRecordingSection
-
-        // Provider-specific API settings
-        switch state.activeProviderId {
-        case ProviderId.mistralBatch:   mistralBatchAPISection
-        default:                        EmptyView()  // ChatGPT has no extra API settings
-        }
-
-        // Shared: VAD (all batch providers)
-        vadSection
-
-        // Shared: pre-VAD audio cleanup
-        noiseGateSection
-
-        // Shared: auto-end (all batch providers)
-        batchAutoEndSection
-
-        // Shared: speech detection threshold (all batch providers)
-        speechDetectionSection
-    }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Shared Sections (Batch)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /// Chunk duration + silent chunk skipping. Used by all batch providers.
-    private var batchRecordingSection: some View {
-        Section {
-            Picker("Chunk Duration", selection: state.binding(for: \.chunkDuration)) {
-                ForEach(ChunkDuration.allCases, id: \.self) { duration in
-                    Text(duration.displayName).tag(duration)
-                }
-            }
-            .pickerStyle(.menu)
-
-            Toggle("Skip Silent Chunks", isOn: state.binding(for: \.skipSilentChunks))
-        } header: {
-            Text("Recording")
-        } footer: {
-            Text("Chunk duration controls how often audio is sent for transcription. Skip silent chunks saves API costs by not sending audio with no speech detected.")
-        }
-    }
-
-    /// VAD toggle + sensitivity. Used by all batch providers.
-    private var vadSection: some View {
-        Section {
-            Toggle("Enable Voice Activity Detection", isOn: state.binding(for: \.vadEnabled))
-
-            if state.vadEnabled {
-                SettingSlider(
-                    title: "VAD Sensitivity",
-                    displayValue: String(format: "%.0f%%", state.vadThreshold * 100),
-                    value: floatBinding(for: \.vadThreshold),
-                    range: 0.05...0.50, step: 0.05,
-                    lowLabel: "More sensitive",
-                    highLabel: "Stricter filtering"
-                )
-
-                Toggle("Enable Volume Gate", isOn: state.binding(for: \.vadVolumeGateEnabled))
-                if state.vadVolumeGateEnabled {
-                    SettingSlider(
-                        title: "Min Speech Volume",
-                        displayValue: String(format: "%.4f", state.vadMinVolumeForSpeech),
-                        value: floatBinding(for: \.vadMinVolumeForSpeech),
-                        range: 0.001...0.050, step: 0.001,
-                        lowLabel: "Allow quieter speech",
-                        highLabel: "Reject more noise"
-                    )
-                }
-
-                SettingSlider(
-                    title: "Volume Smoothing",
-                    displayValue: String(format: "%.2f", state.vadVolumeSmoothingFactor),
-                    value: floatBinding(for: \.vadVolumeSmoothingFactor),
-                    range: 0.05...1.0, step: 0.05,
-                    lowLabel: "More smoothing",
-                    highLabel: "More reactive"
-                )
-
-                SettingSlider(
-                    title: "State Reset Interval",
-                    displayValue: String(format: "%.1fs", state.vadStateResetInterval),
-                    value: state.binding(for: \.vadStateResetInterval),
-                    range: 0.5...30.0, step: 0.5,
-                    lowLabel: "0.5s",
-                    highLabel: "30s"
-                )
-            }
-        } header: {
-            Text("Voice Activity Detection")
-        } footer: {
-            Text("VAD analyzes audio in real time to detect when you are speaking. Volume gate + smoothing help prevent keyboard/fan noise from triggering speech.")
-        }
-    }
-
-    private var noiseGateSection: some View {
-        Section {
-            Toggle("Enable Pre-VAD Noise Gate", isOn: state.binding(for: \.audioNoiseGateEnabled))
-            if state.audioNoiseGateEnabled {
-                SettingSlider(
-                    title: "Noise Gate RMS Threshold",
-                    displayValue: String(format: "%.4f", state.audioNoiseGateRmsThreshold),
-                    value: floatBinding(for: \.audioNoiseGateRmsThreshold),
-                    range: 0.000...0.010, step: 0.0005,
-                    lowLabel: "Less filtering",
-                    highLabel: "More filtering"
-                )
-            }
-        } header: {
-            Text("Noise Filtering")
-        } footer: {
-            Text("Applies a lightweight gate before VAD and buffering. Useful in noisy rooms to keep low-level background noise from contaminating detection/transcription.")
-        }
-    }
-
-    /// Auto-end for batch mode (enabled by default). Used by all batch providers.
-    private var batchAutoEndSection: some View {
-        Section {
-            Toggle("Auto-End Recording on Silence", isOn: state.binding(for: \.autoEndEnabled))
-
-            if state.autoEndEnabled {
-                silenceDurationSlider
-
-                SettingSlider(
-                    title: "Min Session Duration",
-                    displayValue: String(format: "%.1fs", state.autoEndMinSessionDuration),
-                    value: state.binding(for: \.autoEndMinSessionDuration),
-                    range: 0...10, step: 0.5,
-                    lowLabel: "0s",
-                    highLabel: "10s"
-                )
-
-                Toggle("Require Speech Before Auto-End", isOn: state.binding(for: \.autoEndRequireSpeechFirst))
-
-                SettingSlider(
-                    title: "No-Speech Timeout",
-                    displayValue: state.autoEndNoSpeechTimeout == 0
-                        ? "Disabled"
-                        : String(format: "%.0fs", state.autoEndNoSpeechTimeout),
-                    value: state.binding(for: \.autoEndNoSpeechTimeout),
-                    range: 0...60, step: 1,
-                    lowLabel: "0s (off)",
-                    highLabel: "60s"
-                )
-
-                SettingSlider(
-                    title: "Max Continuous Speech Safety",
-                    displayValue: state.autoEndMaxContinuousSpeechDuration == 0
-                        ? "Disabled"
-                        : String(format: "%.0fs", state.autoEndMaxContinuousSpeechDuration),
-                    value: state.binding(for: \.autoEndMaxContinuousSpeechDuration),
-                    range: 0...600, step: 5,
-                    lowLabel: "0s (off)",
-                    highLabel: "600s"
-                )
-
-                Toggle("Thinking Pause Extension", isOn: state.binding(for: \.thinkingPauseEnabled))
-                if state.thinkingPauseEnabled {
-                    SettingSlider(
-                        title: "Thinking Pause Extension",
-                        displayValue: String(format: "+%.0fs", state.thinkingPauseExtensionSeconds),
-                        value: state.binding(for: \.thinkingPauseExtensionSeconds),
-                        range: 1...15, step: 1,
-                        lowLabel: "+1s",
-                        highLabel: "+15s"
-                    )
-                }
-
-                Toggle("Turn Classifier", isOn: state.binding(for: \.turnClassifierEnabled))
-                if state.turnClassifierEnabled {
-                    SettingSlider(
-                        title: "Classifier Min Silence",
-                        displayValue: String(format: "%.1fs", state.turnClassifierMinimumSilence),
-                        value: state.binding(for: \.turnClassifierMinimumSilence),
-                        range: 0.5...10, step: 0.5,
-                        lowLabel: "0.5s",
-                        highLabel: "10s"
-                    )
-                    SettingSlider(
-                        title: "Classifier Incomplete Extension",
-                        displayValue: String(format: "+%.0fs", state.turnClassifierIncompleteExtensionSeconds),
-                        value: state.binding(for: \.turnClassifierIncompleteExtensionSeconds),
-                        range: 1...20, step: 1,
-                        lowLabel: "+1s",
-                        highLabel: "+20s"
-                    )
-                    SettingSlider(
-                        title: "Classifier Threshold",
-                        displayValue: String(format: "%.2f", state.turnClassifierThreshold),
-                        value: floatBinding(for: \.turnClassifierThreshold),
-                        range: 0.1...0.9, step: 0.05,
-                        lowLabel: "More complete",
-                        highLabel: "More incomplete"
-                    )
-                }
-
-                Toggle("Idle Nudge Before Auto-End", isOn: state.binding(for: \.idleNudgeEnabled))
-                if state.idleNudgeEnabled {
-                    SettingSlider(
-                        title: "Nudge Initial Delay",
-                        displayValue: String(format: "%.1fs", state.idleNudgeInitialDelay),
-                        value: state.binding(for: \.idleNudgeInitialDelay),
-                        range: 0...10, step: 0.5,
-                        lowLabel: "0s",
-                        highLabel: "10s"
-                    )
-                    SettingSlider(
-                        title: "Nudge Interval",
-                        displayValue: String(format: "%.1fs", state.idleNudgeInterval),
-                        value: state.binding(for: \.idleNudgeInterval),
-                        range: 1...10, step: 0.5,
-                        lowLabel: "1s",
-                        highLabel: "10s"
-                    )
-                    Stepper(
-                        "Max Nudges: \(state.idleNudgeMaxCount)",
-                        value: state.binding(for: \.idleNudgeMaxCount),
-                        in: 1...10
-                    )
-                }
-            }
-        } header: {
-            Text("Auto-End")
-        } footer: {
-            Text("Pro controls for auto-end timing, thinking-pause behavior, classifier gating, and idle re-engagement.")
-        }
-    }
-
-    /// Speech detection ratio. Used by all batch providers.
-    private var speechDetectionSection: some View {
-        Section {
-            SettingSlider(
-                title: "Minimum Speech Ratio",
-                displayValue: String(format: "%.0f%%", state.minSpeechRatio * 100),
-                value: floatBinding(for: \.minSpeechRatio),
-                range: 0.01...0.10, step: 0.01,
-                lowLabel: "1% — very sensitive",
-                highLabel: "10% — requires more speech"
+        VStack(alignment: .leading, spacing: 18) {
+            ActiveModelBanner(
+                activeProvider: activeProvider,
+                activeModelId: activeModelId,
+                configuredProviders: configured,
+                allModels: availableModels(for: configured),
+                onActivate: { model in activate(model: model) },
+                onManageProviders: { switchTab(.providers) }
             )
-        } header: {
-            Text("Speech Detection")
-        } footer: {
-            Text("Minimum percentage of a chunk that must contain speech before it is sent for transcription. Default: 1%.")
-        }
-    }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Shared Sections (Streaming)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            universalSection(activeProvider: activeProvider)
 
-    /// Auto-end for streaming mode. Used by all streaming providers.
-    private var streamingAutoEndSection: some View {
-        Section {
-            Toggle("Auto-End on Silence", isOn: state.binding(for: \.streamingAutoEndEnabled))
-
-            if state.streamingAutoEndEnabled {
-                silenceDurationSlider
+            if let activeProvider {
+                modelSection(provider: activeProvider, modelId: activeModelId)
             }
-        } header: {
-            Text("Auto-End")
-        } footer: {
-            Text("When enabled, live transcription sessions stop after sustained silence. Enabled by default; tune silence duration for your speaking style.")
+
+            advancedSection(activeProvider: activeProvider, activeModelId: activeModelId)
         }
+        .onAppear(perform: autoSelectProviderIfNeeded)
     }
 
-    private var streamingReliabilitySection: some View {
-        Section {
-            Toggle("KeepAlive Pings", isOn: state.binding(for: \.streamingKeepAliveEnabled))
-            if state.streamingKeepAliveEnabled {
-                SettingSlider(
-                    title: "KeepAlive Interval",
-                    displayValue: String(format: "%.0fs", state.streamingKeepAliveInterval),
-                    value: state.binding(for: \.streamingKeepAliveInterval),
-                    range: 2...20, step: 1,
-                    lowLabel: "2s",
-                    highLabel: "20s"
+    // MARK: - Universal
+
+    private func universalSection(activeProvider: (any TranscriptionProvider)?) -> some View {
+        SectionCard(
+            "Universal",
+            footer: "These settings apply to the active model. Language is sent to the provider as a hint when the provider supports it. Auto-detect lets the model decide."
+        ) {
+            SettingRow(
+                "Language",
+                description: "A BCP-47 hint sent to the provider. Auto-detect works in most cases. Setting a language can improve accuracy and first-token latency."
+            ) {
+                languagePicker
+            }
+            SettingRow(
+                "Auto-end on silence",
+                description: "Stop the recording automatically after a sustained pause, so you do not have to press the hotkey again."
+            ) {
+                Toggle("", isOn: autoEndBinding(for: activeProvider))
+                    .labelsHidden()
+            }
+            if isAutoEndEnabled(for: activeProvider) {
+                SettingSliderRow(
+                    label: "Silence duration",
+                    description: "How long to wait in silence before auto-ending.",
+                    value: state.binding(for: \.autoEndSilenceDuration),
+                    range: 1...30,
+                    step: 1,
+                    formatted: "\(Int(state.autoEndSilenceDuration)) s",
+                    lowLabel: "1 s, snappy",
+                    highLabel: "30 s, patient"
                 )
             }
-
-            Toggle("Auto-Reconnect on Drop", isOn: state.binding(for: \.streamingReconnectEnabled))
-
-            Stepper(
-                "Minimum Final Words: \(state.streamingMinimumFinalWordCount)",
-                value: state.binding(for: \.streamingMinimumFinalWordCount),
-                in: 1...5
-            )
-        } header: {
-            Text("Streaming Reliability")
-        } footer: {
-            Text("KeepAlive prevents idle WebSocket drops. Reconnect attempts one recovery after unexpected close. Minimum Final Words controls short non-terminal final commits.")
         }
     }
 
-    /// Reusable silence duration slider (used by both batch and streaming auto-end).
-    private var silenceDurationSlider: some View {
-        SettingSlider(
-            title: "Silence Duration",
-            displayValue: String(format: "%.0fs", state.autoEndSilenceDuration),
-            value: state.binding(for: \.autoEndSilenceDuration),
-            range: 3...30, step: 1,
-            lowLabel: "3s — quick stop",
-            highLabel: "30s — tolerates long pauses"
-        )
-    }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Provider-Specific API Sections
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /// Deepgram-specific: model + language picker.
-    private var deepgramAPISection: some View {
-        Section {
-            Picker("Model", selection: state.binding(for: \.deepgramModel)) {
-                Text("Nova 3").tag("nova-3")
-                Text("Nova 2").tag("nova-2")
-            }
-            .pickerStyle(.menu)
-
-            Picker("Language", selection: state.binding(for: \.deepgramLanguage)) {
+    @ViewBuilder
+    private var languagePicker: some View {
+        switch state.activeProviderId {
+        case ProviderId.deepgram:
+            Picker("", selection: state.binding(for: \.deepgramLanguage)) {
                 Text("English (US)").tag("en-US")
                 Text("English (UK)").tag("en-GB")
                 Text("Spanish").tag("es")
@@ -452,152 +84,12 @@ struct TranscriptionSettingsView: View {
                 Text("Korean").tag("ko")
                 Text("Chinese").tag("zh")
             }
-            .pickerStyle(.menu)
-        } header: {
-            Text("Deepgram API")
-        } footer: {
-            Text("Nova 3 is the latest model with the best accuracy. Language selection determines the transcription language sent to the Deepgram API.")
-        }
-    }
-
-    /// Deepgram-specific: interim results, smart formatting, endpointing.
-    private var deepgramStreamingOptionsSection: some View {
-        Group {
-            Section {
-                Toggle("Show Interim Results", isOn: state.binding(for: \.deepgramInterimResults))
-                Toggle("Smart Formatting", isOn: state.binding(for: \.deepgramSmartFormat))
-            } header: {
-                Text("Real-Time Options")
-            } footer: {
-                Text("Interim results show partial text as you speak, refining in real-time. Smart formatting adds punctuation and capitalization automatically.")
-            }
-
-            Section {
-                SettingSlider(
-                    title: "Endpointing",
-                    displayValue: "\(state.deepgramEndpointingMs) ms",
-                    value: deepgramEndpointingBinding,
-                    range: 100...3000, step: 100,
-                    lowLabel: "100 ms — fast response",
-                    highLabel: "3000 ms — waits for pauses"
-                )
-            } header: {
-                Text("Utterance Detection")
-            } footer: {
-                Text("""
-                Controls how quickly Deepgram detects the end of an utterance. \
-                Lower values give faster responses but may split mid-sentence. \
-                Higher values wait longer for natural pauses. Default: 300 ms.
-                """)
-            }
-        }
-    }
-
-    /// Mistral Realtime: model + language.
-    private var mistralRealtimeAPISection: some View {
-        Section {
-            Picker("Model", selection: state.binding(for: \.mistralModel)) {
-                Text("Voxtral Mini Transcribe (2602)").tag("voxtral-mini-transcribe-realtime-2602")
-            }
-            .pickerStyle(.menu)
-
-            mistralLanguagePicker(includeAutoDetect: true)
-        } header: {
-            Text("Mistral API")
-        } footer: {
-            Text("Voxtral Mini Transcribe delivers low-latency live transcription. Setting a language boosts accuracy; leave on Auto-Detect to let the model identify the language. $0.006/min.")
-        }
-    }
-
-    /// Mistral Batch: model + language + temperature + diarization + context bias.
-    @ViewBuilder
-    private var mistralBatchAPISection: some View {
-        // Core API settings
-        Section {
-            Picker("Model", selection: state.binding(for: \.mistralBatchModel)) {
-                Text("Voxtral Mini (voxtral-mini-latest)").tag("voxtral-mini-latest")
-            }
-            .pickerStyle(.menu)
-
-            mistralLanguagePicker(includeAutoDetect: true)
-
-            SettingSlider(
-                title: "Temperature",
-                displayValue: String(format: "%.1f", state.mistralTemperature),
-                value: mistralTemperatureBinding,
-                range: 0...1, step: 0.1,
-                lowLabel: "0 — deterministic",
-                highLabel: "1.0 — more varied"
-            )
-        } header: {
-            Text("Mistral API")
-        } footer: {
-            Text("Voxtral Mini Transcribe processes each audio chunk after recording. Temperature 0 gives deterministic, consistent results. $0.003/min.")
-        }
-
-        // Speaker diarization (incompatible with language auto-detect warning)
-        Section {
-            Toggle("Speaker Diarization", isOn: state.binding(for: \.mistralDiarize))
-        } header: {
-            Text("Speaker Identification")
-        } footer: {
-            Text("Identifies who is speaking in each segment. Requires language to be set — diarization does not work with Auto-Detect. Best with voxtral-mini-latest (voxtral-mini-2602 model).")
-        }
-
-        // Context bias (vocabulary hints)
-        Section {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Context Bias")
-                    .font(.body)
-                TextEditor(text: state.binding(for: \.mistralContextBias))
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 60, maxHeight: 120)
-                    .scrollContentBackground(.hidden)
-                    .background(Color(NSColor.textBackgroundColor))
-                    .cornerRadius(6)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color(NSColor.separatorColor), lineWidth: 0.5)
-                    )
-                    .overlay(alignment: .topLeading) {
-                        if state.mistralContextBias.isEmpty {
-                            Text("e.g. Kubernetes,gRPC,SwiftUI,Barack Obama")
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 4)
-                                .padding(.leading, 4)
-                                .allowsHitTesting(false)
-                        }
-                    }
-            }
-        } header: {
-            Text("Vocabulary Hints")
-        } footer: {
-            Text("Comma-separated words or phrases (up to 100) that guide the model toward correct spellings of names, technical terms, or domain vocabulary. Optimised for English; experimental in other languages.")
-        }
-    }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Shared Pickers
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /// Mistral language picker (shared by realtime and batch).
-    ///
-    /// Languages listed are those explicitly benchmarked by Mistral (FLEURS + Mozilla CV).
-    /// Additional languages (ja, ko, zh, ru) have weaker support via the model backbone
-    /// but are offered as they commonly appear in production use.
-    ///
-    /// `includeAutoDetect`: when true, adds an "Auto-Detect" option (empty string tag)
-    /// that omits the language parameter entirely, letting the API identify the language.
-    private func mistralLanguagePicker(includeAutoDetect: Bool) -> some View {
-        Picker("Language", selection: state.binding(for: \.mistralLanguage)) {
-            if includeAutoDetect {
-                Text("Auto-Detect").tag("")
-                    .help("The model detects the language automatically. Setting a language explicitly gives better accuracy.")
+            .labelsHidden()
+            .fixedSize()
+        case ProviderId.mistral, ProviderId.mistralBatch:
+            Picker("", selection: state.binding(for: \.mistralLanguage)) {
+                Text("Auto-detect").tag("")
                 Divider()
-            }
-            // — Fully benchmarked languages (Mistral FLEURS + Mozilla Common Voice) —
-            Group {
                 Text("English").tag("en")
                 Text("French").tag("fr")
                 Text("German").tag("de")
@@ -607,46 +99,607 @@ struct TranscriptionSettingsView: View {
                 Text("Dutch").tag("nl")
                 Text("Hindi").tag("hi")
                 Text("Arabic").tag("ar")
-            }
-            Divider()
-            // — Additional languages (backbone support; not in official benchmarks) —
-            Group {
+                Divider()
                 Text("Japanese").tag("ja")
                 Text("Korean").tag("ko")
-                Text("Chinese (Mandarin)").tag("zh")
+                Text("Chinese").tag("zh")
                 Text("Russian").tag("ru")
             }
+            .labelsHidden()
+            .fixedSize()
+        default:
+            Text("Auto-detect")
+                .foregroundStyle(Theme.text3)
+                .font(.system(size: 12.5))
         }
-        .pickerStyle(.menu)
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MARK: - Binding Helpers
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Model options
 
-    /// Endpointing requires Double↔Int conversion for the Slider.
-    private var deepgramEndpointingBinding: Binding<Double> {
-        Binding(
-            get: { Double(state.deepgramEndpointingMs) },
-            set: { newValue in
-                Settings.shared.deepgramEndpointingMs = Int(newValue)
-                state.refresh()
+    @ViewBuilder
+    private func modelSection(provider: any TranscriptionProvider, modelId: String) -> some View {
+        let mode: ModePill.Mode = provider.mode == .streaming ? .streaming : .batch
+        SectionCard(
+            "\(modelLabel(modelId)) options",
+            trailingPill: AnyView(ModePill(mode: mode)),
+            footer: provider.mode == .streaming
+                ? "Streaming options for \(provider.displayName) \(modelLabel(modelId)). Switch models to see different options."
+                : "Batch options for \(provider.displayName) \(modelLabel(modelId)). Switch models to see different options."
+        ) {
+            switch modelId {
+            case "nova-3":
+                deepgramBasic
+            case "voxtral-mini-transcribe-realtime-2602":
+                mistralRealtimeBasic
+            case "voxtral-mini-latest":
+                mistralBatchBasic
+            case "gpt-4o-transcribe":
+                openAIBasic
+            default:
+                Text("No model-specific options for \(modelId).")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Theme.text3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
             }
-        )
+        }
     }
 
-    /// Bridges a `Float` setting to the `Double` binding that `SettingSlider` expects.
+    private var deepgramBasic: some View {
+        Group {
+            SettingRow(
+                "Show interim results",
+                description: "Stream partial text as you speak. Disable for final-only output, which is cleaner but feels slower."
+            ) {
+                Toggle("", isOn: state.binding(for: \.deepgramInterimResults))
+                    .labelsHidden()
+            }
+            SettingRow(
+                "Smart formatting",
+                description: "Format numbers, dates, currencies, phone numbers, emails, and URLs the way you would type them."
+            ) {
+                Toggle("", isOn: state.binding(for: \.deepgramSmartFormat))
+                    .labelsHidden()
+            }
+            SettingSliderRow(
+                label: "Endpoint silence",
+                description: "How long Deepgram must hear silence after a word before deciding the utterance is over. Shorter is snappier. Longer waits through natural pauses.",
+                value: Binding(
+                    get: { Double(state.deepgramEndpointingMs) },
+                    set: { Settings.shared.deepgramEndpointingMs = Int($0); state.refresh() }
+                ),
+                range: 100...3000,
+                step: 50,
+                formatted: "\(state.deepgramEndpointingMs) ms",
+                lowLabel: "100 ms, snappy",
+                highLabel: "3000 ms, patient"
+            )
+        }
+    }
+
+    private var mistralRealtimeBasic: some View {
+        Group {
+            SettingRow(
+                "Show interim results",
+                description: "Voxtral Realtime currently streams partial tokens by default. This control will become editable when the provider exposes a setting."
+            ) {
+                Toggle("", isOn: .constant(true))
+                    .labelsHidden()
+                    .disabled(true)
+            }
+            SettingRow(
+                "Auto-end on speech pause",
+                description: "Let the live session close the turn when you stop speaking."
+            ) {
+                Toggle("", isOn: state.binding(for: \.streamingAutoEndEnabled))
+                    .labelsHidden()
+            }
+        }
+    }
+
+    private var mistralBatchBasic: some View {
+        Group {
+            SettingRow(
+                "Speaker diarization",
+                description: "Tag each segment with a speaker label. Useful for meetings and interviews. Requires a non-Auto-detect language."
+            ) {
+                Toggle("", isOn: state.binding(for: \.mistralDiarize))
+                    .labelsHidden()
+            }
+        }
+    }
+
+    private var openAIBasic: some View {
+        Group {
+            SettingRow(
+                "Vocabulary prompt",
+                description: "Short paragraph hinting proper nouns, jargon, or style. This UI is disabled until the ChatGPT provider exposes a stored prompt setting."
+            ) {
+                TextField("", text: .constant(""))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+                    .disabled(true)
+            }
+        }
+    }
+
+    // MARK: - Advanced
+
+    @ViewBuilder
+    private func advancedSection(activeProvider: (any TranscriptionProvider)?, activeModelId: String) -> some View {
+        DisclosureCard(
+            "Advanced settings",
+            subtitle: "Power-user tuning, most people never need these"
+        ) {
+            switch activeModelId {
+            case "nova-3":
+                deepgramAdvanced
+            case "voxtral-mini-transcribe-realtime-2602":
+                mistralRealtimeAdvanced
+            case "voxtral-mini-latest":
+                mistralBatchAdvanced
+            default:
+                EmptyView()
+            }
+
+            if activeProvider?.mode == .batch {
+                recordingAdvanced
+                vadAdvanced
+                audioFilteringAdvanced
+                autoEndAdvanced
+                speechDetectionAdvanced
+            }
+        }
+    }
+
+    private var deepgramAdvanced: some View {
+        SectionCard(
+            "Nova-3 advanced",
+            trailingPill: AnyView(ModePill(mode: .streaming)),
+            footer: "Wire-level reliability and decoder tuning. Defaults are safe for most users."
+        ) {
+            streamingReliabilityRows
+        }
+    }
+
+    private var mistralRealtimeAdvanced: some View {
+        SectionCard(
+            "Voxtral Realtime advanced",
+            trailingPill: AnyView(ModePill(mode: .streaming)),
+            footer: "Connection reliability and final-commit tuning. Defaults are safe for most users."
+        ) {
+            streamingReliabilityRows
+        }
+    }
+
+    private var mistralBatchAdvanced: some View {
+        SectionCard(
+            "Voxtral Mini advanced",
+            trailingPill: AnyView(ModePill(mode: .batch)),
+            footer: "Context biasing and decoder tuning. Defaults are safe for most users."
+        ) {
+            SettingRow(
+                "Context bias terms",
+                description: "Up to 100 comma-separated words or phrases that guide Voxtral toward correct spellings of names, technical terms, or domain vocabulary."
+            ) {
+                TextField("Telavox, Voxtral, kubectl", text: state.binding(for: \.mistralContextBias))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+            }
+            SettingSliderRow(
+                label: "Temperature",
+                description: "Sampling randomness. 0 is deterministic and literal. Higher values let the model vary more.",
+                value: floatBinding(for: \.mistralTemperature),
+                range: 0...1,
+                step: 0.05,
+                formatted: String(format: "%.2f", state.mistralTemperature),
+                lowLabel: "0, literal",
+                highLabel: "1, varied"
+            )
+        }
+    }
+
+    private var streamingReliabilityRows: some View {
+        Group {
+            SettingRow(
+                "Send keep-alive pings",
+                description: "Send periodic frames so the WebSocket does not idle-drop during long pauses."
+            ) {
+                Toggle("", isOn: state.binding(for: \.streamingKeepAliveEnabled))
+                    .labelsHidden()
+            }
+            if state.streamingKeepAliveEnabled {
+                SettingSliderRow(
+                    label: "Ping interval",
+                    description: "How often to send a keep-alive while you are silent.",
+                    value: state.binding(for: \.streamingKeepAliveInterval),
+                    range: 2...20,
+                    step: 1,
+                    formatted: "\(Int(state.streamingKeepAliveInterval)) s",
+                    lowLabel: "2 s",
+                    highLabel: "20 s"
+                )
+            }
+            SettingRow(
+                "Auto-reconnect on drop",
+                description: "Try to reopen the WebSocket once if it closes unexpectedly mid-utterance."
+            ) {
+                Toggle("", isOn: state.binding(for: \.streamingReconnectEnabled))
+                    .labelsHidden()
+            }
+            SettingRow(
+                "Drop short stutters",
+                description: "Discard non-terminal final results shorter than this many words. This suppresses single-word false starts."
+            ) {
+                Stepper(
+                    "\(state.streamingMinimumFinalWordCount)",
+                    value: state.binding(for: \.streamingMinimumFinalWordCount),
+                    in: 1...5
+                )
+                .labelsHidden()
+                .fixedSize()
+            }
+        }
+    }
+
+    private var recordingAdvanced: some View {
+        SectionCard(
+            "Recording",
+            footer: "Chunk duration controls how often audio is sent. Streaming providers use chunks for local gating while audio still streams continuously."
+        ) {
+            SettingRow(
+                "Chunk duration",
+                description: "How often recorded audio is grouped for transcription and local checks."
+            ) {
+                Picker("", selection: state.binding(for: \.chunkDuration)) {
+                    ForEach(ChunkDuration.allCases, id: \.self) { duration in
+                        Text(duration.displayName).tag(duration)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            SettingRow(
+                "Skip silent chunks",
+                description: "Do not send chunks containing only silence. This saves API calls."
+            ) {
+                Toggle("", isOn: state.binding(for: \.skipSilentChunks))
+                    .labelsHidden()
+            }
+        }
+    }
+
+    private var vadAdvanced: some View {
+        SectionCard(
+            "Voice Activity Detection",
+            footer: "Lower threshold catches quieter speech but may pick up noise. Higher threshold is stricter."
+        ) {
+            SettingRow(
+                "Enable VAD",
+                description: "Locally detect speech versus silence before sending audio to the model."
+            ) {
+                Toggle("", isOn: state.binding(for: \.vadEnabled))
+                    .labelsHidden()
+            }
+            if state.vadEnabled {
+                SettingSliderRow(
+                    label: "Speech threshold",
+                    description: "Probability above which a frame counts as speech. Lower is permissive, higher is stricter.",
+                    value: floatBinding(for: \.vadThreshold),
+                    range: 0.05...0.50,
+                    step: 0.05,
+                    formatted: String(format: "%.2f", state.vadThreshold),
+                    lowLabel: "0.05, permissive",
+                    highLabel: "0.50, strict"
+                )
+                SettingRow(
+                    "Volume gate",
+                    description: "Require speech to be loud enough before VAD accepts it. Helps reject keyboard and fan noise."
+                ) {
+                    Toggle("", isOn: state.binding(for: \.vadVolumeGateEnabled))
+                        .labelsHidden()
+                }
+                if state.vadVolumeGateEnabled {
+                    SettingSliderRow(
+                        label: "Minimum speech volume",
+                        description: "Quieter audio below this RMS level is treated as noise.",
+                        value: floatBinding(for: \.vadMinVolumeForSpeech),
+                        range: 0.001...0.050,
+                        step: 0.001,
+                        formatted: String(format: "%.4f", state.vadMinVolumeForSpeech),
+                        lowLabel: "Allow quieter speech",
+                        highLabel: "Reject more noise"
+                    )
+                }
+                SettingSliderRow(
+                    label: "Volume smoothing",
+                    description: "Smooth volume changes before VAD uses them. More smoothing is calmer, less smoothing reacts faster.",
+                    value: floatBinding(for: \.vadVolumeSmoothingFactor),
+                    range: 0.05...1.0,
+                    step: 0.05,
+                    formatted: String(format: "%.2f", state.vadVolumeSmoothingFactor),
+                    lowLabel: "More smoothing",
+                    highLabel: "More reactive"
+                )
+                SettingSliderRow(
+                    label: "State reset interval",
+                    description: "How often to reset accumulated VAD state during long sessions to prevent drift.",
+                    value: state.binding(for: \.vadStateResetInterval),
+                    range: 0.5...30.0,
+                    step: 0.5,
+                    formatted: String(format: "%.1f s", state.vadStateResetInterval),
+                    lowLabel: "0.5 s",
+                    highLabel: "30 s"
+                )
+            }
+        }
+    }
+
+    private var audioFilteringAdvanced: some View {
+        SectionCard(
+            "Audio filtering",
+            footer: "The pre-VAD gate removes low-level room noise before VAD and buffering."
+        ) {
+            SettingRow(
+                "Pre-VAD noise gate",
+                description: "Apply a lightweight gate before VAD. Useful in noisy rooms."
+            ) {
+                Toggle("", isOn: state.binding(for: \.audioNoiseGateEnabled))
+                    .labelsHidden()
+            }
+            if state.audioNoiseGateEnabled {
+                SettingSliderRow(
+                    label: "Noise gate RMS threshold",
+                    description: "Audio below this RMS level is reduced before VAD sees it.",
+                    value: floatBinding(for: \.audioNoiseGateRmsThreshold),
+                    range: 0.000...0.010,
+                    step: 0.0005,
+                    formatted: String(format: "%.4f", state.audioNoiseGateRmsThreshold),
+                    lowLabel: "Less filtering",
+                    highLabel: "More filtering"
+                )
+            }
+        }
+    }
+
+    private var autoEndAdvanced: some View {
+        SectionCard(
+            "Auto-end details",
+            footer: "These controls tune batch-mode auto-end timing, thinking-pause behavior, classifier gating, and idle nudges."
+        ) {
+            SettingSliderRow(
+                label: "Minimum session duration",
+                description: "Do not auto-end before the recording is at least this old.",
+                value: state.binding(for: \.autoEndMinSessionDuration),
+                range: 0...10,
+                step: 0.5,
+                formatted: String(format: "%.1f s", state.autoEndMinSessionDuration),
+                lowLabel: "0 s",
+                highLabel: "10 s"
+            )
+            SettingRow(
+                "Require speech first",
+                description: "Wait until speech is detected before silence can end the recording."
+            ) {
+                Toggle("", isOn: state.binding(for: \.autoEndRequireSpeechFirst))
+                    .labelsHidden()
+            }
+            SettingSliderRow(
+                label: "No-speech timeout",
+                description: "Stop if no speech is heard for this long. Set to 0 to disable.",
+                value: state.binding(for: \.autoEndNoSpeechTimeout),
+                range: 0...60,
+                step: 1,
+                formatted: state.autoEndNoSpeechTimeout == 0 ? "Disabled" : String(format: "%.0f s", state.autoEndNoSpeechTimeout),
+                lowLabel: "0 s, off",
+                highLabel: "60 s"
+            )
+            SettingSliderRow(
+                label: "Max continuous speech safety",
+                description: "Stop after very long uninterrupted speech. Set to 0 to disable.",
+                value: state.binding(for: \.autoEndMaxContinuousSpeechDuration),
+                range: 0...600,
+                step: 5,
+                formatted: state.autoEndMaxContinuousSpeechDuration == 0 ? "Disabled" : String(format: "%.0f s", state.autoEndMaxContinuousSpeechDuration),
+                lowLabel: "0 s, off",
+                highLabel: "600 s"
+            )
+            SettingRow(
+                "Thinking pause extension",
+                description: "Extend silence tolerance when the recent transcript looks unfinished."
+            ) {
+                Toggle("", isOn: state.binding(for: \.thinkingPauseEnabled))
+                    .labelsHidden()
+            }
+            if state.thinkingPauseEnabled {
+                SettingSliderRow(
+                    label: "Extra thinking time",
+                    description: nil,
+                    value: state.binding(for: \.thinkingPauseExtensionSeconds),
+                    range: 1...15,
+                    step: 1,
+                    formatted: String(format: "+%.0f s", state.thinkingPauseExtensionSeconds),
+                    lowLabel: "+1 s",
+                    highLabel: "+15 s"
+                )
+            }
+            SettingRow(
+                "Turn classifier",
+                description: "Use a classifier signal to wait longer when a turn appears incomplete."
+            ) {
+                Toggle("", isOn: state.binding(for: \.turnClassifierEnabled))
+                    .labelsHidden()
+            }
+            if state.turnClassifierEnabled {
+                SettingSliderRow(
+                    label: "Classifier minimum silence",
+                    description: nil,
+                    value: state.binding(for: \.turnClassifierMinimumSilence),
+                    range: 0.5...10,
+                    step: 0.5,
+                    formatted: String(format: "%.1f s", state.turnClassifierMinimumSilence),
+                    lowLabel: "0.5 s",
+                    highLabel: "10 s"
+                )
+                SettingSliderRow(
+                    label: "Incomplete-turn extension",
+                    description: nil,
+                    value: state.binding(for: \.turnClassifierIncompleteExtensionSeconds),
+                    range: 1...20,
+                    step: 1,
+                    formatted: String(format: "+%.0f s", state.turnClassifierIncompleteExtensionSeconds),
+                    lowLabel: "+1 s",
+                    highLabel: "+20 s"
+                )
+                SettingSliderRow(
+                    label: "Classifier threshold",
+                    description: nil,
+                    value: floatBinding(for: \.turnClassifierThreshold),
+                    range: 0.1...0.9,
+                    step: 0.05,
+                    formatted: String(format: "%.2f", state.turnClassifierThreshold),
+                    lowLabel: "More complete",
+                    highLabel: "More incomplete"
+                )
+            }
+            SettingRow(
+                "Idle nudge before auto-end",
+                description: "Play nudges before auto-end when the session appears idle."
+            ) {
+                Toggle("", isOn: state.binding(for: \.idleNudgeEnabled))
+                    .labelsHidden()
+            }
+            if state.idleNudgeEnabled {
+                SettingSliderRow(
+                    label: "Nudge initial delay",
+                    description: nil,
+                    value: state.binding(for: \.idleNudgeInitialDelay),
+                    range: 0...10,
+                    step: 0.5,
+                    formatted: String(format: "%.1f s", state.idleNudgeInitialDelay),
+                    lowLabel: "0 s",
+                    highLabel: "10 s"
+                )
+                SettingSliderRow(
+                    label: "Nudge interval",
+                    description: nil,
+                    value: state.binding(for: \.idleNudgeInterval),
+                    range: 1...10,
+                    step: 0.5,
+                    formatted: String(format: "%.1f s", state.idleNudgeInterval),
+                    lowLabel: "1 s",
+                    highLabel: "10 s"
+                )
+                SettingRow(
+                    "Maximum nudges",
+                    description: "How many nudges can play before SpeakFlow gives up."
+                ) {
+                    Stepper(
+                        "\(state.idleNudgeMaxCount)",
+                        value: state.binding(for: \.idleNudgeMaxCount),
+                        in: 1...10
+                    )
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+        }
+    }
+
+    private var speechDetectionAdvanced: some View {
+        SectionCard(
+            "Speech detection",
+            footer: "Recordings below this ratio of speech-to-silence are discarded as accidental triggers."
+        ) {
+            SettingSliderRow(
+                label: "Minimum speech ratio",
+                description: nil,
+                value: floatBinding(for: \.minSpeechRatio),
+                range: 0...0.5,
+                step: 0.01,
+                formatted: "\(Int(state.minSpeechRatio * 100))%",
+                lowLabel: "0%, accept any audio",
+                highLabel: "50%, require half speech"
+            )
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func autoEndBinding(for provider: (any TranscriptionProvider)?) -> Binding<Bool> {
+        if provider?.mode == .streaming {
+            state.binding(for: \.streamingAutoEndEnabled)
+        } else {
+            state.binding(for: \.autoEndEnabled)
+        }
+    }
+
+    private func isAutoEndEnabled(for provider: (any TranscriptionProvider)?) -> Bool {
+        if provider?.mode == .streaming { return state.streamingAutoEndEnabled }
+        return state.autoEndEnabled
+    }
+
+    private func autoSelectProviderIfNeeded() {
+        let configured = ProviderRegistry.shared.configuredProviders
+        guard !configured.isEmpty,
+              !configured.contains(where: { $0.id == state.activeProviderId }) else { return }
+        ProviderSettings.shared.activeProviderId = configured[0].id
+        state.refresh()
+    }
+
+    private func activeConfiguredProvider(from configured: [any TranscriptionProvider]) -> (any TranscriptionProvider)? {
+        configured.first { $0.id == state.activeProviderId } ?? configured.first
+    }
+
+    private func availableModels(for configured: [any TranscriptionProvider]) -> [ModelDescriptor] {
+        ModelCatalog.all.filter { model in
+            configured.contains { provider in
+                provider.id == model.providerAccountId || provider.id == model.providerRegistryId
+            }
+        }
+    }
+
+    private func activate(model: ModelDescriptor) {
+        ProviderSettings.shared.activeProviderId = model.providerRegistryId
+        switch model.providerRegistryId {
+        case ProviderId.deepgram:
+            Settings.shared.deepgramModel = model.id
+        case ProviderId.mistral:
+            Settings.shared.mistralModel = model.id
+        case ProviderId.mistralBatch:
+            Settings.shared.mistralBatchModel = model.id
+        default:
+            break
+        }
+        state.refresh()
+    }
+
+    private func activeModelId(for providerId: String) -> String {
+        switch providerId {
+        case ProviderId.deepgram:
+            state.deepgramModel
+        case ProviderId.mistral:
+            state.mistralModel
+        case ProviderId.mistralBatch:
+            state.mistralBatchModel
+        default:
+            "gpt-4o-transcribe"
+        }
+    }
+
+    private func modelLabel(_ id: String) -> String {
+        ModelCatalog.all.first { $0.id == id }?.name ?? id
+    }
+
     private func floatBinding(
         for keyPath: ReferenceWritableKeyPath<SpeakFlowCore.Settings, Float>
     ) -> Binding<Double> {
         Binding(
             get: { Double(SpeakFlowCore.Settings.shared[keyPath: keyPath]) },
-            set: { SpeakFlowCore.Settings.shared[keyPath: keyPath] = Float($0); state.refresh() }
+            set: { newValue in
+                SpeakFlowCore.Settings.shared[keyPath: keyPath] = Float(newValue)
+                state.refresh()
+            }
         )
-    }
-
-    /// Mistral temperature requires Float↔Double conversion for the Slider.
-    private var mistralTemperatureBinding: Binding<Double> {
-        floatBinding(for: \.mistralTemperature)
     }
 }

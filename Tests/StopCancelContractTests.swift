@@ -389,7 +389,7 @@ struct BatchStopContractTests {
             transcription: spy
         )
         let sessionId = UUID()
-        controller._testSetMetricsSession(sessionId)
+        controller.testSetMetricsSession(sessionId)
         controller.isRecording = true
         controller.fullTranscript = "hello world"
 

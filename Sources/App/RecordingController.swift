@@ -32,6 +32,11 @@ final class RecordingController {
     private var pendingMetricsTask: Task<Void, Never>?
     private var batchFinalizationReason: String = StopReason.unknown.rawValue
     private let lifecycleCoordinator = RecordingLifecycleCoordinator()
+    /// Wall-clock anchor for the next streaming segment. Set when streaming
+    /// begins and again after each final, so each final contributes its own
+    /// elapsed segment duration to the stats time totals (streaming providers
+    /// do not emit a server-side audio duration).
+    private var streamingSegmentStart: ContinuousClock.Instant?
 
     let textInserter: any TextInserting
     let keyInterceptor: any KeyIntercepting
@@ -193,10 +198,10 @@ final class RecordingController {
         switch kind {
         case .authentication:
             if providerId == ProviderId.chatGPT {
-                return "Transcription failed — your ChatGPT session has expired. Please re-login in Accounts."
+                return "Transcription failed, your ChatGPT session has expired. Please re-login in Providers."
             } else {
                 let name = providerDisplayName(for: providerId)
-                return "Transcription failed — your \(name) API key is invalid or expired. Check Accounts settings."
+                return "Transcription failed, your \(name) API key is invalid or expired. Check Providers settings."
             }
         case .rateLimited:
             return "Transcription rate limited — please wait a moment and try again."
@@ -274,7 +279,7 @@ final class RecordingController {
             )
             SoundEffect.error.play()
             appState.showBanner(
-                "Set up a transcription provider in Accounts to start dictating",
+                "Set up a transcription provider in Providers to start dictating",
                 style: .error
             )
             return
@@ -365,6 +370,10 @@ final class RecordingController {
                 self.observabilityEvent("batch_recording_start_failed", level: .error)
                 self.endMetricsSession(reason: "START_FAILED")
             } else {
+                Statistics.shared.recordRecording(
+                    providerId: provider.id,
+                    language: self.languageForStats(providerId: provider.id)
+                )
                 self.observabilityEvent("batch_recording_started")
             }
         }
@@ -390,6 +399,7 @@ final class RecordingController {
         let controller = LiveStreamingController(skipAudioEngineForTesting: testMode == .live)
         self.liveStreamingController = controller
         controller.sessionId = currentMetricsSessionId
+        self.streamingSegmentStart = ContinuousClock.now
 
         controller.onTextUpdate = { [weak self] textToType, replacingChars, isFinal, fullText in
             // Accept text updates while recording AND while processing final.
@@ -426,6 +436,13 @@ final class RecordingController {
                 if !self.fullTranscript.isEmpty { self.fullTranscript += " " }
                 self.fullTranscript += fullText
                 self.recordMetricsWords(fullText)
+                let segmentSeconds = self.consumeStreamingSegmentSeconds()
+                Statistics.shared.recordTranscription(
+                    text: fullText,
+                    audioDurationSeconds: segmentSeconds,
+                    providerId: provider.id,
+                    language: self.languageForStats(providerId: provider.id)
+                )
             }
         }
 
@@ -508,6 +525,14 @@ final class RecordingController {
                 self.observabilityEvent("streaming_recording_start_failed", level: .error)
                 self.endMetricsSession(reason: "START_FAILED")
             } else {
+                // Streaming opens exactly one provider WebSocket per recording,
+                // so the API-call count grows by one and the recording count
+                // by one.
+                Statistics.shared.recordApiCall()
+                Statistics.shared.recordRecording(
+                    providerId: provider.id,
+                    language: self.languageForStats(providerId: provider.id)
+                )
                 self.observabilityEvent(
                     "streaming_recording_started",
                     metadata: ["providerId": provider.id]
@@ -749,6 +774,7 @@ final class RecordingController {
 
     private func beginMetricsSession(providerId: String, mode: ProviderMode) {
         let sessionId = UUID()
+        let language = languageForStats(providerId: providerId)
         currentMetricsSessionId = sessionId
         transcription.setMetricsSession(sessionId)
         textInserter.setObservabilitySessionId(sessionId)
@@ -757,7 +783,8 @@ final class RecordingController {
             sessionId: sessionId,
             metadata: [
                 "providerId": providerId,
-                "mode": mode.rawValue
+                "mode": mode.rawValue,
+                "language": language
             ]
         )
         enqueueMetricsOperation {
@@ -766,6 +793,17 @@ final class RecordingController {
                 providerId: providerId,
                 mode: mode
             )
+        }
+    }
+
+    private func languageForStats(providerId: String) -> String {
+        switch providerId {
+        case ProviderId.deepgram:
+            settings.deepgramLanguage
+        case ProviderId.mistral, ProviderId.mistralBatch:
+            settings.mistralLanguage
+        default:
+            ""
         }
     }
 
@@ -781,6 +819,20 @@ final class RecordingController {
         enqueueMetricsOperation {
             await SessionMetricsStore.shared.endSession(sessionId: sessionId, reason: reason)
         }
+    }
+
+    /// Returns the elapsed wall-clock seconds since the start of the current
+    /// streaming segment, and resets the anchor for the next segment. Returns
+    /// zero if no anchor is set (defensive; shouldn't happen during a normal
+    /// streaming session).
+    private func consumeStreamingSegmentSeconds() -> Double {
+        let now = ContinuousClock.now
+        guard let start = streamingSegmentStart else { return 0 }
+        let duration = now - start
+        streamingSegmentStart = now
+        let seconds = Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) / 1_000_000_000_000_000_000
+        return max(seconds, 0)
     }
 
     private func recordMetricsWords(_ text: String) {
@@ -894,11 +946,11 @@ final class RecordingController {
 
 #if DEBUG
 extension RecordingController {
-    var _testCurrentMetricsSessionId: UUID? {
+    var testCurrentMetricsSessionId: UUID? {
         currentMetricsSessionId
     }
 
-    func _testSetMetricsSession(_ sessionId: UUID?) {
+    func testSetMetricsSession(_ sessionId: UUID?) {
         currentMetricsSessionId = sessionId
         transcription.setMetricsSession(sessionId)
     }

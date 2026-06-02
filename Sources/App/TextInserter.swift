@@ -98,8 +98,8 @@ final class TextInserter: TextInserting {
     ///
     /// Set to `true` or `false` in unit tests to produce a deterministic result
     /// without depending on the live system frontmost-application state.
-    /// Must be `nil` in production (default).
-    var _testIsTargetFrontmost: Bool? = nil
+    /// Defaults to `nil` (production behavior).
+    var testIsTargetFrontmost: Bool?
 
     /// The current task chain for text operations.
     /// Each new operation creates a task that awaits this one, forming a serial queue.
@@ -623,7 +623,7 @@ final class TextInserter: TextInserting {
         // Test hook: allows unit tests to inject a deterministic result without
         // depending on live NSWorkspace / AX state (which can be non-deterministic
         // in CI environments where the frontmost app may change between test steps).
-        if let override = _testIsTargetFrontmost { return override }
+        if let override = testIsTargetFrontmost { return override }
 
         // Primary: ask the AX system which process owns the current keyboard focus.
         // This is more authoritative than NSWorkspace.frontmostApplication because:

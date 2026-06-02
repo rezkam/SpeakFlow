@@ -42,6 +42,15 @@ jobs:
       - name: Validate release scripts
         run: bash -n scripts/build-release.sh scripts/verify-release-artifact.sh
 
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      # Errors fail the job (default exit code 2 on error-level violations).
+      # Warnings are reported via GitHub annotations but do not fail; warning
+      # debt is tracked separately and trimmed incrementally.
+      - name: Lint
+        run: swiftlint lint --quiet --reporter github-actions-logging
+
       - name: Build
         run: swift build --build-tests
 

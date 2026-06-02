@@ -225,6 +225,16 @@ public actor SessionMetricsStore {
         return Array(completedSessions.suffix(limit))
     }
 
+    /// Returns recent completed sessions whose `startTime` is at or after the
+    /// supplied cutoff. Used by the dashboard's "recent sessions" fallback to
+    /// hide sessions that pre-date the last `Statistics.reset()` so a reset
+    /// truly zeros out user-visible breakdowns.
+    public func recentCompletedSessions(after cutoff: Date, limit: Int = 20) -> [SessionMetrics] {
+        guard limit > 0 else { return [] }
+        let filtered = completedSessions.filter { $0.startTime >= cutoff }
+        return Array(filtered.suffix(limit))
+    }
+
     private static var defaultStorageURL: URL {
         let isTestRun = Bundle.main.bundlePath.contains(".xctest")
             || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })

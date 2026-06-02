@@ -25,6 +25,200 @@ struct StatisticsFormatterCachingTests {
     }
 }
 
+// MARK: - Statistics API Call vs Recording Semantics
+
+/// `totalApiCalls` must reflect actual STT provider requests (per chunk in batch,
+/// per session in streaming). `providerUsage[].recordings`, `languageUsage`, and
+/// `dailyRecordings` must reflect user-initiated recordings. These two are not
+/// the same thing in batch mode: a 4-chunk dictation produces 4 API calls but
+/// 1 recording.
+struct StatisticsApiCallSemanticsTests {
+    @Test func recordApiCallIncrementsOnlyTotalApiCalls() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+            defer { stats.reset() }
+
+            for _ in 0..<4 {
+                stats.recordApiCall()
+            }
+
+            #expect(stats.totalApiCalls == 4,
+                    "Four chunks must report four API calls")
+            #expect(stats.providerUsage.isEmpty,
+                    "API calls alone must not populate per-provider recording rows")
+            #expect(stats.languageUsage.isEmpty,
+                    "API calls alone must not populate per-language recording rows")
+            #expect(stats.dailyRecordingsLast30.map(\.count).reduce(0, +) == 0,
+                    "API calls alone must not populate the 30-day recording histogram")
+        }
+    }
+
+    @Test func recordRecordingIncrementsRecordingDimensionsNotApiCalls() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+            defer { stats.reset() }
+
+            stats.recordRecording(providerId: ProviderId.deepgram, language: "en-US")
+
+            #expect(stats.totalApiCalls == 0,
+                    "recordRecording must not inflate the API-call counter")
+            #expect(stats.providerUsage[ProviderId.deepgram]?.recordings == 1,
+                    "recordRecording must increment per-provider recording count")
+            #expect(stats.languageUsage["en-us"] == 1,
+                    "recordRecording must increment per-language recording count")
+            #expect(stats.dailyRecordingsLast30.map(\.count).reduce(0, +) == 1,
+                    "recordRecording must increment the 30-day recording histogram")
+        }
+    }
+
+    @Test func multiChunkRecordingReportsAccurateCounts() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+            defer { stats.reset() }
+
+            // Simulate a 4-chunk batch dictation.
+            stats.recordRecording(providerId: ProviderId.mistralBatch, language: "en")
+            for _ in 0..<4 {
+                stats.recordApiCall()
+            }
+
+            #expect(stats.totalApiCalls == 4,
+                    "Each chunk send is one API call")
+            #expect(stats.providerUsage[ProviderId.mistralBatch]?.recordings == 1,
+                    "The user made one recording regardless of how many chunks it was split into")
+        }
+    }
+}
+
+// MARK: - Statistics Dashboard Data Tests
+
+struct StatisticsDashboardDataTests {
+    @Test func providerLanguageAndDailyUsageTrackRecordings() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+            defer { stats.reset() }
+
+            stats.recordRecording(providerId: ProviderId.deepgram, language: "en-US")
+            stats.recordTranscription(
+                text: "hello world",
+                audioDurationSeconds: 2.5,
+                providerId: ProviderId.deepgram,
+                language: "en-US"
+            )
+            stats.recordRecording(providerId: ProviderId.mistralBatch, language: "")
+
+            #expect(stats.providerUsage[ProviderId.deepgram]?.recordings == 1)
+            #expect(stats.providerUsage[ProviderId.deepgram]?.words == 2)
+            #expect(stats.providerUsage[ProviderId.deepgram]?.characters == 11)
+            #expect(stats.providerUsage[ProviderId.deepgram]?.seconds == 2.5)
+            #expect(stats.providerUsage[ProviderId.mistralBatch]?.recordings == 1)
+            #expect(stats.languageUsage["en-us"] == 1)
+            #expect(stats.languageUsage["auto"] == 1)
+            #expect(stats.languageUsageDetails["en-us"]?.words == 2)
+            #expect(stats.languageUsageDetails["en-us"]?.characters == 11)
+            #expect(stats.dailyRecordingsLast30.map(\.count).reduce(0, +) == 2)
+        }
+    }
+
+    @Test func periodUsageTracksAllMetricsAndDimensions() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+            defer { stats.reset() }
+
+            let date = Calendar.current.date(from: DateComponents(year: 2026, month: 5, day: 15))
+                ?? Date(timeIntervalSince1970: 1_778_860_800)
+            stats.recordRecording(providerId: ProviderId.deepgram, language: "en-US", date: date)
+            stats.recordTranscription(
+                text: "hello world",
+                audioDurationSeconds: 2.5,
+                providerId: ProviderId.deepgram,
+                language: "en-US",
+                date: date
+            )
+            stats.recordSTTLatency(seconds: 0.2, providerId: ProviderId.deepgram, language: "en-US", date: date)
+
+            for period in Statistics.Period.allCases {
+                let entries = stats.periodEntries(for: period)
+                #expect(entries.count == 1)
+
+                let usage = entries[0].usage
+                #expect(usage.totals.usage.recordings == 1)
+                #expect(usage.totals.usage.words == 2)
+                #expect(usage.totals.usage.characters == 11)
+                #expect(abs(usage.totals.usage.seconds - 2.5) < 0.001)
+                #expect(usage.totals.latency.samples == 1)
+                #expect(abs(usage.totals.latency.averageMs - 200) < 0.001)
+
+                let provider = usage.providers[ProviderId.deepgram]
+                #expect(provider?.usage.recordings == 1)
+                #expect(provider?.usage.words == 2)
+                #expect(provider?.usage.characters == 11)
+                #expect(provider?.latency.samples == 1)
+
+                let language = usage.languages["en-us"]
+                #expect(language?.usage.recordings == 1)
+                #expect(language?.usage.words == 2)
+                #expect(language?.usage.characters == 11)
+                #expect(language?.latency.samples == 1)
+            }
+        }
+    }
+
+    @Test func weeklyMonthlyAndYearlyUsageRollsUpDailyBuckets() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+            defer { stats.reset() }
+
+            let first = Calendar.current.date(from: DateComponents(year: 2026, month: 5, day: 12))
+                ?? Date(timeIntervalSince1970: 1_778_601_600)
+            let second = Calendar.current.date(from: DateComponents(year: 2026, month: 5, day: 13))
+                ?? Date(timeIntervalSince1970: 1_778_688_000)
+
+            stats.recordRecording(providerId: ProviderId.chatGPT, language: "en", date: first)
+            stats.recordRecording(providerId: ProviderId.chatGPT, language: "en", date: second)
+
+            #expect(stats.dailyUsage.count == 2)
+            #expect(stats.weeklyUsage.count == 1)
+            #expect(stats.monthlyUsage.count == 1)
+            #expect(stats.yearlyUsage.count == 1)
+            #expect(stats.weeklyUsage.values.map { $0.totals.usage.recordings }.reduce(0, +) == 2)
+            #expect(stats.monthlyUsage.values.map { $0.totals.usage.recordings }.reduce(0, +) == 2)
+            #expect(stats.yearlyUsage.values.map { $0.totals.usage.recordings }.reduce(0, +) == 2)
+        }
+    }
+
+    @Test func resetClearsDashboardBreakdownData() async {
+        await MainActor.run {
+            let stats = Statistics.shared
+            stats.reset()
+
+            stats.recordRecording(providerId: ProviderId.deepgram, language: "en-US")
+            stats.recordTranscription(
+                text: "hello world",
+                audioDurationSeconds: 2.5,
+                providerId: ProviderId.deepgram,
+                language: "en-US"
+            )
+            stats.reset()
+
+            #expect(stats.providerUsage.isEmpty)
+            #expect(stats.languageUsage.isEmpty)
+            #expect(stats.languageUsageDetails.isEmpty)
+            #expect(stats.dailyUsage.isEmpty)
+            #expect(stats.weeklyUsage.isEmpty)
+            #expect(stats.monthlyUsage.isEmpty)
+            #expect(stats.yearlyUsage.isEmpty)
+            #expect(stats.dailyRecordingsLast30.map(\.count).reduce(0, +) == 0)
+        }
+    }
+}
+
 struct StatisticsFormatterTests {
     @Test func testCachedFormatterProducesConsistentResultsAfterRepeatedUse() async {
         await MainActor.run {

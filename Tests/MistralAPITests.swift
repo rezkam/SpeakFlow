@@ -98,10 +98,16 @@ struct MistralAPITests {
         request.httpBody = body
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        let http = response as! HTTPURLResponse
+        guard let http = response as? HTTPURLResponse else {
+            Issue.record("Response is not HTTPURLResponse")
+            return
+        }
         #expect(http.statusCode == 200, "Batch API should return 200, got \(http.statusCode)")
 
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            Issue.record("Response JSON is not a top-level object")
+            return
+        }
         #expect(json["text"] is String, "Response should have 'text' field")
         #expect(json["model"] as? String == "voxtral-mini-latest", "Response should echo model")
     }
@@ -138,7 +144,10 @@ struct MistralAPITests {
         request.httpBody = body
 
         let (_, response) = try await URLSession.shared.data(for: request)
-        let http = response as! HTTPURLResponse
+        guard let http = response as? HTTPURLResponse else {
+            Issue.record("Response is not HTTPURLResponse")
+            return
+        }
         #expect(http.statusCode == 200, "Batch with language should return 200, got \(http.statusCode)")
     }
 
@@ -174,7 +183,10 @@ struct MistralAPITests {
         request.httpBody = body
 
         let (_, response) = try await URLSession.shared.data(for: request)
-        let http = response as! HTTPURLResponse
+        guard let http = response as? HTTPURLResponse else {
+            Issue.record("Response is not HTTPURLResponse")
+            return
+        }
         #expect(http.statusCode == 200, "Batch with temperature should return 200, got \(http.statusCode)")
     }
 
@@ -210,7 +222,10 @@ struct MistralAPITests {
         }
 
         let data = text.data(using: .utf8)!
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            Issue.record("Response JSON is not a top-level object")
+            return
+        }
         #expect(json["type"] as? String == "session.created",
                 "First message should be session.created")
 
