@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/macOS-15%2B-blue" alt="macOS 15+">
+  <img src="https://img.shields.io/badge/macOS-26%2B-blue" alt="macOS 26+">
   <img src="https://img.shields.io/badge/Swift-6-orange" alt="Swift 6">
   <img src="https://img.shields.io/badge/Homebrew-install-orange?logo=homebrew" alt="Install with Homebrew">
 </p>
@@ -96,7 +96,7 @@ swift build -c release --product SpeakFlow
 bash scripts/build-release.sh rc
 ```
 
-Requires **macOS 15+** and **Swift 6.1+** (Xcode 16.4 or later).
+Requires **macOS 26+** and **Swift 6.2+** (Xcode 26 or later).
 
 ## Permissions
 

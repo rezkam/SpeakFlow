@@ -541,7 +541,7 @@ cat > "$APP_NAME.app/Contents/Info.plist" << PLIST
     <key>SpeakFlowBuildGitDescribe</key> <string>$BUILD_GIT_DESCRIBE</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key>  <string>15.0</string>
+    <key>LSMinimumSystemVersion</key>  <string>26.0</string>
     <key>LSUIElement</key>             <true/>
     <key>NSMicrophoneUsageDescription</key>
         <string>$APP_NAME needs microphone access to transcribe your voice.</string>
