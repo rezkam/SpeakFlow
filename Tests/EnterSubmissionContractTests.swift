@@ -124,6 +124,68 @@ struct EnterSubmissionContractTests {
     }
 
     /// Regression guard:
+    /// The physical Enter was swallowed when submit was captured. Batch finalization
+    /// must replace it even when no transcript was produced.
+    @MainActor @Test
+    func emptyBatchFinishConsumesCapturedEnterExactlyOnce() async {
+        let keyInterceptor = SpyKeyInterceptor()
+        let textInserter = SpyTextInserter()
+        let controller = RecordingController(
+            keyInterceptor: keyInterceptor,
+            textInserter: textInserter,
+            appState: SpyBannerPresenter(),
+            providerSettings: SpyProviderSettings(),
+            providerRegistry: SpyProviderRegistry(),
+            settings: SpySettings(),
+            transcription: SpyTranscription()
+        )
+        controller.testMode = .live
+        controller.isProcessingFinal = true
+        controller.fullTranscript = ""
+
+        keyInterceptor.onEnterPressed?()
+        await controller.completeBatchFinalization()
+
+        let enterCount = textInserter.operations.count(where: { $0 == .pressEnterKey })
+        #expect(enterCount == 1, "Captured Enter must be synthesized exactly once")
+        #expect(!controller.shouldPressEnterOnComplete, "Finalization must consume the Enter request")
+
+        let waitIndex = textInserter.operations.firstIndex(of: .waitForPendingInsertions)
+        let enterIndex = textInserter.operations.firstIndex(of: .pressEnterKey)
+        let resetIndex = textInserter.operations.firstIndex(of: .reset)
+        if let waitIndex, let enterIndex, let resetIndex {
+            #expect(waitIndex < enterIndex, "Pending insertions must finish before Enter")
+            #expect(enterIndex < resetIndex, "Enter must be queued before inserter reset")
+        } else {
+            Issue.record("Expected wait, Enter, and reset operations")
+        }
+    }
+
+    /// Inverse guard: empty batch completion must not invent an Enter request.
+    @MainActor @Test
+    func emptyBatchFinishWithoutCaptureDoesNotPressEnter() async {
+        let textInserter = SpyTextInserter()
+        let controller = RecordingController(
+            keyInterceptor: SpyKeyInterceptor(),
+            textInserter: textInserter,
+            appState: SpyBannerPresenter(),
+            providerSettings: SpyProviderSettings(),
+            providerRegistry: SpyProviderRegistry(),
+            settings: SpySettings(),
+            transcription: SpyTranscription()
+        )
+        controller.testMode = .live
+        controller.isProcessingFinal = true
+        controller.fullTranscript = ""
+
+        await controller.completeBatchFinalization()
+
+        #expect(!textInserter.operations.contains(.pressEnterKey),
+                "Finalization must not synthesize Enter without a captured request")
+        #expect(!controller.shouldPressEnterOnComplete)
+    }
+
+    /// Regression guard:
     /// Enter during the same recording lifecycle is one-shot. A second Enter press while
     /// processing-final must not produce a second synthetic Enter key event.
     @MainActor @Test

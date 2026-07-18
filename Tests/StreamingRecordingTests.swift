@@ -35,6 +35,37 @@ struct StreamingTestContext {
     }
 }
 
+/// Streaming session whose close operation is controlled by the test.
+/// This makes the cancellation suspension window deterministic.
+actor SuspendingCloseStreamingSession: StreamingSession {
+    private let eventContinuation: AsyncStream<TranscriptionEvent>.Continuation
+    nonisolated let events: AsyncStream<TranscriptionEvent>
+    private var closeWaiter: CheckedContinuation<Void, Never>?
+    private(set) var closeCallCount = 0
+
+    init() {
+        var continuation: AsyncStream<TranscriptionEvent>.Continuation!
+        events = AsyncStream { continuation = $0 }
+        eventContinuation = continuation
+    }
+
+    func sendAudio(_ data: Data) async throws {}
+    func finalize() async throws {}
+
+    func close() async throws {
+        closeCallCount += 1
+        await withCheckedContinuation { closeWaiter = $0 }
+        eventContinuation.finish()
+    }
+
+    func keepAlive() async throws {}
+
+    func releaseClose() {
+        closeWaiter?.resume()
+        closeWaiter = nil
+    }
+}
+
 @Suite("RecordingController — Streaming Recording Lifecycle")
 struct StreamingRecordingTests {
 
@@ -77,13 +108,15 @@ struct StreamingRecordingTests {
     }
 
     @MainActor
-    private func makeReconnectController() -> (RecordingController, MultiSessionMockProvider) {
+    private func makeReconnectController(
+        sessions: [any StreamingSession]? = nil
+    ) -> (RecordingController, MultiSessionMockProvider) {
         let providerSettings = SpyProviderSettings()
         providerSettings.activeProviderId = ProviderId.deepgram
         providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
 
         let provider = MultiSessionMockProvider()
-        provider.sessions = [MockStreamingSession(), MockStreamingSession()]
+        provider.sessions = sessions ?? [MockStreamingSession(), MockStreamingSession()]
 
         let providerRegistry = SpyProviderRegistry()
         providerRegistry.register(provider)
@@ -271,6 +304,59 @@ struct StreamingRecordingTests {
         #expect(ctx.keyInterceptor.stopCallCount >= 1, "Key interceptor should be stopped")
     }
 
+    /// Regression guard:
+    /// A suspended cancel task must only own the controller captured before it started.
+    /// It must not clear or close a replacement controller started during suspension.
+    @MainActor @Test
+    func streamingRecording_cancelDoesNotOrphanReplacementController() async throws {
+        let firstSession = SuspendingCloseStreamingSession()
+        let secondSession = MockStreamingSession()
+        defer {
+            Task { await firstSession.releaseClose() }
+        }
+        let (controller, provider) = makeReconnectController(
+            sessions: [firstSession, secondSession]
+        )
+
+        controller.startRecording()
+        try await waitUntil {
+            provider.startSessionCallCount == 1
+                && controller.liveStreamingController?.recording == true
+        }
+
+        controller.cancelRecording()
+        try await waitUntilAsync {
+            await firstSession.closeCallCount == 1
+        }
+
+        controller.startRecording()
+        try await waitUntil {
+            provider.startSessionCallCount == 2
+                && controller.liveStreamingController?.recording == true
+        }
+        guard let replacementController = controller.liveStreamingController else {
+            Issue.record("Replacement LiveStreamingController not created")
+            return
+        }
+
+        await firstSession.releaseClose()
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(
+            controller.liveStreamingController === replacementController,
+            "Finishing the old cancel must not clear the replacement controller"
+        )
+        #expect(
+            await !secondSession.closeCalled,
+            "The replacement session must not be closed by the old cancel task"
+        )
+
+        controller.cancelRecording()
+        try await waitUntilAsync {
+            await secondSession.closeCalled
+        }
+    }
+
     // MARK: - Error Path
 
     @MainActor @Test
@@ -289,7 +375,11 @@ struct StreamingRecordingTests {
         }
 
         #expect(!ctx.controller.isRecording, "Should stop recording on error")
-        #expect(ctx.banner.bannerMessages.contains(where: { $0.1 == .error }),
+        #expect(ctx.banner.bannerMessages.count == 1,
+                "A mid-session failure must present exactly one banner")
+        #expect(ctx.banner.bannerMessages.contains(where: {
+            $0.1 == .error && $0.0.localizedCaseInsensitiveContains("test error")
+        }),
                 "Mid-session streaming errors must show an error banner")
     }
 
@@ -308,10 +398,36 @@ struct StreamingRecordingTests {
             $0.1 == .error
                 && $0.0.contains("Deepgram API key is invalid or expired")
         }))
+        #expect(ctx.banner.bannerMessages.count == 1,
+                "The onError and start-failure paths must not double-present the banner")
         #expect(ctx.soundPlayer.count(.start) == 0,
                 "A rejected handshake must not play the successful start cue")
         #expect(ctx.soundPlayer.count(.error) == 1,
                 "A rejected handshake must play one error cue")
+    }
+
+    @MainActor @Test
+    func streamingRecording_closedWithoutTextUsesActiveProviderBanner() async throws {
+        let ctx = makeController()
+        ctx.provider.displayName = "Deepgram"
+        ctx.controller.startRecording()
+        try await waitUntil {
+            ctx.controller.liveStreamingController?.recording == true
+        }
+        guard let liveController = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created")
+            return
+        }
+
+        liveController.onSessionClosed?()
+
+        try await waitUntil {
+            ctx.banner.bannerMessages.contains(where: { $0.1 == .error })
+        }
+        let message = ctx.banner.bannerMessages.last?.0 ?? ""
+        #expect(message.contains("Deepgram"))
+        #expect(!message.contains("Mistral"),
+                "A provider-neutral close path must not name another provider")
     }
 
     // MARK: - Provider Not Configured

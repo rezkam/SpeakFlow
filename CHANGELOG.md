@@ -2,10 +2,19 @@
 
 ## Unreleased
 
+### Breaking Changes
+
+* **Minimum supported macOS version is now 26** - SpeakFlow now targets macOS 26 or later.
+
 ### Bug Fixes
 
 * **Streaming sessions recover from transient connection loss** - Deepgram and Mistral now share one WebSocket lifecycle that classifies remote disconnects consistently, allowing the one-shot reconnect path to run before recording is stopped.
 * **Rejected streaming credentials fail before recording readiness** - Deepgram now waits for the WebSocket upgrade before reporting startup success. Invalid or expired keys show an actionable banner and error cue without playing the successful start cue or counting an API call.
+* **Recording failures now show one actionable banner** - Streaming startup and mid-session failures use one shared error presentation path, avoiding silent failures and duplicate banners when startup reports through two callbacks.
+* **Cancel and immediate restart no longer orphan the microphone** - Asynchronous teardown now owns only the controller that was cancelled, so finishing an old cancellation cannot clear or close a replacement streaming session.
+* **Empty batch submissions preserve captured Enter** - If Enter stops a batch recording that produces no transcript, SpeakFlow now waits for pending insertions and synthesizes the swallowed Enter exactly once.
+* **Streaming teardown now releases audio sender tasks** - Terminal stop, cancel, and failed-start cleanup explicitly shut down each session's audio sender while reconnect keeps it reusable, preventing one leaked suspended task per dictation.
+* **OAuth callback failures no longer end silently** - ChatGPT login now shows an error banner when its local callback fails or reaches the timeout instead of leaving the Providers screen unchanged.
 
 ### Test Coverage
 
