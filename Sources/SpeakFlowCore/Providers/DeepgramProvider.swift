@@ -106,6 +106,8 @@ extension DeepgramProvider: APIKeyValidatable {
 public enum DeepgramError: Error, LocalizedError {
     case missingApiKey
     case connectionFailed(String)
+    case handshakeRejected(statusCode: Int)
+    case handshakeTimedOut
     case invalidResponse(String)
     case webSocketError(Error)
     case sessionClosed
@@ -114,6 +116,10 @@ public enum DeepgramError: Error, LocalizedError {
         switch self {
         case .missingApiKey: return "Deepgram API key not configured"
         case .connectionFailed(let msg): return "Connection failed: \(msg)"
+        case .handshakeRejected(let statusCode):
+            return "Deepgram WebSocket handshake rejected (HTTP \(statusCode))"
+        case .handshakeTimedOut:
+            return "Deepgram WebSocket handshake timed out"
         case .invalidResponse(let msg): return "Invalid response: \(msg)"
         case .webSocketError(let err): return "WebSocket error: \(err.localizedDescription)"
         case .sessionClosed: return "Session is closed"
@@ -129,36 +135,34 @@ public actor DeepgramStreamingSession: StreamingSession {
     private let config: StreamingSessionConfig
     private let logger = Logger(subsystem: "SpeakFlow", category: "DeepgramSession")
 
-    private var webSocketTask: URLSessionWebSocketTask?
-    private var urlSession: URLSession?
-    private var eventContinuation: AsyncStream<TranscriptionEvent>.Continuation?
-    private let _events: AsyncStream<TranscriptionEvent>
-    private var isConnected = false
-    private var receiveTask: Task<Void, Never>?
-    private var observabilitySessionId: UUID?
+    private let core: WebSocketSessionCore
     private var messageSequence: UInt64 = 0
-#if DEBUG
-    private var testDidInvalidateURLSession = false
-#endif
+    private let handshakeTimeout: TimeInterval
 
     public nonisolated var events: AsyncStream<TranscriptionEvent> {
-        _events
+        core.events
     }
 
-    init(apiKey: String, config: StreamingSessionConfig) {
+    init(
+        apiKey: String,
+        config: StreamingSessionConfig,
+        handshakeTimeout: TimeInterval = 10,
+        connectionFactory: @escaping WebSocketConnectionFactory = { request, timeout in
+            try await WebSocketConnector.connect(request: request, timeout: timeout)
+        }
+    ) {
         self.apiKey = apiKey
         self.config = config
-
-        // Create the event stream — _events is a let, safe for nonisolated access
-        var continuation: AsyncStream<TranscriptionEvent>.Continuation!
-        self._events = AsyncStream<TranscriptionEvent> { c in
-            continuation = c
-        }
-        self.eventContinuation = continuation
+        self.handshakeTimeout = handshakeTimeout
+        self.core = WebSocketSessionCore(
+            component: "DeepgramSession",
+            connectionFactory: connectionFactory,
+            receiveErrorMapper: { DeepgramError.webSocketError($0) }
+        )
     }
 
-    public func setObservabilitySessionId(_ sessionId: UUID?) {
-        observabilitySessionId = sessionId
+    public func setObservabilitySessionId(_ sessionId: UUID?) async {
+        await core.setObservabilitySessionId(sessionId)
     }
 
     func connect() async throws {
@@ -168,62 +172,45 @@ public actor DeepgramStreamingSession: StreamingSession {
         var request = URLRequest(url: url)
         request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
 
-        let session = URLSession(configuration: .default)
-        let wsTask = session.webSocketTask(with: request)
-
-        self.urlSession = session
-        self.webSocketTask = wsTask
-
-        wsTask.resume()
-        isConnected = true
-
-        logger.info("WebSocket connected")
-
-        // Start receiving messages
-        receiveTask = Task { [weak self] in
-            await self?.receiveLoop()
+        var openedTransport = false
+        do {
+            try await core.connect(request: request, timeout: handshakeTimeout)
+            openedTransport = true
+            try await core.startReceiving { [weak self] text in
+                await self?.parseMessage(text)
+            }
+            logger.info("WebSocket handshake completed")
+        } catch {
+            if openedTransport {
+                await core.close(code: .goingAway)
+            }
+            throw Self.connectionError(from: error)
         }
     }
 
     public func sendAudio(_ data: Data) async throws {
-        guard isConnected, let ws = webSocketTask else {
-            throw DeepgramError.sessionClosed
-        }
-        try await ws.send(.data(data))
+        try await core.send(.data(data), disconnectedError: DeepgramError.sessionClosed)
     }
 
     public func finalize() async throws {
-        guard isConnected, let ws = webSocketTask else {
-            throw DeepgramError.sessionClosed
-        }
         let msg = #"{"type":"Finalize"}"#
-        try await ws.send(.string(msg))
+        try await core.send(.string(msg), disconnectedError: DeepgramError.sessionClosed)
         logger.debug("Sent Finalize")
     }
 
     public func close() async throws {
-        let wasConnected = isConnected
-        isConnected = false
-
-        if wasConnected, let ws = webSocketTask {
+        if await core.isConnected {
             let msg = #"{"type":"CloseStream"}"#
-            try? await ws.send(.string(msg))
-            ws.cancel(with: .normalClosure, reason: nil)
-            logger.info("WebSocket closed")
-        } else {
-            webSocketTask?.cancel(with: .normalClosure, reason: nil)
+            try? await core.send(.string(msg), disconnectedError: DeepgramError.sessionClosed)
         }
-
-        receiveTask?.cancel()
-        receiveTask = nil
-        eventContinuation?.finish()
-        invalidateURLSession()
+        await core.close()
+        logger.info("WebSocket closed")
     }
 
     public func keepAlive() async throws {
-        guard isConnected, let ws = webSocketTask else { return }
+        guard await core.isConnected else { return }
         let msg = #"{"type":"KeepAlive"}"#
-        try await ws.send(.string(msg))
+        try await core.send(.string(msg), disconnectedError: DeepgramError.sessionClosed)
     }
 
     // MARK: - Private
@@ -234,15 +221,8 @@ public actor DeepgramStreamingSession: StreamingSession {
         metadata: @autoclosure () -> [String: String] = [:]
     ) {
         let payload = metadata()
-        let sessionId = observabilitySessionId
         Task {
-            await ObservabilityStore.shared.record(
-                component: "DeepgramSession",
-                name: name,
-                level: level,
-                sessionId: sessionId,
-                metadata: payload
-            )
+            await core.recordObservabilityEvent(name, level: level, metadata: payload)
         }
     }
 
@@ -289,37 +269,7 @@ public actor DeepgramStreamingSession: StreamingSession {
         return url
     }
 
-    private func receiveLoop() async {
-        guard let ws = webSocketTask else { return }
-
-        while isConnected && !Task.isCancelled {
-            do {
-                let message = try await ws.receive()
-                switch message {
-                case .string(let text):
-                    parseMessage(text)
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        parseMessage(text)
-                    }
-                @unknown default:
-                    break
-                }
-            } catch {
-                if isConnected {
-                    logger.error("WebSocket receive error: \(error.localizedDescription)")
-                    eventContinuation?.yield(.error(DeepgramError.webSocketError(error)))
-                    isConnected = false
-                }
-                break
-            }
-        }
-
-        eventContinuation?.yield(.closed)
-        eventContinuation?.finish()
-    }
-
-    func parseMessage(_ json: String) {
+    func parseMessage(_ json: String) async {
         guard let data = json.data(using: .utf8) else { return }
         let observedSequence = nextMessageSequence()
         let hintedType = Self.extractMessageType(from: data) ?? "unknown"
@@ -356,12 +306,12 @@ public actor DeepgramStreamingSession: StreamingSession {
                 )
 
                 if msg.isFinal == true {
-                    eventContinuation?.yield(.finalResult(result))
+                    await core.yield(.finalResult(result))
                     if !alt.transcript.isEmpty {
                         logger.info("FINAL: \(alt.transcript, privacy: .private(mask: .hash))")
                     }
                 } else {
-                    eventContinuation?.yield(.interim(result))
+                    await core.yield(.interim(result))
                     if !alt.transcript.isEmpty {
                         logger.debug("interim: \(alt.transcript, privacy: .private(mask: .hash))")
                     }
@@ -377,7 +327,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                     ]
                 )
                 let lastWordEnd = msg.lastWordEnd ?? 0
-                eventContinuation?.yield(.utteranceEnd(lastWordEnd: lastWordEnd))
+                await core.yield(.utteranceEnd(lastWordEnd: lastWordEnd))
                 logger.info("UtteranceEnd at \(String(format: "%.2f", lastWordEnd))s")
 
             case "SpeechStarted":
@@ -390,7 +340,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                     ]
                 )
                 let timestamp = msg.timestamp ?? 0
-                eventContinuation?.yield(.speechStarted(timestamp: timestamp))
+                await core.yield(.speechStarted(timestamp: timestamp))
                 logger.debug("SpeechStarted at \(String(format: "%.2f", timestamp))s")
 
             case "Metadata":
@@ -403,7 +353,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                     ]
                 )
                 let requestId = msg.requestId ?? "unknown"
-                eventContinuation?.yield(.metadata(requestId: requestId))
+                await core.yield(.metadata(requestId: requestId))
                 logger.info("Session metadata: requestId=\(requestId, privacy: .public)")
 
             default:
@@ -417,7 +367,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                 logger.debug("Unknown message type: \(msg.type, privacy: .public)")
             }
         } catch {
-            var metadata: [String: String] = [
+            let metadata: [String: String] = [
                 "providerMessageSequence": String(observedSequence),
                 "messageType": hintedType,
                 "payloadChars": String(json.count),
@@ -429,27 +379,52 @@ public actor DeepgramStreamingSession: StreamingSession {
         }
     }
 
-    private func invalidateURLSession() {
-        urlSession?.invalidateAndCancel()
-        urlSession = nil
-        webSocketTask = nil
-#if DEBUG
-        testDidInvalidateURLSession = true
-#endif
+    private static func connectionError(from error: Error) -> Error {
+        if error is CancellationError || error is DeepgramError {
+            return error
+        }
+        guard let connectionError = error as? WebSocketConnectionError else {
+            return DeepgramError.connectionFailed(error.localizedDescription)
+        }
+
+        switch connectionError {
+        case .handshakeRejected(let statusCode):
+            return DeepgramError.handshakeRejected(statusCode: statusCode)
+        case .handshakeTimedOut, .messageTimedOut:
+            return DeepgramError.handshakeTimedOut
+        case .connectionFailed(let message):
+            return DeepgramError.connectionFailed(message)
+        case .connectionAlreadyInProgress:
+            return DeepgramError.connectionFailed("Connection already in progress")
+        case .alreadyConnected:
+            return DeepgramError.connectionFailed("Session is already connected")
+        }
     }
 
 #if DEBUG
     // swiftlint:disable identifier_name
-    func _testSetConnected(_ connected: Bool) {
-        isConnected = connected
+    func _testSetConnected(_ connected: Bool) async {
+        await core._testSetConnected(connected)
     }
 
-    func _testSetURLSession(_ session: URLSession?) {
-        urlSession = session
+    func _testSetURLSession(_ session: URLSession?) async {
+        await core._testSetURLSession(session)
     }
 
-    func _testDidInvalidateURLSession() -> Bool {
-        testDidInvalidateURLSession
+    func _testDidInvalidateURLSession() async -> Bool {
+        await core._testDidInvalidateConnection()
+    }
+
+    func _testIsConnected() async -> Bool {
+        await core.isConnected
+    }
+
+    func _testFinishReceiveLoop(after error: Error) async {
+        await core._testFinishReceiveLoop(after: error)
+    }
+
+    func _testObservabilitySessionId() async -> UUID? {
+        await core._testObservabilitySessionId()
     }
     // swiftlint:enable identifier_name
 #endif

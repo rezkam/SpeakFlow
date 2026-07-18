@@ -456,9 +456,7 @@ public final class LiveStreamingController {
             // and buffered via sessionRef.isActive being false until we set it below.
             logger.info("Connecting to \(provider.displayName, privacy: .public)...")
             let streamSession = try await provider.startSession(config: config)
-            if let deepgramSession = streamSession as? DeepgramStreamingSession {
-                await deepgramSession.setObservabilitySessionId(self.sessionId)
-            }
+            await streamSession.setObservabilitySessionId(sessionId)
             self.session = streamSession
 
             // Start listening to events
@@ -1111,6 +1109,7 @@ public final class LiveStreamingController {
             logger.info("Reconnecting to \(provider.displayName)...")
             observabilityEvent("reconnect_attempt_connecting", level: .warning)
             let newSession = try await provider.startSession(config: config)
+            await newSession.setObservabilitySessionId(sessionId)
 
             // CRITICAL: Check for cancellation after the await returns.
             // If the user pressed stop/cancel while startSession was in flight,

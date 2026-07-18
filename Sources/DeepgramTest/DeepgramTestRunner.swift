@@ -203,9 +203,7 @@ func test08_CancelWhenNotRecording() async -> Bool {
     return cb.errors.isEmpty
 }
 
-/// 9. Bad API key → session should error or close shortly after start.
-///    Deepgram accepts WebSocket connection then sends an error/close frame,
-///    so start() may succeed but the session closes immediately after.
+/// 9. Bad API key must reject the WebSocket handshake before start succeeds.
 @MainActor
 func test09_BadApiKey() async -> Bool {
     let provider = DeepgramProvider()
@@ -220,16 +218,8 @@ func test09_BadApiKey() async -> Bool {
     // Restore key
     ProviderSettings.shared.setApiKey(originalKey, for: ProviderId.deepgram)
 
-    if !started {
-        // Failed at connect — good
-        return true
-    }
-
-    // If start succeeded, the session should error or close within a few seconds
-    try? await Task.sleep(for: .seconds(3))
-    await controller.stop()
-
-    return !cb.errors.isEmpty || cb.sessionClosed
+    return !started
+        && cb.errors.contains(where: { $0.contains("HTTP 401") })
 }
 
 /// 10. Provider settings persistence round-trip.

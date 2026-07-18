@@ -152,8 +152,16 @@ public protocol StreamingSession: Sendable {
     /// Send a keep-alive to prevent timeout.
     func keepAlive() async throws
 
+    /// Correlate provider transport events with the owning recording session.
+    func setObservabilitySessionId(_ sessionId: UUID?) async
+
     /// Stream of transcription events from the server.
     var events: AsyncStream<TranscriptionEvent> { get }
+}
+
+extension StreamingSession {
+    /// Providers without transport observability do not need special handling.
+    public func setObservabilitySessionId(_ sessionId: UUID?) async {}
 }
 
 // MARK: - Events

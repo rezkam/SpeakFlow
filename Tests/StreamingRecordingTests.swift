@@ -14,6 +14,25 @@ struct StreamingTestContext {
     let textInserter: SpyTextInserter
     let banner: SpyBannerPresenter
     let keyInterceptor: SpyKeyInterceptor
+    let soundPlayer: SpySoundEffectPlayer
+
+    init(
+        controller: RecordingController,
+        provider: MockStreamingProvider,
+        session: MockStreamingSession,
+        textInserter: SpyTextInserter,
+        banner: SpyBannerPresenter,
+        keyInterceptor: SpyKeyInterceptor,
+        soundPlayer: SpySoundEffectPlayer = SpySoundEffectPlayer()
+    ) {
+        self.controller = controller
+        self.provider = provider
+        self.session = session
+        self.textInserter = textInserter
+        self.banner = banner
+        self.keyInterceptor = keyInterceptor
+        self.soundPlayer = soundPlayer
+    }
 }
 
 @Suite("RecordingController — Streaming Recording Lifecycle")
@@ -43,16 +62,43 @@ struct StreamingRecordingTests {
         providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
         providerRegistry.register(mockProvider)
 
+        let soundPlayer = SpySoundEffectPlayer()
         let (controller, ki, ti, bp) = makeTestRecordingController(
             providerSettings: providerSettings,
             providerRegistry: providerRegistry,
-            settings: settings
+            settings: settings,
+            playSoundEffect: { soundPlayer.play($0) }
         )
 
         return StreamingTestContext(
             controller: controller, provider: mockProvider, session: mockSession,
-            textInserter: ti, banner: bp, keyInterceptor: ki
+            textInserter: ti, banner: bp, keyInterceptor: ki, soundPlayer: soundPlayer
         )
+    }
+
+    @MainActor
+    private func makeReconnectController() -> (RecordingController, MultiSessionMockProvider) {
+        let providerSettings = SpyProviderSettings()
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+
+        let provider = MultiSessionMockProvider()
+        provider.sessions = [MockStreamingSession(), MockStreamingSession()]
+
+        let providerRegistry = SpyProviderRegistry()
+        providerRegistry.register(provider)
+
+        let settings = SpySettings()
+        settings.streamingKeepAliveEnabled = false
+        settings.streamingReconnectEnabled = true
+        settings.streamingTrailingFinalTimeout = 0
+
+        let (controller, _, _, _) = makeTestRecordingController(
+            providerSettings: providerSettings,
+            providerRegistry: providerRegistry,
+            settings: settings
+        )
+        return (controller, provider)
     }
 
     // MARK: - Start
@@ -61,9 +107,15 @@ struct StreamingRecordingTests {
     func startStreamingRecording_createsLiveController() async throws {
         let ctx = makeController()
         ctx.controller.startRecording()
+        try await waitUntil {
+            ctx.provider.startSessionCallCount == 1
+                && ctx.controller.liveStreamingController?.recording == true
+        }
         #expect(ctx.controller.liveStreamingController != nil,
                 "Streaming provider should create a LiveStreamingController")
         #expect(ctx.controller.isRecording, "Should be in recording state")
+        #expect(ctx.soundPlayer.count(.start) == 1,
+                "Start cue must play once after the provider is ready")
     }
 
     @MainActor @Test
@@ -129,6 +181,30 @@ struct StreamingRecordingTests {
 
         #expect(ctx.controller.fullTranscript.contains("hello world"),
                 "Full transcript should accumulate final text")
+    }
+
+    @MainActor @Test
+    func streamingRecording_closedEventReconnectsWithoutStoppingRecording() async throws {
+        let (controller, provider) = makeReconnectController()
+        controller.startRecording()
+
+        try await waitUntil {
+            provider.startSessionCallCount == 1
+                && controller.liveStreamingController?.recording == true
+        }
+        guard let liveController = controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created")
+            return
+        }
+
+        liveController.handleEvent(.closed)
+
+        try await waitUntil {
+            provider.startSessionCallCount == 2 && liveController.recording
+        }
+
+        #expect(controller.isRecording,
+                "A reconnectable close must not stop the recording lifecycle")
     }
 
     @MainActor @Test
@@ -207,11 +283,35 @@ struct StreamingRecordingTests {
         }
 
         lsc.handleEvent(.error(DeepgramError.connectionFailed("test error")))
-        lsc.onError?(DeepgramError.connectionFailed("test error"))
 
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitUntil {
+            !ctx.controller.isRecording && !ctx.banner.bannerMessages.isEmpty
+        }
 
         #expect(!ctx.controller.isRecording, "Should stop recording on error")
+        #expect(ctx.banner.bannerMessages.contains(where: { $0.1 == .error }),
+                "Mid-session streaming errors must show an error banner")
+    }
+
+    @MainActor @Test
+    func streamingRecording_rejectedHandshakeShowsAuthBanner() async throws {
+        let ctx = makeController()
+        ctx.provider.startError = DeepgramError.handshakeRejected(statusCode: 401)
+
+        ctx.controller.startRecording()
+
+        try await waitUntil {
+            !ctx.controller.isRecording && !ctx.banner.bannerMessages.isEmpty
+        }
+
+        #expect(ctx.banner.bannerMessages.contains(where: {
+            $0.1 == .error
+                && $0.0.contains("Deepgram API key is invalid or expired")
+        }))
+        #expect(ctx.soundPlayer.count(.start) == 0,
+                "A rejected handshake must not play the successful start cue")
+        #expect(ctx.soundPlayer.count(.error) == 1,
+                "A rejected handshake must play one error cue")
     }
 
     // MARK: - Provider Not Configured
@@ -252,14 +352,16 @@ struct StreamingDurationAccountingTests {
         providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
         providerRegistry.register(mockProvider)
 
+        let soundPlayer = SpySoundEffectPlayer()
         let (controller, ki, ti, bp) = makeTestRecordingController(
             providerSettings: providerSettings,
             providerRegistry: providerRegistry,
-            settings: settings
+            settings: settings,
+            playSoundEffect: { soundPlayer.play($0) }
         )
         return StreamingTestContext(
             controller: controller, provider: mockProvider, session: mockSession,
-            textInserter: ti, banner: bp, keyInterceptor: ki
+            textInserter: ti, banner: bp, keyInterceptor: ki, soundPlayer: soundPlayer
         )
     }
 

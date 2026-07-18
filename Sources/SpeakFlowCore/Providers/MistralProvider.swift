@@ -121,6 +121,8 @@ extension MistralProvider: APIKeyValidatable {
 public enum MistralError: Error, LocalizedError {
     case missingApiKey
     case connectionFailed(String)
+    case handshakeRejected(statusCode: Int)
+    case handshakeTimedOut
     case invalidResponse(String)
     case webSocketError(Error)
     case sessionClosed
@@ -130,6 +132,10 @@ public enum MistralError: Error, LocalizedError {
         switch self {
         case .missingApiKey: return "Mistral API key not configured"
         case .connectionFailed(let msg): return "Connection failed: \(msg)"
+        case .handshakeRejected(let statusCode):
+            return "Mistral WebSocket handshake rejected (HTTP \(statusCode))"
+        case .handshakeTimedOut:
+            return "Mistral WebSocket handshake timed out"
         case .invalidResponse(let msg): return "Invalid response: \(msg)"
         case .webSocketError(let err): return "WebSocket error: \(err.localizedDescription)"
         case .sessionClosed: return "Session is closed"
@@ -161,34 +167,37 @@ public actor MistralStreamingSession: StreamingSession {
     private let config: StreamingSessionConfig
     private let logger = Logger(subsystem: "SpeakFlow", category: "MistralSession")
 
-    private var webSocketTask: URLSessionWebSocketTask?
-    private var urlSession: URLSession?
-    private var eventContinuation: AsyncStream<TranscriptionEvent>.Continuation?
-    private let _events: AsyncStream<TranscriptionEvent>
-    private var isConnected = false
-    private var receiveTask: Task<Void, Never>?
-    private var sawTranscriptionDone = false
-#if DEBUG
-    private var testDidInvalidateURLSession = false
-#endif
+    private let core: WebSocketSessionCore
+    private let handshakeTimeout: TimeInterval
 
     /// Accumulates `transcription.text.delta` fragments between segment boundaries.
     /// Reset when a `transcription.segment` or `transcription.done` arrives.
     private var pendingDeltaText = ""
 
     public nonisolated var events: AsyncStream<TranscriptionEvent> {
-        _events
+        core.events
     }
 
-    init(apiKey: String, config: StreamingSessionConfig) {
+    init(
+        apiKey: String,
+        config: StreamingSessionConfig,
+        handshakeTimeout: TimeInterval = 10,
+        connectionFactory: @escaping WebSocketConnectionFactory = { request, timeout in
+            try await WebSocketConnector.connect(request: request, timeout: timeout)
+        }
+    ) {
         self.apiKey = apiKey
         self.config = config
+        self.handshakeTimeout = handshakeTimeout
+        self.core = WebSocketSessionCore(
+            component: "MistralSession",
+            connectionFactory: connectionFactory,
+            receiveErrorMapper: { MistralError.webSocketError($0) }
+        )
+    }
 
-        var continuation: AsyncStream<TranscriptionEvent>.Continuation!
-        self._events = AsyncStream<TranscriptionEvent> { c in
-            continuation = c
-        }
-        self.eventContinuation = continuation
+    public func setObservabilitySessionId(_ sessionId: UUID?) async {
+        await core.setObservabilitySessionId(sessionId)
     }
 
     func connect() async throws {
@@ -198,31 +207,29 @@ public actor MistralStreamingSession: StreamingSession {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
-        let session = URLSession(configuration: .default)
-        let wsTask = session.webSocketTask(with: request)
+        var openedTransport = false
+        do {
+            try await core.connect(request: request, timeout: handshakeTimeout)
+            openedTransport = true
 
-        self.urlSession = session
-        self.webSocketTask = wsTask
+            // Wait for session.created handshake (matches Python SDK's _recv_handshake).
+            let serverFormat = try await waitForSessionCreated()
+            logger.info("Mistral WebSocket connected — session created")
 
-        wsTask.resume()
-        isConnected = true
+            // Only send session.update if the server's default format differs from ours.
+            if serverFormat.encoding != "pcm_s16le" || serverFormat.sampleRate != config.sampleRate {
+                try await sendSessionUpdate()
+                logger.info("Sent session.update (format mismatch)")
+            }
 
-        // Wait for session.created handshake (matches Python SDK's _recv_handshake)
-        let serverFormat = try await waitForSessionCreated()
-
-        logger.info("Mistral WebSocket connected — session created")
-
-        // Only send session.update if the server's default format differs from ours.
-        // The Python SDK only calls update_session() when audio_format is explicitly passed.
-        // The server default is pcm_s16le@16kHz — same as our pipeline — so typically no update needed.
-        if serverFormat.encoding != "pcm_s16le" || serverFormat.sampleRate != config.sampleRate {
-            try await sendSessionUpdate()
-            logger.info("Sent session.update (format mismatch)")
-        }
-
-        // Start receiving messages
-        receiveTask = Task { [weak self] in
-            await self?.receiveLoop()
+            try await core.startReceiving { [weak self] text in
+                await self?.parseMessage(text)
+            }
+        } catch {
+            if openedTransport {
+                await core.close(code: .goingAway)
+            }
+            throw Self.connectionError(from: error)
         }
     }
 
@@ -236,26 +243,24 @@ public actor MistralStreamingSession: StreamingSession {
     /// Mirrors `_recv_handshake` in the Python SDK — reads until session.created or error.
     /// Returns the server's default audio format so we can decide whether to send session.update.
     private func waitForSessionCreated() async throws -> ServerAudioFormat {
-        guard let ws = webSocketTask else {
-            throw MistralError.connectionFailed("No WebSocket task")
-        }
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(handshakeTimeout)
 
-        let deadline = ContinuousClock.now + .seconds(10)
-        while ContinuousClock.now < deadline {
-            let message: URLSessionWebSocketTask.Message
-            do {
-                message = try await ws.receive()
-            } catch {
-                throw MistralError.connectionFailed("WebSocket handshake failed: \(error.localizedDescription)")
-            }
+        while clock.now < deadline {
+            let remaining = clock.now.duration(to: deadline)
+            let message = try await core.receiveHandshakeMessage(
+                timeout: Self.timeInterval(from: remaining)
+            )
 
             let text: String
             switch message {
-            case .string(let s): text = s
-            case .data(let d):
-                guard let s = String(data: d, encoding: .utf8) else { continue }
-                text = s
-            @unknown default: continue
+            case .string(let string):
+                text = string
+            case .data(let data):
+                guard let string = String(data: data, encoding: .utf8) else { continue }
+                text = string
+            @unknown default:
+                continue
             }
 
             guard let data = text.data(using: .utf8),
@@ -263,92 +268,66 @@ public actor MistralStreamingSession: StreamingSession {
                   let type = json["type"] as? String else { continue }
 
             if type == "session.created" {
-                let sessionObj = json["session"] as? [String: Any]
-                let requestId = sessionObj?["request_id"] as? String ?? "mistral-session"
-                eventContinuation?.yield(.metadata(requestId: requestId))
+                let sessionObject = json["session"] as? [String: Any]
+                let requestId = sessionObject?["request_id"] as? String ?? "mistral-session"
+                await core.yield(.metadata(requestId: requestId))
 
-                // Extract the server's default audio format
-                let audioFormat = sessionObj?["audio_format"] as? [String: Any]
+                let audioFormat = sessionObject?["audio_format"] as? [String: Any]
                 let encoding = audioFormat?["encoding"] as? String ?? "pcm_s16le"
                 let sampleRate = audioFormat?["sample_rate"] as? Int ?? 16000
-
                 return ServerAudioFormat(encoding: encoding, sampleRate: sampleRate)
-            } else if type == "error" {
-                let (msg, code) = extractError(json)
-                throw MistralError.serverError(msg, code: code)
+            }
+
+            if type == "error" {
+                let (message, code) = extractError(json)
+                throw MistralError.serverError(message, code: code)
             }
         }
 
-        throw MistralError.connectionFailed("Timeout waiting for session.created")
+        throw MistralError.handshakeTimedOut
     }
 
     /// Send `session.update` with our desired audio format (pcm_s16le @ 16kHz).
     /// This mirrors the Python SDK's `connection.update_session(audio_format)`.
     private func sendSessionUpdate() async throws {
-        guard isConnected, let ws = webSocketTask else {
-            throw MistralError.sessionClosed
-        }
         let msg = """
         {"type":"session.update","session":{"audio_format":{"encoding":"pcm_s16le","sample_rate":\(config.sampleRate)}}}
         """
-        try await ws.send(.string(msg))
+        try await core.send(.string(msg), disconnectedError: MistralError.sessionClosed)
         logger.debug("Sent session.update with pcm_s16le @ \(self.config.sampleRate)Hz")
     }
 
     public func sendAudio(_ data: Data) async throws {
-        guard isConnected, let ws = webSocketTask else {
-            throw MistralError.sessionClosed
-        }
-
-        // Mistral expects base64-encoded PCM audio in a JSON message
-        // (matches Python SDK's RealtimeConnection.send_audio)
+        // Mistral expects base64-encoded PCM audio in a JSON message.
         let base64Audio = data.base64EncodedString()
         let msg = #"{"type":"input_audio.append","audio":""# + base64Audio + #""}"#
-        try await ws.send(.string(msg))
+        try await core.send(.string(msg), disconnectedError: MistralError.sessionClosed)
     }
 
     public func finalize() async throws {
-        guard isConnected, let ws = webSocketTask else {
-            throw MistralError.sessionClosed
-        }
-        // Signal end of audio stream (matches Python SDK's connection.end_audio)
         let msg = #"{"type":"input_audio.end"}"#
-        try await ws.send(.string(msg))
+        try await core.send(.string(msg), disconnectedError: MistralError.sessionClosed)
         logger.debug("Sent input_audio.end")
     }
 
     public func close() async throws {
-        let wasConnected = isConnected
-        isConnected = false
-
-        // Flush any remaining delta text as a final result
+        // Flush any remaining delta text as a final result.
         if !pendingDeltaText.isEmpty {
             let result = TranscriptionResult(
                 transcript: pendingDeltaText,
                 isFinal: true,
                 speechFinal: true
             )
-            eventContinuation?.yield(.finalResult(result))
+            await core.yield(.finalResult(result))
             pendingDeltaText = ""
         }
 
-        if wasConnected {
-            webSocketTask?.cancel(with: .normalClosure, reason: nil)
-            logger.info("WebSocket closed")
-        } else {
-            webSocketTask?.cancel(with: .normalClosure, reason: nil)
-        }
-
-        receiveTask?.cancel()
-        receiveTask = nil
-        eventContinuation?.finish()
-        invalidateURLSession()
+        await core.close()
+        logger.info("WebSocket closed")
     }
 
     public func keepAlive() async throws {
-        // Mistral's realtime API doesn't have an explicit keep-alive message.
-        // The connection stays open as long as audio is being streamed.
-        guard isConnected else { return }
+        // Mistral's realtime API does not have an explicit keep-alive message.
     }
 
     // MARK: - Private
@@ -367,82 +346,9 @@ public actor MistralStreamingSession: StreamingSession {
         return url
     }
 
-    private func receiveLoop() async {
-        guard let ws = webSocketTask else { return }
-
-        while isConnected && !Task.isCancelled {
-            do {
-                let message = try await ws.receive()
-                switch message {
-                case .string(let text):
-                    parseMessage(text)
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        parseMessage(text)
-                    }
-                @unknown default:
-                    break
-                }
-            } catch {
-                if isConnected {
-                    // Distinguish a normal server-initiated close from a genuine network error.
-                    // Mistral's protocol closes the WebSocket after `transcription.done` — this
-                    // is expected and must not be reported as an error (which would kill recording).
-                    if isNormalClose(error) {
-                        let nsError = error as NSError
-                        if sawTranscriptionDone {
-                            logger.info("WebSocket closed by server after transcription.done (expected) domain=\(nsError.domain, privacy: .public) code=\(nsError.code)")
-                        } else {
-                            logger.info("WebSocket closed by server before transcription.done domain=\(nsError.domain, privacy: .public) code=\(nsError.code)")
-                        }
-                    } else {
-                        let nsError = error as NSError
-                        logger.error("WebSocket receive error: \(error.localizedDescription) domain=\(nsError.domain, privacy: .public) code=\(nsError.code)")
-                        eventContinuation?.yield(.error(MistralError.webSocketError(error)))
-                    }
-                    isConnected = false
-                }
-                break
-            }
-        }
-
-        eventContinuation?.yield(.closed)
-        eventContinuation?.finish()
-    }
-
-    /// Returns true when the WebSocket close is a clean, server-initiated closure that
-    /// should be treated as a normal end-of-session, not a network error.
-    ///
-    /// URLSessionWebSocketTask surfaces a server close frame as a URLError. We match on:
-    /// - `.networkConnectionLost` — most common form of a remote close on Darwin
-    /// - `.cancelled`            — fired when the task is cancelled (our own close())
-    /// The underlying close *code* is not directly accessible from URLError, so we
-    /// rely on error domain and code to filter out the non-fatal cases.
-    private nonisolated func isNormalClose(_ error: Error) -> Bool {
-        // Task cancellation (our own close() called cancel on the WS task)
-        if error is CancellationError { return true }
-
-        let nsError = error as NSError
-        // URLError domain
-        if nsError.domain == NSURLErrorDomain {
-            switch nsError.code {
-            case NSURLErrorNetworkConnectionLost,  // remote close frame
-                 NSURLErrorCancelled:              // task cancelled
-                return true
-            default:
-                return false
-            }
-        }
-        // POSIXError — sometimes surfaced on macOS for socket-level close
-        if nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ECONNRESET) {
-            return true
-        }
-        return false
-    }
-
     /// Parse a server message according to the Mistral realtime protocol.
     /// Message types are defined in `_MESSAGE_MODELS` in the Python SDK's `connection.py`.
-    func parseMessage(_ json: String) {
+    func parseMessage(_ json: String) async {
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return }
@@ -462,7 +368,7 @@ public actor MistralStreamingSession: StreamingSession {
                 isFinal: false,
                 speechFinal: false
             )
-            eventContinuation?.yield(.interim(result))
+            await core.yield(.interim(result))
             logger.debug(
                 "delta: \(text, privacy: .private(mask: .hash)) → accumulated: \(self.pendingDeltaText, privacy: .private(mask: .hash))"
             )
@@ -489,7 +395,7 @@ public actor MistralStreamingSession: StreamingSession {
                     isFinal: true,
                     speechFinal: true
                 )
-                eventContinuation?.yield(.finalResult(result))
+                await core.yield(.finalResult(result))
                 logger.info(
                     "SEGMENT [\(String(format: "%.1f", start))–\(String(format: "%.1f", start + duration))s]: \(segmentText, privacy: .private(mask: .hash))"
                 )
@@ -499,7 +405,7 @@ public actor MistralStreamingSession: StreamingSession {
             pendingDeltaText = ""
 
             // Signal utterance boundary so LiveStreamingController can track silence
-            eventContinuation?.yield(.utteranceEnd(lastWordEnd: start + duration))
+            await core.yield(.utteranceEnd(lastWordEnd: start + duration))
 
         // --- transcription.language ---
         // Detected language. Informational.
@@ -513,7 +419,6 @@ public actor MistralStreamingSession: StreamingSession {
         // Session complete. Contains full text, model, usage stats.
         // Python model: TranscriptionStreamDone { model: str, text: str, usage: UsageInfo, language: str? }
         case "transcription.done":
-            sawTranscriptionDone = true
             // Flush any remaining delta text
             if !pendingDeltaText.isEmpty {
                 let result = TranscriptionResult(
@@ -521,7 +426,7 @@ public actor MistralStreamingSession: StreamingSession {
                     isFinal: true,
                     speechFinal: true
                 )
-                eventContinuation?.yield(.finalResult(result))
+                await core.yield(.finalResult(result))
                 pendingDeltaText = ""
             }
             logger.info("Transcription done")
@@ -531,7 +436,7 @@ public actor MistralStreamingSession: StreamingSession {
         case "session.created":
             if let session = obj["session"] as? [String: Any],
                let requestId = session["request_id"] as? String {
-                eventContinuation?.yield(.metadata(requestId: requestId))
+                await core.yield(.metadata(requestId: requestId))
             }
             logger.info("Session created event received")
 
@@ -545,7 +450,7 @@ public actor MistralStreamingSession: StreamingSession {
         case "error":
             let (msg, code) = extractError(obj)
             logger.error("Server error (\(code)): \(msg, privacy: .public)")
-            eventContinuation?.yield(.error(MistralError.serverError(msg, code: code)))
+            await core.yield(.error(MistralError.serverError(msg, code: code)))
 
         default:
             logger.debug("Unknown message type: \(type, privacy: .public)")
@@ -576,34 +481,61 @@ public actor MistralStreamingSession: StreamingSession {
         return (message, code)
     }
 
-    private func invalidateURLSession() {
-        urlSession?.invalidateAndCancel()
-        urlSession = nil
-        webSocketTask = nil
-#if DEBUG
-        testDidInvalidateURLSession = true
-#endif
+    private static func timeInterval(from duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return Double(components.seconds) + Double(components.attoseconds) / 1e18
+    }
+
+    private static func connectionError(from error: Error) -> Error {
+        if error is CancellationError || error is MistralError {
+            return error
+        }
+        guard let connectionError = error as? WebSocketConnectionError else {
+            return MistralError.connectionFailed(error.localizedDescription)
+        }
+
+        switch connectionError {
+        case .handshakeRejected(let statusCode):
+            return MistralError.handshakeRejected(statusCode: statusCode)
+        case .handshakeTimedOut, .messageTimedOut:
+            return MistralError.handshakeTimedOut
+        case .connectionFailed(let message):
+            return MistralError.connectionFailed(message)
+        case .connectionAlreadyInProgress:
+            return MistralError.connectionFailed("Connection already in progress")
+        case .alreadyConnected:
+            return MistralError.connectionFailed("Session is already connected")
+        }
     }
 
 #if DEBUG
-    /// Test seam: mark the session as connected without a real WebSocket,
-    /// so close() will execute its flush path.
     // swiftlint:disable identifier_name
-    func _testSetConnected(_ connected: Bool) {
-        isConnected = connected
+    func _testSetConnected(_ connected: Bool) async {
+        await core._testSetConnected(connected)
     }
 
-    func _testSetURLSession(_ session: URLSession?) {
-        urlSession = session
+    func _testSetURLSession(_ session: URLSession?) async {
+        await core._testSetURLSession(session)
     }
 
-    func _testDidInvalidateURLSession() -> Bool {
-        testDidInvalidateURLSession
+    func _testDidInvalidateURLSession() async -> Bool {
+        await core._testDidInvalidateConnection()
     }
 
-    /// Test seam: expose isNormalClose for unit testing the error classification logic.
+    func _testIsConnected() async -> Bool {
+        await core.isConnected
+    }
+
+    func _testFinishReceiveLoop(after error: Error) async {
+        await core._testFinishReceiveLoop(after: error)
+    }
+
+    func _testObservabilitySessionId() async -> UUID? {
+        await core._testObservabilitySessionId()
+    }
+
     nonisolated func _testIsNormalClose(_ error: Error) -> Bool {
-        isNormalClose(error)
+        WebSocketReceiveErrorClassifier.shouldRouteAsClosed(error)
     }
     // swiftlint:enable identifier_name
 #endif

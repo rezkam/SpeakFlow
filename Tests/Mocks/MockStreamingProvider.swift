@@ -20,11 +20,17 @@ final class MockStreamingProvider: StreamingTranscriptionProvider, @unchecked Se
     /// Whether `startSession()` should throw.
     var shouldFailOnStart = false
 
+    /// Specific error to throw from `startSession()`, when set.
+    var startError: Error?
+
     /// How many times `startSession()` was called.
     var startSessionCallCount = 0
 
     func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
         startSessionCallCount += 1
+        if let startError {
+            throw startError
+        }
         if shouldFailOnStart {
             throw DeepgramError.connectionFailed("Mock connection failure")
         }
@@ -59,7 +65,7 @@ final class MultiSessionMockProvider: StreamingTranscriptionProvider, @unchecked
 
     /// Queue of sessions to return. Each `startSession()` call pops the first entry.
     /// If empty, throws a connection failure.
-    var sessions: [MockStreamingSession] = []
+    var sessions: [any StreamingSession] = []
 
     /// Number of times `startSession()` was called.
     var startSessionCallCount = 0

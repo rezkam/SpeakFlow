@@ -46,6 +46,7 @@ final class RecordingController {
     let providerRegistry: any ProviderRegistryProviding
     let settings: any SettingsProviding
     let transcription: any TranscriptionCoordinating
+    private let playSoundEffect: (SoundEffect) -> Void
 
     /// Test mode controls how the controller behaves outside production.
     /// - `off`: Normal production behavior with real permissions and recording.
@@ -69,7 +70,8 @@ final class RecordingController {
         providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
         providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared,
         settings: any SettingsProviding = SpeakFlowCore.Settings.shared,
-        transcription: any TranscriptionCoordinating = Transcription.shared
+        transcription: any TranscriptionCoordinating = Transcription.shared,
+        playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
     ) {
         self.keyInterceptor = keyInterceptor
         self.textInserter = textInserter
@@ -79,6 +81,7 @@ final class RecordingController {
         self.providerRegistry = providerRegistry
         self.settings = settings
         self.transcription = transcription
+        self.playSoundEffect = playSoundEffect
         self.keyInterceptor.onEscapePressed = { [weak self] in self?.cancelRecording() }
         self.keyInterceptor.onEnterPressed = { [weak self] in
             guard let self else { return }
@@ -252,7 +255,7 @@ final class RecordingController {
                     level: .warning,
                     metadata: ["hotkeyRestartsRecording": "false"]
                 )
-                SoundEffect.error.play()
+                playSoundEffect(.error)
                 return
             }
         }
@@ -277,7 +280,7 @@ final class RecordingController {
                 level: .warning,
                 metadata: ["providerId": providerId]
             )
-            SoundEffect.error.play()
+            playSoundEffect(.error)
             appState.showBanner(
                 "Set up a transcription provider in Providers to start dictating",
                 style: .error
@@ -310,11 +313,21 @@ final class RecordingController {
                 metadata: ["error": error.localizedDescription]
             )
             endMetricsSession(reason: "START_FAILED_COMPONENT")
-            SoundEffect.error.play()
+            playSoundEffect(.error)
             appState.showBanner("Failed to initialize recording components", style: .error)
             return
         }
-        SoundEffect.start.play()
+        if let streaming = provider as? any StreamingTranscriptionProvider {
+            startStreamingRecording(provider: streaming)
+        } else if let batch = provider as? any BatchTranscriptionProvider {
+            signalRecordingStarted(provider: provider)
+            startBatchRecording(provider: batch)
+        }
+        onStateChanged?()
+    }
+
+    private func signalRecordingStarted(provider: any TranscriptionProvider) {
+        playSoundEffect(.start)
         observabilityEvent(
             "recording_started",
             metadata: [
@@ -323,13 +336,6 @@ final class RecordingController {
                 "targetPid": String(textInserter.targetPid)
             ]
         )
-
-        if let streaming = provider as? any StreamingTranscriptionProvider {
-            startStreamingRecording(provider: streaming)
-        } else if let batch = provider as? any BatchTranscriptionProvider {
-            startBatchRecording(provider: batch)
-        }
-        onStateChanged?()
     }
 
     // MARK: - Batch Recording
@@ -366,7 +372,7 @@ final class RecordingController {
             if !started {
                 isRecording = false; isProcessingFinal = false; recorder = nil
                 self.lifecycleCoordinator.cancel()
-                SoundEffect.error.play()
+                self.playSoundEffect(.error)
                 self.observabilityEvent("batch_recording_start_failed", level: .error)
                 self.endMetricsSession(reason: "START_FAILED")
             } else {
@@ -484,12 +490,15 @@ final class RecordingController {
         }
         controller.onError = { [weak self] error in
             Logger.audio.error("Streaming error: \(error.localizedDescription)")
-            self?.observabilityEvent(
+            guard let self else { return }
+            self.observabilityEvent(
                 "streaming_error",
                 level: .error,
                 metadata: ["error": error.localizedDescription]
             )
-            Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
+            let message = Self.userFacingMessage(for: error, providerId: provider.id)
+            self.appState.showBanner(message, style: .error, duration: 8)
+            Task { @MainActor [weak self] in self?.stopRecording(reason: .autoEnd) }
         }
         controller.onSessionClosed = { [weak self] in
             Task { @MainActor in
@@ -521,10 +530,14 @@ final class RecordingController {
                 isRecording = false; isProcessingFinal = false
                 liveStreamingController = nil
                 self.lifecycleCoordinator.cancel()
-                SoundEffect.error.play()
+                self.playSoundEffect(.error)
                 self.observabilityEvent("streaming_recording_start_failed", level: .error)
                 self.endMetricsSession(reason: "START_FAILED")
             } else {
+                // The start cue confirms both microphone activation and provider readiness.
+                // Failed handshakes use the error cue and banner without a misleading start cue.
+                self.signalRecordingStarted(provider: provider)
+
                 // Streaming opens exactly one provider WebSocket per recording,
                 // so the API-call count grows by one and the recording count
                 // by one.
@@ -569,7 +582,7 @@ final class RecordingController {
             // Streaming stop: isProcessingFinal stays true throughout the trailing-final
             // window so onTextUpdate keeps accepting server results until stop() returns.
             isProcessingFinal = true
-            SoundEffect.stop.play()
+            playSoundEffect(.stop)
             hasPlayedCompletionSound = true
             let controller = liveStreamingController
             liveStreamingController = nil
@@ -608,7 +621,7 @@ final class RecordingController {
                 self.textInserter.setObservabilitySessionId(nil)
             }
         } else {
-            isProcessingFinal = true; SoundEffect.stop.play()
+            isProcessingFinal = true; playSoundEffect(.stop)
             batchFinalizationReason = reason.rawValue
             let stoppingRecorder = recorder
             stoppingRecorder?.stop()
@@ -645,7 +658,7 @@ final class RecordingController {
         } else {
             recorder?.cancel(); recorder = nil; transcription.cancelAll()
         }
-        onStateChanged?(); SoundEffect.complete.play()
+        onStateChanged?(); playSoundEffect(.complete)
     }
 
     func stopRecordingAndSubmit() {
@@ -744,7 +757,7 @@ final class RecordingController {
         }
 
         hasPlayedCompletionSound = true
-        SoundEffect.complete.play()
+        playSoundEffect(.complete)
         if shouldPressEnterOnComplete {
             shouldPressEnterOnComplete = false
             textInserter.pressEnterKey()
