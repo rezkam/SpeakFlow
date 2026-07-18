@@ -178,7 +178,7 @@ public final class OpenAICodexAuth {
     
     // MARK: - Authorization URL
     
-    public struct AuthorizationFlow {
+    public struct AuthorizationFlow: Sendable {
         public let url: URL
         public let verifier: String
         public let state: String
