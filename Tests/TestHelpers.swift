@@ -14,7 +14,8 @@ func makeTestRecordingController(
     providerSettings: SpyProviderSettings = SpyProviderSettings(),
     providerRegistry: SpyProviderRegistry = SpyProviderRegistry(),
     settings: SpySettings = SpySettings(),
-    transcription: SpyTranscription = SpyTranscription()
+    transcription: SpyTranscription = SpyTranscription(),
+    playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
 ) -> (RecordingController, SpyKeyInterceptor, SpyTextInserter, SpyBannerPresenter) {
     SoundEffect.isMuted = true
     let ki = SpyKeyInterceptor()
@@ -23,13 +24,36 @@ func makeTestRecordingController(
     let c = RecordingController(
         keyInterceptor: ki, textInserter: ti, appState: bp,
         providerSettings: providerSettings, providerRegistry: providerRegistry,
-        settings: settings, transcription: transcription
+        settings: settings, transcription: transcription,
+        playSoundEffect: playSoundEffect
     )
     c.testMode = .live
     // Mirror AppDelegate: wire transcription callbacks so onAllComplete
     // and onTextReady behave correctly in tests.
     c.setupTranscriptionCallbacks()
     return (c, ki, ti, bp)
+}
+
+@MainActor
+final class SpySoundEffectPlayer {
+    enum Effect: Equatable {
+        case error, start, stop, complete
+    }
+
+    private(set) var effects: [Effect] = []
+
+    func play(_ effect: SoundEffect) {
+        switch effect {
+        case .error: effects.append(.error)
+        case .start: effects.append(.start)
+        case .stop: effects.append(.stop)
+        case .complete: effects.append(.complete)
+        }
+    }
+
+    func count(_ effect: Effect) -> Int {
+        effects.count(where: { $0 == effect })
+    }
 }
 
 // MARK: - Shared Test Helpers

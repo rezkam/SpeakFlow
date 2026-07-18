@@ -61,6 +61,103 @@ struct DeepgramBuildURLTests {
     }
 }
 
+// MARK: - Deepgram WebSocket Handshake
+
+@Suite("WebSocket opening handshake")
+struct WebSocketOpeningHandshakeTests {
+    @Test
+    func didOpenCompletesHandshake() async throws {
+        let handshake = WebSocketOpeningHandshake()
+
+        handshake._testDidOpen()
+
+        try await handshake.waitForOpen(timeout: 1)
+    }
+
+    @Test
+    func rejectedUpgradePreservesHTTPStatus() async {
+        let handshake = WebSocketOpeningHandshake()
+        handshake._testDidComplete(
+            error: URLError(.badServerResponse),
+            statusCode: 401
+        )
+
+        do {
+            try await handshake.waitForOpen(timeout: 1)
+            Issue.record("Expected HTTP 401 handshake rejection")
+        } catch let error as WebSocketConnectionError {
+            guard case .handshakeRejected(let statusCode) = error else {
+                Issue.record("Expected handshakeRejected, got \(error)")
+                return
+            }
+            #expect(statusCode == 401)
+        } catch {
+            Issue.record("Expected WebSocketConnectionError, got \(error)")
+        }
+    }
+
+    @Test
+    func handshakeTimesOutWithoutDelegateCompletion() async {
+        let handshake = WebSocketOpeningHandshake()
+
+        do {
+            try await handshake.waitForOpen(timeout: 0.01)
+            Issue.record("Expected handshake timeout")
+        } catch let error as WebSocketConnectionError {
+            guard case .handshakeTimedOut = error else {
+                Issue.record("Expected handshakeTimedOut, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected WebSocketConnectionError, got \(error)")
+        }
+    }
+
+    @Test
+    func cancellationCompletesHandshakeWaiter() async {
+        let handshake = WebSocketOpeningHandshake()
+        let waitTask = Task { () -> Error? in
+            do {
+                try await handshake.waitForOpen(timeout: 30)
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        await Task.yield()
+        waitTask.cancel()
+
+        #expect(await waitTask.value is CancellationError)
+    }
+
+    @Test
+    func sessionStaysDisconnectedWhenHandshakeFails() async {
+        let session = DeepgramStreamingSession(
+            apiKey: "revoked-key",
+            config: .default,
+            connectionFactory: { _, _ in
+                throw WebSocketConnectionError.handshakeRejected(statusCode: 401)
+            }
+        )
+
+        do {
+            try await session.connect()
+            Issue.record("Expected connect() to reject the failed handshake")
+        } catch let error as DeepgramError {
+            guard case .handshakeRejected(let statusCode) = error else {
+                Issue.record("Expected handshakeRejected, got \(error)")
+                return
+            }
+            #expect(statusCode == 401)
+        } catch {
+            Issue.record("Expected DeepgramError, got \(error)")
+        }
+
+        #expect(!(await session._testIsConnected()))
+    }
+}
+
 // MARK: - DeepgramStreamingSession — JSON Parsing
 
 @Suite("DeepgramStreamingSession — parseMessage")
@@ -237,6 +334,62 @@ struct DeepgramCloseCleanupTests {
 
         #expect(await session._testDidInvalidateURLSession(),
                 "close() must invalidate URLSession even when isConnected=false")
+    }
+}
+
+@Suite("DeepgramStreamingSession — receive failure routing")
+struct DeepgramReceiveFailureRoutingTests {
+    private func events(after error: Error) async -> [TranscriptionEvent] {
+        let session = DeepgramStreamingSession(apiKey: "test-key", config: .default)
+        let eventsTask = Task {
+            var events: [TranscriptionEvent] = []
+            for await event in session.events {
+                events.append(event)
+            }
+            return events
+        }
+
+        await session._testFinishReceiveLoop(after: error)
+        return await eventsTask.value
+    }
+
+    @Test
+    func networkConnectionLost_emitsOnlyClosed() async {
+        let received = await events(after: URLError(.networkConnectionLost))
+
+        #expect(received.count == 1)
+        guard let event = received.first, case .closed = event else {
+            Issue.record("Connection loss must emit only .closed so reconnect can run")
+            return
+        }
+    }
+
+    @Test
+    func connectionReset_emitsOnlyClosed() async {
+        let error = NSError(domain: NSPOSIXErrorDomain, code: Int(ECONNRESET))
+        let received = await events(after: error)
+
+        #expect(received.count == 1)
+        guard let event = received.first, case .closed = event else {
+            Issue.record("Connection reset must emit only .closed so reconnect can run")
+            return
+        }
+    }
+
+    @Test
+    func timeout_emitsErrorThenClosed() async {
+        let received = await events(after: URLError(.timedOut))
+
+        #expect(received.count == 2)
+        guard received.count == 2 else { return }
+        guard case .error = received[0] else {
+            Issue.record("A genuine receive failure must still emit .error")
+            return
+        }
+        guard case .closed = received[1] else {
+            Issue.record("The event stream must finish with .closed")
+            return
+        }
     }
 }
 

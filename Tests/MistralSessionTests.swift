@@ -49,6 +49,76 @@ struct MistralBuildURLTests {
     }
 }
 
+@Suite("MistralStreamingSession — connection handshake")
+struct MistralConnectionHandshakeTests {
+    @Test
+    func sessionCreatedTimeoutThrowsAndLeavesSessionDisconnected() async {
+        let transport = MistralHandshakeTimeoutTransport()
+        let connection = await transport.connection()
+        let session = MistralStreamingSession(
+            apiKey: "test-key",
+            config: .default,
+            handshakeTimeout: 0.01,
+            connectionFactory: { _, _ in connection }
+        )
+
+        do {
+            try await session.connect()
+            Issue.record("Expected session.created handshake timeout")
+        } catch let error as MistralError {
+            guard case .handshakeTimedOut = error else {
+                Issue.record("Expected handshakeTimedOut, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected MistralError, got \(error)")
+        }
+
+        #expect(!(await session._testIsConnected()))
+        #expect(await transport.wasCancelled)
+        #expect(await transport.wasInvalidated)
+    }
+}
+
+private actor MistralHandshakeTimeoutTransport {
+    private(set) var wasCancelled = false
+    private(set) var wasInvalidated = false
+    private var receiveContinuation: CheckedContinuation<URLSessionWebSocketTask.Message, Error>?
+
+    func connection() -> WebSocketConnection {
+        WebSocketConnection(
+            send: { _ in },
+            receive: { try await self.receive() },
+            cancel: { _, _ in await self.markCancelled() },
+            invalidate: { await self.markInvalidated() }
+        )
+    }
+
+    private func receive() async throws -> URLSessionWebSocketTask.Message {
+        if wasCancelled || wasInvalidated {
+            throw CancellationError()
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            receiveContinuation = continuation
+        }
+    }
+
+    private func markCancelled() {
+        wasCancelled = true
+        releaseReceive()
+    }
+
+    private func markInvalidated() {
+        wasInvalidated = true
+        releaseReceive()
+    }
+
+    private func releaseReceive() {
+        receiveContinuation?.resume(throwing: CancellationError())
+        receiveContinuation = nil
+    }
+}
+
 // MARK: - MistralStreamingSession — JSON Parsing (Protocol Messages)
 
 @Suite("MistralStreamingSession — parseMessage")

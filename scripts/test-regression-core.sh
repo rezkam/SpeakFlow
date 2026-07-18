@@ -44,6 +44,8 @@ REGRESSION_SUITES=(
   "VADIntegrationTests"
   "VADTests"
   "LiveStreamingKeepAliveTests"
+  "WebSocketSessionContractTests"
+  "WebSocketReconnectIntegrationTests"
   "CorrectnessTests"
   "AudioPipelineTests"
   "TranscriptionQueueTests"

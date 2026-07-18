@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* **Streaming sessions recover from transient connection loss** - Deepgram and Mistral now share one WebSocket lifecycle that classifies remote disconnects consistently, allowing the one-shot reconnect path to run before recording is stopped.
+* **Rejected streaming credentials fail before recording readiness** - Deepgram now waits for the WebSocket upgrade before reporting startup success. Invalid or expired keys show an actionable banner and error cue without playing the successful start cue or counting an API call.
+
+### Test Coverage
+
+* **Added provider-parity WebSocket contracts** - Shared regressions now cover HTTP upgrade rejection, handshake timeout, cancellation, concurrent connection attempts, receive-error routing, observability correlation, reconnect success, and reconnect exhaustion for both streaming providers.
+
 ## 0.7.12 — Settings Dashboard & Statistics Accuracy
 
 ### New
