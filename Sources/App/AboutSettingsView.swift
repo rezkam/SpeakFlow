@@ -24,7 +24,7 @@ struct AboutSettingsView: View {
                     .fontWeight(.bold)
                     .foregroundStyle(Theme.text)
 
-                Text("Version \(appVersion) · macOS 15.3+")
+                Text("Version \(appVersion) · macOS 26+")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.text3)
 
