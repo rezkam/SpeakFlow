@@ -1,6 +1,27 @@
+import Foundation
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
+
+private final class StubOAuthCallbackServer: OAuthCallbackServing, @unchecked Sendable {
+    private let result: String?
+
+    init(result: String?) {
+        self.result = result
+    }
+
+    func prepareForCallback() -> Bool { true }
+    func waitForPreparedCallback(timeout: TimeInterval) async -> String? { result }
+    func stop() {}
+}
+
+private actor OAuthExchangeProbe {
+    private(set) var code: String?
+
+    func record(code: String) {
+        self.code = code
+    }
+}
 
 // MARK: - AuthController DI Behavioral Tests
 
@@ -118,5 +139,47 @@ struct AuthControllerDITests {
         controller.handleLogout()
 
         #expect(spyBanner.refreshCount > 0)
+    }
+
+    @Test @MainActor
+    func nilOAuthCallbackShowsFailureBanner() async throws {
+        let spyBanner = SpyBannerPresenter()
+        let server = StubOAuthCallbackServer(result: nil)
+        let controller = AuthController(
+            appState: spyBanner,
+            callbackServerFactory: { _ in server },
+            openAuthorizationURL: { _ in }
+        )
+
+        controller.startLoginFlow()
+
+        try await waitUntil {
+            controller.oauthCallbackServer == nil
+        }
+        #expect(spyBanner.bannerMessages.contains(where: {
+            $0.1 == .error && $0.0 == "Login failed or timed out. Please try again."
+        }))
+    }
+
+    @Test @MainActor
+    func oauthCodeDoesNotShowFailureBanner() async throws {
+        let spyBanner = SpyBannerPresenter()
+        let server = StubOAuthCallbackServer(result: "test-code")
+        let exchangeProbe = OAuthExchangeProbe()
+        let controller = AuthController(
+            appState: spyBanner,
+            callbackServerFactory: { _ in server },
+            openAuthorizationURL: { _ in },
+            exchangeAuthorizationCode: { code, _ in
+                await exchangeProbe.record(code: code)
+            }
+        )
+
+        controller.startLoginFlow()
+
+        try await waitUntilAsync {
+            await exchangeProbe.code == "test-code"
+        }
+        #expect(!spyBanner.bannerMessages.contains(where: { $0.1 == .error }))
     }
 }

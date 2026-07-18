@@ -213,6 +213,7 @@ public final class LiveStreamingController {
             var pendingAudio: ArraySlice<Data> = []
             var pendingBytes = 0
             var droppedChunks = 0
+            var isShutdown = false
         }
 
         private static let maxBufferedAudioBytes = 1_000_000
@@ -221,6 +222,9 @@ public final class LiveStreamingController {
         private let sendSignalContinuation: AsyncStream<Void>.Continuation
         private let sendSignalStream: AsyncStream<Void>
         private var senderTask: Task<Void, Never>?
+#if DEBUG
+        private var deinitHandler: (@Sendable () -> Void)?
+#endif
 
         init() {
             var continuation: AsyncStream<Void>.Continuation!
@@ -234,9 +238,17 @@ public final class LiveStreamingController {
         }
 
         deinit {
-            senderTask?.cancel()
-            sendSignalContinuation.finish()
+            shutdown()
+#if DEBUG
+            deinitHandler?()
+#endif
         }
+
+#if DEBUG
+        func setDeinitHandler(_ handler: @escaping @Sendable () -> Void) {
+            deinitHandler = handler
+        }
+#endif
 
         var isActive: Bool {
             state.withLock { $0.active }
@@ -250,8 +262,13 @@ public final class LiveStreamingController {
             state.withLock { $0.droppedChunks }
         }
 
+        var isShutdown: Bool {
+            state.withLock { $0.isShutdown }
+        }
+
         func set(session: StreamingSession?, active: Bool) {
             let shouldSignal = state.withLock { state in
+                guard !state.isShutdown else { return false }
                 state.session = session
                 state.active = active
                 return active && session != nil && !state.pendingAudio.isEmpty
@@ -264,6 +281,7 @@ public final class LiveStreamingController {
         func enqueueAudio(_ data: Data) {
             guard !data.isEmpty else { return }
             let shouldSignal = state.withLock { state in
+                guard !state.isShutdown else { return false }
                 if data.count > Self.maxBufferedAudioBytes {
                     state.droppedChunks &+= 1
                     return false
@@ -287,6 +305,7 @@ public final class LiveStreamingController {
 
         func deactivatePreservingBuffer() {
             state.withLock {
+                guard !$0.isShutdown else { return }
                 $0.session = nil
                 $0.active = false
             }
@@ -299,6 +318,24 @@ public final class LiveStreamingController {
                 $0.pendingAudio.removeAll()
                 $0.pendingBytes = 0
             }
+        }
+
+        /// Terminates the sender task and permanently invalidates this reference.
+        /// Reconnect uses `deactivatePreservingBuffer()` instead so the sender stays reusable.
+        func shutdown() {
+            let shouldFinish = state.withLock { state in
+                guard !state.isShutdown else { return false }
+                state.isShutdown = true
+                state.session = nil
+                state.active = false
+                state.pendingAudio.removeAll()
+                state.pendingBytes = 0
+                return true
+            }
+            guard shouldFinish else { return }
+            senderTask?.cancel()
+            senderTask = nil
+            sendSignalContinuation.finish()
         }
 
         private func runSenderLoop() async {
@@ -507,7 +544,7 @@ public final class LiveStreamingController {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
-        audioSessionRef.clear()
+        audioSessionRef.shutdown()
 
         // It is possible we're already inactive (e.g. during a reconnect window).
         // But we still need to tear down the session and timers.
@@ -558,7 +595,7 @@ public final class LiveStreamingController {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
-        audioSessionRef.clear()
+        audioSessionRef.shutdown()
 
         // Just like stop(), tear down the rest even if already inactive.
         isActive = false
@@ -1154,7 +1191,7 @@ public final class LiveStreamingController {
     private func cleanup() async {
         observabilityEvent("cleanup_full", level: .debug)
         cancelKeepAliveTimer()
-        audioSessionRef.clear()
+        audioSessionRef.shutdown()
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
@@ -1196,26 +1233,22 @@ extension LiveStreamingController {
     // swiftlint:disable identifier_name
     /// Whether the audio tap reference is currently marked active.
     /// When false, the audio tap silently discards audio instead of sending.
-    // swiftlint:disable:next identifier_name
     public var _testAudioSessionRefActive: Bool {
         audioSessionRef.isActive
     }
 
     /// Whether the audio engine is still allocated (mic capture is running).
     /// nil means the engine has been torn down and mic capture has stopped.
-    // swiftlint:disable:next identifier_name
     public var _testAudioEngineIsNil: Bool {
         audioEngine == nil
     }
 
     /// Inject a dummy audio engine to simulate active mic capture in tests.
-    // swiftlint:disable:next identifier_name
     public func _testSetAudioEngine(_ engine: AVAudioEngine?) {
         audioEngine = engine
     }
 
     /// Force set the audio session ref state for tests.
-    // swiftlint:disable:next identifier_name
     public func _testSetAudioSessionRefActive(_ active: Bool, session: StreamingSession) {
         if active {
             audioSessionRef.set(session: session, active: true)
@@ -1224,22 +1257,26 @@ extension LiveStreamingController {
         }
     }
 
-    // swiftlint:disable:next identifier_name
     public func _testEnqueueAudioFrame(_ data: Data) {
         audioSessionRef.enqueueAudio(data)
     }
 
-    // swiftlint:disable:next identifier_name
     public var _testPendingAudioChunkCount: Int {
         audioSessionRef.pendingChunkCount
     }
 
-    // swiftlint:disable:next identifier_name
     public var _testDroppedAudioChunkCount: Int {
         audioSessionRef.droppedChunkCount
     }
 
-    // swiftlint:disable:next identifier_name
+    public var _testAudioSessionRefIsShutdown: Bool {
+        audioSessionRef.isShutdown
+    }
+
+    public func _testSetAudioSessionRefDeinitHandler(_ handler: @escaping @Sendable () -> Void) {
+        audioSessionRef.setDeinitHandler(handler)
+    }
+
     public func _testArmSilenceTimer() {
         self.hasSpeechOccurred = true
         self.startSilenceTimer(source: "test")

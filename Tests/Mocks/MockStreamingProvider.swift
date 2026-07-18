@@ -9,7 +9,7 @@ import Testing
 /// the protocol requires `Sendable` conformance.
 final class MockStreamingProvider: StreamingTranscriptionProvider, @unchecked Sendable {
     let id: String = ProviderId.deepgram
-    let displayName = "Mock Streaming"
+    var displayName = "Mock Streaming"
     let mode: ProviderMode = .streaming
     var isConfigured: Bool = true
     var authRequirement: ProviderAuthRequirement { .apiKey(providerId: id) }

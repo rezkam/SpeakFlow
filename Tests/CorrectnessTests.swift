@@ -373,6 +373,8 @@ struct ReconnectLifecycleTests {
         }
         #expect(c._testAudioSessionRefActive == false,
                 "Audio tap ref must be cleared during reconnect — no sendAudio to dead socket")
+        #expect(!c._testAudioSessionRefIsShutdown,
+                "Reconnect cleanup must keep the audio sender reusable")
 
         // After successful reconnect, audioSessionRef should be re-armed.
         try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
@@ -381,6 +383,8 @@ struct ReconnectLifecycleTests {
         #expect(c._testAudioSessionRefActive == true,
                 "Audio tap ref must be re-armed after successful reconnect")
         #expect(c.isActive == true)
+        #expect(!c._testAudioSessionRefIsShutdown)
+        await c.cancel()
     }
 
     /// On failed reconnect, audioSessionRef must stay cleared.
@@ -406,6 +410,8 @@ struct ReconnectLifecycleTests {
 
         #expect(c._testAudioSessionRefActive == false,
                 "After failed reconnect, audio ref must be cleared")
+        #expect(c._testAudioSessionRefIsShutdown,
+                "Failed reconnect is terminal and must shut down the audio sender")
         #expect(c.isActive == false)
         #expect(sessionClosedFired == true,
                 "onSessionClosed must fire after failed reconnect")
@@ -704,8 +710,69 @@ struct ThinkingPauseWiringTests {
 
 // MARK: - Case 6: Live streaming audio buffering/backpressure
 
+private final class AudioSessionRefDeinitProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didDeinit = false
+
+    func signal() {
+        lock.withLock { didDeinit = true }
+    }
+
+    var wasSignalled: Bool {
+        lock.withLock { didDeinit }
+    }
+}
+
 @Suite("Live streaming audio buffering and backpressure")
 struct LiveStreamingAudioBufferingTests {
+    @MainActor @Test("Terminal cancel releases the audio sender task and session reference")
+    func terminalCancelReleasesAudioSessionRef() async throws {
+        let deinitProbe = AudioSessionRefDeinitProbe()
+        weak var weakController: LiveStreamingController?
+
+        do {
+            var controller: LiveStreamingController? = LiveStreamingController(
+                skipAudioEngineForTesting: true
+            )
+            weakController = controller
+            controller?._testSetAudioSessionRefDeinitHandler {
+                deinitProbe.signal()
+            }
+            await controller?.cancel()
+            #expect(controller?._testAudioSessionRefIsShutdown == true,
+                    "cancel() must explicitly shut down the audio sender")
+            controller = nil
+        }
+
+        #expect(weakController == nil, "The controller itself should deallocate")
+        try await waitUntilAsync(timeout: .seconds(1), interval: .milliseconds(20)) {
+            deinitProbe.wasSignalled
+        }
+        #expect(deinitProbe.wasSignalled,
+                "Terminal teardown must release AudioSessionRef instead of leaking its sender task")
+    }
+
+    @MainActor @Test("Terminal stop explicitly shuts down the audio sender")
+    func terminalStopShutsDownAudioSender() async {
+        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+
+        await controller.stop(trailingFinalTimeout: 0)
+
+        #expect(controller._testAudioSessionRefIsShutdown)
+    }
+
+    @MainActor @Test("Failed startup cleanup explicitly shuts down the audio sender")
+    func failedStartupShutsDownAudioSender() async {
+        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let provider = MockStreamingProvider()
+        provider.shouldFailOnStart = true
+
+        let started = await controller.start(provider: provider, config: .default)
+
+        #expect(!started)
+        #expect(controller._testAudioSessionRefIsShutdown)
+    }
+
     @MainActor @Test("Audio queued before activation is flushed once session is active")
     func preActivationAudioIsFlushedAfterSessionConnect() async throws {
         let controller = LiveStreamingController()

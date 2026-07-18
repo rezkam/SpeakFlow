@@ -31,6 +31,8 @@ final class RecordingController {
     private var currentMetricsSessionId: UUID?
     private var pendingMetricsTask: Task<Void, Never>?
     private var batchFinalizationReason: String = StopReason.unknown.rawValue
+    private var latestStreamingError: Error?
+    private var presentedRecordingErrorMessage: String?
     private let lifecycleCoordinator = RecordingLifecycleCoordinator()
     /// Wall-clock anchor for the next streaming segment. Set when streaming
     /// begins and again after each final, so each final contributes its own
@@ -164,6 +166,7 @@ final class RecordingController {
                 self.textInserter.insertText(text + " ")
             }
             // Successful transcription — dismiss any previous error banner
+            self.resetRecordingErrorPresentation()
             self.appState.dismissBanner()
             // Update the VAD session controller for thinking-pause detection
             Task { [weak self] in
@@ -179,7 +182,6 @@ final class RecordingController {
         }
         transcription.queueBridge.onChunkError = { [weak self] error in
             guard let self else { return }
-            let message = Self.userFacingMessage(for: error, providerId: self.providerSettings.activeProviderId)
             self.observabilityEvent(
                 "transcription_error_banner_shown",
                 level: .warning,
@@ -189,39 +191,7 @@ final class RecordingController {
                     "error": error.localizedDescription
                 ]
             )
-            self.appState.showBanner(message, style: .error, duration: 8)
-        }
-    }
-
-    // MARK: - User-Facing Error Messages
-
-    /// Maps a transcription error to an actionable, user-friendly message.
-    static func userFacingMessage(for error: Error, providerId: String) -> String {
-        let kind = TranscriptionErrorKind.classify(error)
-        switch kind {
-        case .authentication:
-            if providerId == ProviderId.chatGPT {
-                return "Transcription failed, your ChatGPT session has expired. Please re-login in Providers."
-            } else {
-                let name = providerDisplayName(for: providerId)
-                return "Transcription failed, your \(name) API key is invalid or expired. Check Providers settings."
-            }
-        case .rateLimited:
-            return "Transcription rate limited — please wait a moment and try again."
-        case .network:
-            return "Transcription failed — network error. Check your internet connection."
-        case .other:
-            return "Transcription failed — \(error.localizedDescription)"
-        }
-    }
-
-    /// Human-readable provider name for error messages.
-    private static func providerDisplayName(for providerId: String) -> String {
-        switch providerId {
-        case ProviderId.deepgram: return "Deepgram"
-        case ProviderId.mistral, ProviderId.mistralBatch: return "Mistral"
-        case ProviderId.chatGPT: return "ChatGPT"
-        default: return providerId
+            self.presentRecordingError(error, providerId: self.providerSettings.activeProviderId)
         }
     }
 
@@ -237,6 +207,8 @@ final class RecordingController {
 
     func startRecording() {
         guard !isRecording else { return }
+        resetRecordingErrorPresentation()
+        latestStreamingError = nil
         applyObservabilityConfigurationFromSettings()
         observabilityEvent(
             "recording_start_requested",
@@ -255,6 +227,8 @@ final class RecordingController {
                     level: .warning,
                     metadata: ["hotkeyRestartsRecording": "false"]
                 )
+                // This is an intentional blocked action, not a recording failure.
+                // The error cue is sufficient because the current recording is still finalizing.
                 playSoundEffect(.error)
                 return
             }
@@ -281,9 +255,8 @@ final class RecordingController {
                 metadata: ["providerId": providerId]
             )
             playSoundEffect(.error)
-            appState.showBanner(
-                "Set up a transcription provider in Providers to start dictating",
-                style: .error
+            presentRecordingError(
+                message: "Set up a transcription provider in Providers to start dictating"
             )
             return
         }
@@ -314,7 +287,7 @@ final class RecordingController {
             )
             endMetricsSession(reason: "START_FAILED_COMPONENT")
             playSoundEffect(.error)
-            appState.showBanner("Failed to initialize recording components", style: .error)
+            presentRecordingError(message: "Failed to initialize recording components")
             return
         }
         if let streaming = provider as? any StreamingTranscriptionProvider {
@@ -374,6 +347,9 @@ final class RecordingController {
                 self.lifecycleCoordinator.cancel()
                 self.playSoundEffect(.error)
                 self.observabilityEvent("batch_recording_start_failed", level: .error)
+                self.presentRecordingError(
+                    message: "Transcription failed, audio recording could not start. Please try again."
+                )
                 self.endMetricsSession(reason: "START_FAILED")
             } else {
                 Statistics.shared.recordRecording(
@@ -491,13 +467,13 @@ final class RecordingController {
         controller.onError = { [weak self] error in
             Logger.audio.error("Streaming error: \(error.localizedDescription)")
             guard let self else { return }
+            self.latestStreamingError = error
             self.observabilityEvent(
                 "streaming_error",
                 level: .error,
                 metadata: ["error": error.localizedDescription]
             )
-            let message = Self.userFacingMessage(for: error, providerId: provider.id)
-            self.appState.showBanner(message, style: .error, duration: 8)
+            self.presentRecordingError(error, providerId: provider.id)
             Task { @MainActor [weak self] in self?.stopRecording(reason: .autoEnd) }
         }
         controller.onSessionClosed = { [weak self] in
@@ -512,9 +488,9 @@ final class RecordingController {
                     // in some environments) should not silently behave like successful auto-end.
                     // Stop recording and surface explicit guidance.
                     self.stopRecording(reason: .autoEnd)
-                    self.appState.showBanner(
-                        "Mistral realtime session ended before audio was transcribed. Please try again or switch provider.",
-                        style: .error
+                    self.presentRecordingError(
+                        message: "\(provider.displayName) session ended before audio was transcribed. "
+                            + "Please try again or switch provider."
                     )
                     self.observabilityEvent(
                         "streaming_session_closed_without_text",
@@ -527,6 +503,14 @@ final class RecordingController {
         Task { @MainActor in
             let started = await controller.start(provider: provider, config: config)
             if !started {
+                if let error = self.latestStreamingError {
+                    self.presentRecordingError(error, providerId: provider.id)
+                } else {
+                    self.presentRecordingError(
+                        message: "Transcription failed, \(provider.displayName) streaming could not start. Check your connection and Providers settings."
+                    )
+                }
+                self.latestStreamingError = nil
                 isRecording = false; isProcessingFinal = false
                 liveStreamingController = nil
                 self.lifecycleCoordinator.cancel()
@@ -653,8 +637,9 @@ final class RecordingController {
         fullTranscript = ""
         textInserter.cancelAndReset()
         textInserter.setObservabilitySessionId(nil)
-        if liveStreamingController != nil {
-            Task { @MainActor in await self.liveStreamingController?.cancel(); self.liveStreamingController = nil }
+        if let controller = liveStreamingController {
+            liveStreamingController = nil
+            Task { @MainActor in await controller.cancel() }
         } else {
             recorder?.cancel(); recorder = nil; transcription.cancelAll()
         }
@@ -750,7 +735,15 @@ final class RecordingController {
         )
         endMetricsSession(reason: finalizationReason)
 
+        let enterRequested = shouldPressEnterOnComplete
+        shouldPressEnterOnComplete = false
+
         guard !fullTranscript.isEmpty, !hasPlayedCompletionSound else {
+            if enterRequested {
+                await textInserter.waitForPendingInsertions()
+                textInserter.pressEnterKey()
+                await textInserter.waitForPendingInsertions()
+            }
             textInserter.reset()
             textInserter.setObservabilitySessionId(nil)
             return
@@ -758,8 +751,7 @@ final class RecordingController {
 
         hasPlayedCompletionSound = true
         playSoundEffect(.complete)
-        if shouldPressEnterOnComplete {
-            shouldPressEnterOnComplete = false
+        if enterRequested {
             textInserter.pressEnterKey()
             await textInserter.waitForPendingInsertions()
         }
@@ -954,6 +946,59 @@ final class RecordingController {
             targetPidProvider: { [weak self] in self?.textInserter.targetPid ?? 0 }
         )
         lifecycleCoordinator.setComponents([keyComponent])
+    }
+}
+
+// MARK: - User-Facing Error Messages
+
+extension RecordingController {
+    /// Maps a transcription error to an actionable, user-friendly message.
+    static func userFacingMessage(for error: Error, providerId: String) -> String {
+        let kind = TranscriptionErrorKind.classify(error)
+        switch kind {
+        case .authentication:
+            if providerId == ProviderId.chatGPT {
+                return "Transcription failed, your ChatGPT session has expired. Please re-login in Providers."
+            } else {
+                let name = providerDisplayName(for: providerId)
+                return "Transcription failed, your \(name) API key is invalid or expired. Check Providers settings."
+            }
+        case .rateLimited:
+            return "Transcription rate limited — please wait a moment and try again."
+        case .network:
+            return "Transcription failed — network error. Check your internet connection."
+        case .other:
+            return "Transcription failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Human-readable provider name for error messages.
+    private static func providerDisplayName(for providerId: String) -> String {
+        switch providerId {
+        case ProviderId.deepgram: return "Deepgram"
+        case ProviderId.mistral, ProviderId.mistralBatch: return "Mistral"
+        case ProviderId.chatGPT: return "ChatGPT"
+        default: return providerId
+        }
+    }
+
+    /// Presents one actionable recording error per session and message. A streaming
+    /// startup failure reaches both `onError` and the `start() == false` branch, so
+    /// this deduplication prevents the same failure from presenting twice.
+    private func presentRecordingError(_ error: Error, providerId: String) {
+        presentRecordingError(
+            message: Self.userFacingMessage(for: error, providerId: providerId)
+        )
+    }
+
+    private func presentRecordingError(message: String) {
+        guard presentedRecordingErrorMessage != message else { return }
+        presentedRecordingErrorMessage = message
+        appState.showBanner(message, style: .error, duration: 8)
+    }
+
+    private func resetRecordingErrorPresentation() {
+        presentedRecordingErrorMessage = nil
     }
 }
 
