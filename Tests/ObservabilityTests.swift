@@ -180,6 +180,89 @@ struct ObservabilityTests {
         )
     }
 
+    @Test func eventsFileAndBaseDirectoryAreOwnerOnly() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
+        let store = ObservabilityStore(baseDirectory: base)
+
+        await store.applyConfiguration(
+            enabled: true,
+            verbosity: .verbose,
+            captureSettingsSnapshot: false,
+            captureSystemContext: false,
+            captureTextPayloads: true
+        )
+        await store.record(component: "Test", name: "event_written", level: .info)
+
+        let pathInfo = await store.pathInfoValue()
+        let filePermissions = try posixPermissions(atPath: pathInfo.eventsFile.path)
+        let dirPermissions = try posixPermissions(atPath: pathInfo.baseDirectory.path)
+
+        #expect(filePermissions == 0o600)
+        #expect(dirPermissions == 0o700)
+    }
+
+    @Test func migratesPreExistingWorldReadableStorageToOwnerOnly() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: base, withIntermediateDirectories: true)
+        let eventsPath = base.appendingPathComponent("events.jsonl").path
+        #expect(fileManager.createFile(atPath: eventsPath, contents: nil, attributes: [.posixPermissions: 0o644]))
+
+        // Precondition: the pre-existing artifacts really were created with looser permissions.
+        #expect(try posixPermissions(atPath: eventsPath) == 0o644)
+
+        let store = ObservabilityStore(baseDirectory: base)
+        let pathInfo = await store.pathInfoValue()
+
+        #expect(try posixPermissions(atPath: pathInfo.eventsFile.path) == 0o600)
+        #expect(try posixPermissions(atPath: pathInfo.baseDirectory.path) == 0o700)
+    }
+
+    @Test func rotatedEventsFilesRemainOwnerOnly() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
+        let store = ObservabilityStore(
+            baseDirectory: base,
+            maxFileBytes: 900,
+            maxRotatedFiles: 2
+        )
+
+        await store.applyConfiguration(
+            enabled: true,
+            verbosity: .verbose,
+            captureSettingsSnapshot: false,
+            captureSystemContext: false,
+            captureTextPayloads: false
+        )
+
+        for index in 0..<12 {
+            await store.record(
+                component: "Test",
+                name: "rotated_\(index)",
+                level: .debug,
+                metadata: ["payload": String(repeating: "x", count: 160)]
+            )
+        }
+
+        let pathInfo = await store.pathInfoValue()
+        let rotatedSibling = pathInfo.eventsFile.deletingLastPathComponent()
+            .appendingPathComponent("events.jsonl.1")
+
+        #expect(FileManager.default.fileExists(atPath: rotatedSibling.path))
+        #expect(try posixPermissions(atPath: pathInfo.eventsFile.path) == 0o600)
+        #expect(try posixPermissions(atPath: rotatedSibling.path) == 0o600)
+    }
+
+    private func posixPermissions(atPath path: String) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        guard let permissions = attributes[.posixPermissions] as? NSNumber else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return permissions.intValue
+    }
+
     private func loadEvents(from store: ObservabilityStore) async throws -> [ObservabilityEvent] {
         let pathInfo = await store.pathInfoValue()
         let data = try Data(contentsOf: pathInfo.eventsFile)

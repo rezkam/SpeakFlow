@@ -170,7 +170,7 @@ public actor ObservabilityStore {
         )
         self.maxFileBytes = maxFileBytes
         self.maxRotatedFiles = max(0, maxRotatedFiles)
-        self.handle = Self.prepareStorage(pathInfo: self.pathInfo)
+        self.handle = Self.prepareStorage(pathInfo: self.pathInfo, maxRotatedFiles: self.maxRotatedFiles)
     }
 
     deinit {
@@ -263,14 +263,57 @@ public actor ObservabilityStore {
         )
     }
 
-    private static func prepareStorage(pathInfo: ObservabilityPathInfo) -> FileHandle? {
-        do {
-            try FileManager.default.createDirectory(
-                at: pathInfo.baseDirectory,
-                withIntermediateDirectories: true
+    /// Owner-only POSIX permission bits enforced on every persisted observability artifact.
+    /// Dictated text (with captureTextPayloads enabled) is keystroke-equivalent content
+    /// and must never be readable by other local accounts.
+    private static let privateFileMode = 0o600
+    private static let privateDirectoryMode = 0o700
+
+    /// Ensures the directory at `url` exists and is owner-only (0700), tightening it if it
+    /// already existed with looser permissions (e.g. created by a prior app version).
+    private static func ensurePrivateDirectory(at url: URL) throws {
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: url.path) {
+            try fileManager.createDirectory(
+                at: url,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: privateDirectoryMode]
             )
-            if !FileManager.default.fileExists(atPath: pathInfo.eventsFile.path) {
-                FileManager.default.createFile(atPath: pathInfo.eventsFile.path, contents: nil)
+        } else {
+            try fileManager.setAttributes([.posixPermissions: privateDirectoryMode], ofItemAtPath: url.path)
+        }
+    }
+
+    /// Ensures the file at `path` exists and is owner-only (0600), tightening it if it
+    /// already existed with looser permissions (e.g. created by a prior app version).
+    private static func ensurePrivateFile(atPath path: String) throws {
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: path) {
+            let attributes: [FileAttributeKey: Any] = [.posixPermissions: privateFileMode]
+            guard fileManager.createFile(atPath: path, contents: nil, attributes: attributes) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+        } else {
+            try fileManager.setAttributes([.posixPermissions: privateFileMode], ofItemAtPath: path)
+        }
+    }
+
+    private static func rotatedEventsFile(pathInfo: ObservabilityPathInfo, index: Int) -> URL {
+        pathInfo.eventsFile.deletingLastPathComponent()
+            .appendingPathComponent("\(pathInfo.eventsFile.lastPathComponent).\(index)")
+    }
+
+    private static func prepareStorage(pathInfo: ObservabilityPathInfo, maxRotatedFiles: Int) -> FileHandle? {
+        do {
+            try ensurePrivateDirectory(at: pathInfo.baseDirectory)
+            try ensurePrivateFile(atPath: pathInfo.eventsFile.path)
+            if maxRotatedFiles > 0 {
+                for index in 1...maxRotatedFiles {
+                    let rotated = rotatedEventsFile(pathInfo: pathInfo, index: index)
+                    if FileManager.default.fileExists(atPath: rotated.path) {
+                        try ensurePrivateFile(atPath: rotated.path)
+                    }
+                }
             }
             let handle = try FileHandle(forWritingTo: pathInfo.eventsFile)
             try handle.seekToEnd()
@@ -351,9 +394,7 @@ public actor ObservabilityStore {
             }
         }
 
-        if !fileManager.fileExists(atPath: pathInfo.eventsFile.path) {
-            fileManager.createFile(atPath: pathInfo.eventsFile.path, contents: nil)
-        }
+        try Self.ensurePrivateFile(atPath: pathInfo.eventsFile.path)
         handle = try FileHandle(forWritingTo: pathInfo.eventsFile)
         try handle?.seekToEnd()
     }
@@ -364,7 +405,6 @@ public actor ObservabilityStore {
     }
 
     private func rotatedEventsFile(index: Int) -> URL {
-        pathInfo.eventsFile.deletingLastPathComponent()
-            .appendingPathComponent("\(pathInfo.eventsFile.lastPathComponent).\(index)")
+        Self.rotatedEventsFile(pathInfo: pathInfo, index: index)
     }
 }
