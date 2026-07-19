@@ -53,4 +53,50 @@ struct VADModelCacheTests {
         }
         #expect(m1 === m2, "getManager must return the same cached instance")
     }
+
+    @Test func testGetManagerRetriesAfterFailedLoad() async {
+        // Regression test: a failed load must NOT be cached forever. Before the
+        // fix, getManager's cold-path Task had no catch, so warmUpTask kept
+        // pointing at the failed task and every subsequent call re-awaited
+        // (and rethrew from) that same task without ever invoking the factory
+        // again. With the fix, a failure clears warmUpTask so the next call
+        // attempts a fresh load.
+        actor CallCounter {
+            private(set) var count = 0
+            func increment() -> Int {
+                count += 1
+                return count
+            }
+        }
+        struct SyntheticLoadError: Error {}
+
+        let counter = CallCounter()
+        let cache = VADModelCache(managerFactory: { _ in
+            _ = await counter.increment()
+            throw SyntheticLoadError()
+        })
+
+        var firstThrew = false
+        do {
+            _ = try await cache.getManager(threshold: 0.5)
+        } catch {
+            firstThrew = true
+        }
+        #expect(firstThrew, "first getManager call must throw")
+        let countAfterFirst = await counter.count
+        #expect(countAfterFirst == 1, "factory must be invoked exactly once for the first call")
+
+        var secondThrew = false
+        do {
+            _ = try await cache.getManager(threshold: 0.5)
+        } catch {
+            secondThrew = true
+        }
+        #expect(secondThrew, "second getManager call must also throw")
+        let countAfterSecond = await counter.count
+        #expect(
+            countAfterSecond == 2,
+            "factory must be invoked again on retry; a stuck cache would leave the count at 1"
+        )
+    }
 }
