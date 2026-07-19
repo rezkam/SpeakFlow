@@ -380,13 +380,17 @@ struct OAuthCallbackServerTests {
         #expect(receivedCode == expectedCode)
     }
 
+    /// State mismatch gets its 400 on that connection, but the server keeps
+    /// listening (it does not tear down the whole callback wait) — since nothing
+    /// valid follows, this now only resolves at the timeout deadline rather than
+    /// immediately, so the timeout here is kept short.
     @Test func testStateMismatchReturnsNil() async throws {
         let port = randomOAuthTestPort()
         let server = OAuthCallbackServer(expectedState: "expected", port: port)
 
         #expect(server.prepareForCallback())
 
-        async let code = server.waitForPreparedCallback(timeout: 5.0)
+        async let code = server.waitForPreparedCallback(timeout: 1.5)
         async let status = hitOAuthCallback(
             port: port,
             query: "code=abc&state=wrong"
@@ -395,6 +399,95 @@ struct OAuthCallbackServerTests {
         let (receivedCode, httpStatus) = try await (code, status)
         #expect(httpStatus == 400)
         #expect(receivedCode == nil)
+    }
+
+    /// Regression for the one-shot accept loop: a stray connection that sends no
+    /// data (simulating a browser preconnect probe, port scan, or half-open TCP
+    /// check) must not abort the login. The real callback arriving afterward
+    /// still succeeds.
+    @Test func testStrayEmptyConnectionBeforeCallbackDoesNotAbortLogin() async throws {
+        let port = randomOAuthTestPort()
+        let expectedState = "noise-state"
+        let expectedCode = "noise-code"
+        let server = OAuthCallbackServer(expectedState: expectedState, port: port)
+
+        #expect(server.prepareForCallback())
+
+        let waitTask = Task { await server.waitForPreparedCallback(timeout: 5.0) }
+
+        // Connect and close without sending anything.
+        let noiseSocket = try openOAuthPartialConnection(port: port, partialRequest: "")
+        Darwin.close(noiseSocket)
+        try await Task.sleep(for: .milliseconds(150))
+
+        let status = try await hitOAuthCallback(
+            port: port,
+            query: "code=\(expectedCode)&state=\(expectedState)"
+        )
+        let receivedCode = await waitTask.value
+
+        #expect(status == 200)
+        #expect(receivedCode == expectedCode,
+                "A stray empty connection before the real callback must not abort the login")
+    }
+
+    /// Regression for the one-shot accept loop: a stray request to an unrelated
+    /// path (e.g. a favicon probe) must get its 404 and the server must keep
+    /// listening for the real callback.
+    @Test func testStrayWrongPathConnectionBeforeCallbackDoesNotAbortLogin() async throws {
+        let port = randomOAuthTestPort()
+        let expectedState = "path-state"
+        let expectedCode = "path-code"
+        let server = OAuthCallbackServer(expectedState: expectedState, port: port)
+
+        #expect(server.prepareForCallback())
+
+        let waitTask = Task { await server.waitForPreparedCallback(timeout: 5.0) }
+
+        let noiseSocket = try openOAuthPartialConnection(
+            port: port,
+            partialRequest: "GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\n\r\n"
+        )
+        try await Task.sleep(for: .milliseconds(150))
+        Darwin.close(noiseSocket)
+
+        let status = try await hitOAuthCallback(
+            port: port,
+            query: "code=\(expectedCode)&state=\(expectedState)"
+        )
+        let receivedCode = await waitTask.value
+
+        #expect(status == 200)
+        #expect(receivedCode == expectedCode,
+                "A stray wrong-path probe before the real callback must not abort the login")
+    }
+
+    /// The accept loop must still honor the overall timeout when only noise
+    /// connections ever arrive — resumeOnce(nil) must still fire on deadline.
+    @Test func testOnlyNoiseConnectionsStillTimesOut() async throws {
+        let port = randomOAuthTestPort()
+        let server = OAuthCallbackServer(expectedState: "timeout-state", port: port)
+
+        #expect(server.prepareForCallback())
+
+        let start = Date()
+        let waitTask = Task { await server.waitForPreparedCallback(timeout: 1.5) }
+
+        for _ in 0..<3 {
+            let noiseSocket = try openOAuthPartialConnection(
+                port: port,
+                partialRequest: "GET /favicon.ico HTTP/1.1\r\n\r\n"
+            )
+            Darwin.close(noiseSocket)
+            try await Task.sleep(for: .milliseconds(200))
+        }
+
+        let result = await waitTask.value
+        let elapsed = Date().timeIntervalSince(start)
+
+        #expect(result == nil)
+        #expect(elapsed >= 1.4 && elapsed < 4.0,
+                "Timeout must still fire when only noise connections arrive, took \(elapsed)s")
     }
 
     @Test func testFragmentedRequestStillParsesStateAndCode() async throws {

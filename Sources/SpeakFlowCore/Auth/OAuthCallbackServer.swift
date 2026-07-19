@@ -208,14 +208,24 @@ public final class OAuthCallbackServer: @unchecked Sendable {
 
             if clientSocket >= 0 {
                 guard setNonBlocking(clientSocket) else {
+                    // One bad accepted client must not kill the whole login attempt:
+                    // close it and keep listening for the real callback.
                     Logger.auth.error("Failed to set accepted client socket non-blocking")
                     Darwin.close(clientSocket)
-                    resumeOnce(returning: nil)
+                    continue
+                }
+
+                let code = handleClient(clientSocket)
+                Darwin.close(clientSocket)
+
+                if let code {
+                    resumeOnce(returning: code)
                     return
                 }
-                handleClient(clientSocket)
-                Darwin.close(clientSocket)
-                return
+
+                // Not a valid callback (noise, probe, wrong path, bad state, etc.).
+                // Keep accepting until the real redirect arrives or we time out.
+                continue
             }
 
             try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
@@ -225,7 +235,11 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         resumeOnce(returning: nil)
     }
 
-    private func handleClient(_ clientSocket: Int32) {
+    /// Handles one accepted connection to completion: reads the request, writes the
+    /// matching HTTP response, and returns the authorization code on a valid callback
+    /// or `nil` if this connection was not a valid callback (caller should keep
+    /// listening rather than tearing the server down).
+    private func handleClient(_ clientSocket: Int32) -> String? {
         // Robustly read until end-of-headers. A single `read` is not guaranteed to
         // return the full HTTP request line; under load we can receive a partial
         // first packet (e.g. truncated query string), which causes false
@@ -261,8 +275,7 @@ public final class OAuthCallbackServer: @unchecked Sendable {
             }
 
             sendResponse(clientSocket, status: "400 Bad Request", body: "Read error")
-            resumeOnce(returning: nil)
-            return
+            return nil
         }
 
         guard !requestData.isEmpty,
@@ -270,42 +283,40 @@ public final class OAuthCallbackServer: @unchecked Sendable {
               let firstLine = request.split(separator: "\r\n").first,
               let pathPart = firstLine.split(separator: " ").dropFirst().first else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Invalid request")
-            resumeOnce(returning: nil)
-            return
+            return nil
         }
 
         let path = String(pathPart)
 
         guard path.hasPrefix("/auth/callback") else {
             sendResponse(clientSocket, status: "404 Not Found", body: "Not found")
-            resumeOnce(returning: nil)
-            return
+            return nil
         }
 
         guard let queryStart = path.firstIndex(of: "?") else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Missing query parameters")
-            resumeOnce(returning: nil)
-            return
+            return nil
         }
 
         let queryString = String(path[path.index(after: queryStart)...])
         let params = parseQueryString(queryString)
 
         guard let state = params["state"], state == expectedState else {
+            // Info level, no request contents (query/code): this can be a stray
+            // probe or an actual CSRF attempt, not a value worth logging either way.
+            Logger.auth.info("OAuth callback rejected: state mismatch")
             sendResponse(clientSocket, status: "400 Bad Request", body: "State mismatch")
-            resumeOnce(returning: nil)
-            return
+            return nil
         }
 
         guard let code = params["code"] else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Missing authorization code")
-            resumeOnce(returning: nil)
-            return
+            return nil
         }
 
         sendResponse(clientSocket, status: "200 OK", body: successHTML, contentType: "text/html")
         Logger.auth.info("Received OAuth callback with authorization code")
-        resumeOnce(returning: code)
+        return code
     }
 
     private func parseQueryString(_ query: String) -> [String: String] {
