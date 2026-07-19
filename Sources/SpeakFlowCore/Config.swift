@@ -178,6 +178,20 @@ public enum Config {
     /// buffer accumulation that leads to API timeouts and lost transcriptions.
     public static let forceSendChunkMultiplier: Double = 2.0
 
+    /// Minimum audio duration (seconds) worth sending early on a speechEnd event,
+    /// so a short dictation still produces a transcript before auto-end evaluates.
+    ///
+    /// This is deliberately decoupled from `Settings.minChunkDuration`
+    /// (== the configured `ChunkDuration` length, e.g. 60s for `.minute1`): the
+    /// early-emit path exists specifically to feed `SessionController.lastTranscript`
+    /// for dictations shorter than a full chunk, so gating it on the chunk length
+    /// would make it unreachable for exactly the short dictations it targets.
+    ///
+    /// Set well above `minRecordingDurationMs` (250ms, an absolute recording floor)
+    /// and high enough to be worth a transcription request for streaming/batch
+    /// providers — a fraction-of-a-second clip is unlikely to yield a useful result.
+    public static let earlyEmitMinDuration: Double = 1.5
+
     // Chunking uses the configured ChunkDuration. See shouldSendChunk().
 }
 
@@ -210,8 +224,23 @@ public enum ChunkDuration: Double, CaseIterable, Sendable {
         false
     }
 
-    /// Minimum chunk duration (shorter chunks get buffered)
+    /// Minimum buffered duration before a normal (non-early-emit) chunk is sent.
+    ///
+    /// A `ChunkDuration` case is a single fixed length, so `minDuration` and
+    /// `maxDuration` are intentionally equal here: "the minimum buffered audio
+    /// before we emit" and "the length of a chunk" are the same number when
+    /// there is only one configured length to buffer up to. This is NOT the
+    /// floor used for early-emit-on-speechEnd — see `Config.earlyEmitMinDuration`,
+    /// which exists precisely because this value is too high to ever be reached
+    /// by short dictations.
     public var minDuration: Double {
+        rawValue
+    }
+
+    /// Maximum buffered duration before a chunk is force-sent (see
+    /// `Settings.maxChunkDuration`). Equal to `minDuration` for the same
+    /// reason: a case represents one fixed chunk length, not a range.
+    public var maxDuration: Double {
         rawValue
     }
 }
@@ -993,7 +1022,7 @@ public final class Settings {
 
     /// Maximum seconds before forced chunk send
     public var maxChunkDuration: Double {
-        chunkDuration.rawValue
+        chunkDuration.maxDuration
     }
 
     /// Minimum seconds of audio before sending to API

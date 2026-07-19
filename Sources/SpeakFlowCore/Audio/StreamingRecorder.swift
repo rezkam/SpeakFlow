@@ -584,9 +584,15 @@ public final class StreamingRecorder {
                     let isFullRecording = self.settings.chunkDuration.isFullRecording
                     if !isFullRecording, await session.hasSpoken {
                         let duration = await audioBuffer?.duration ?? 0
-                        if duration >= self.settings.minChunkDuration {
+                        // Gated on the dedicated early-emit floor, NOT settings.minChunkDuration
+                        // (== the full chunk length, e.g. 60s for .minute1). Short dictations
+                        // — exactly what this path targets — would never reach that floor.
+                        if duration >= Config.earlyEmitMinDuration {
                             Logger.audio.info("⚡ EARLY CHUNK on speechEnd: duration=\(String(format: "%.1f", duration), privacy: .public)s (feeding transcript for thinking-pause)")
-                            let sent = await sendChunkIfReady(reason: "speechEnd: early emit for transcript")
+                            let sent = await sendChunkIfReady(
+                                reason: "speechEnd: early emit for transcript",
+                                minimumDuration: Config.earlyEmitMinDuration
+                            )
                             if sent {
                                 await session.chunkSent()
                             }
@@ -699,12 +705,19 @@ public final class StreamingRecorder {
         }
     }
 
+    /// Drain the buffer and emit a chunk if it meets the minimum-duration floor.
+    ///
+    /// - Parameter minimumDuration: Overrides the floor a chunk must meet before
+    ///   being sent. `nil` (the default, used by all normal chunking callers) falls
+    ///   back to `settings.minChunkDuration` (the configured chunk length). Pass
+    ///   `Config.earlyEmitMinDuration` for the speechEnd early-emit path, which
+    ///   intentionally uses a much lower floor — see that constant's doc comment.
     @discardableResult
-    private func sendChunkIfReady(reason: String) async -> Bool {
+    private func sendChunkIfReady(reason: String, minimumDuration: Double? = nil) async -> Bool {
         guard let buffer = audioBuffer else { return false }
         // Capture all Settings values BEFORE any await suspension points
         // to prevent concurrent @MainActor tasks from changing them mid-execution.
-        let minDuration = settings.minChunkDuration
+        let minDuration = minimumDuration ?? settings.minChunkDuration
         let skipSilentChunks = settings.skipSilentChunks
         let currentDuration = await buffer.duration
 
@@ -1010,8 +1023,9 @@ extension StreamingRecorder {
         state.setRecording(recording)
     }
 
-    func _testInvokeSendChunkIfReady(reason: String) async {
-        _ = await sendChunkIfReady(reason: reason)
+    @discardableResult
+    func _testInvokeSendChunkIfReady(reason: String, minimumDuration: Double? = nil) async -> Bool {
+        await sendChunkIfReady(reason: reason, minimumDuration: minimumDuration)
     }
 
     func _testInvokePeriodicCheck() async {

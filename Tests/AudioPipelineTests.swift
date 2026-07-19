@@ -985,6 +985,130 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
         #expect(chunkReceived, "With skipSilentChunks=false, silent chunk must still be sent")
         #expect(remaining == 0, "Sent chunk must drain buffer")
     }
+
+    // MARK: - Early-emit floor (WS-D F-4)
+    //
+    // The early-chunk-on-speechEnd path (StreamingRecorder.processWithVAD) exists so
+    // short dictations still produce a transcript before auto-end evaluates. It must
+    // use a floor decoupled from settings.minChunkDuration (== the configured
+    // ChunkDuration length, e.g. 60s for .minute1) — that floor is unreachable for
+    // exactly the short dictations this path targets. See Config.earlyEmitMinDuration.
+
+    /// sendChunkIfReady's minimumDuration parameter must let a caller opt into a
+    /// lower floor than settings.minChunkDuration, while callers that omit it
+    /// (nil) keep the existing settings-driven floor unchanged.
+    @Test @MainActor func testSendChunkIfReadyHonorsMinimumDurationOverride() async {
+        let recorder = StreamingRecorder()
+        let buffer = AudioBuffer(sampleRate: 16000)
+        // ~2s of audio: below the configured 60s chunk-duration floor, but above
+        // a 1.5s override floor (Config.earlyEmitMinDuration).
+        await buffer.append(frames: [Float](repeating: 0.5, count: 32_000))
+        recorder._testInjectAudioBuffer(buffer)
+        recorder._testSetIsRecording(true)
+
+        let origSkip = Settings.shared.skipSilentChunks
+        let origChunkDuration = Settings.shared.chunkDuration
+        defer {
+            Settings.shared.skipSilentChunks = origSkip
+            Settings.shared.chunkDuration = origChunkDuration
+        }
+        Settings.shared.skipSilentChunks = false
+        Settings.shared.chunkDuration = .minute1 // minChunkDuration == 60s
+
+        var chunkReceived = false
+        recorder.onChunkReady = { _ in chunkReceived = true }
+
+        // Default floor (minimumDuration: nil -> settings.minChunkDuration == 60s):
+        // a 2s buffer must still be rejected — normal chunking callers are unaffected.
+        let rejectedByDefault = await recorder._testInvokeSendChunkIfReady(reason: "default floor")
+        #expect(!rejectedByDefault, "Without an override, the 60s chunk-duration floor must reject a 2s buffer")
+        #expect(!chunkReceived)
+
+        let remaining = await recorder._testAudioBufferDuration()
+        #expect(remaining > 1.9, "Rejected chunk must remain buffered")
+
+        // Override floor (Config.earlyEmitMinDuration == 1.5s): the same buffer
+        // must now be accepted.
+        let sentWithOverride = await recorder._testInvokeSendChunkIfReady(
+            reason: "override floor",
+            minimumDuration: Config.earlyEmitMinDuration
+        )
+        #expect(sentWithOverride, "minimumDuration override must let a 2s buffer pass a 1.5s floor")
+        #expect(chunkReceived, "Chunk callback must fire once the override floor is met")
+    }
+
+    /// End-to-end: a speechEnd VAD event must emit an early chunk even when the
+    /// buffered audio is far below settings.minChunkDuration (the configured
+    /// ChunkDuration length). This is the scenario the early-emit path exists for —
+    /// a short dictation that would otherwise never produce a transcript before
+    /// auto-end fires (feeding SessionController.lastTranscript for thinking-pause).
+    ///
+    /// Fails on pre-fix code: the early-emit gate compared duration against
+    /// settings.minChunkDuration (60s for .minute1), which a ~10s dictation can
+    /// never reach, so no chunk would be emitted here.
+    @Test @MainActor func testEarlyChunkEmissionFiresOnSpeechEndBelowNormalChunkFloor() async {
+        let settings = SpySettings()
+        settings.chunkDuration = .minute1 // 60s floor — far above the ~10s test audio
+        settings.skipSilentChunks = true
+
+        let recorder = StreamingRecorder(settings: settings)
+        recorder._testSetIsRecording(true)
+        recorder._testSetVADActive(true)
+
+        let buffer = AudioBuffer(sampleRate: 16000)
+        recorder._testInjectAudioBuffer(buffer)
+
+        let session = SessionController(
+            vadConfig: .default,
+            autoEndConfig: .default,
+            maxChunkDuration: settings.maxChunkDuration
+        )
+        await session.startSession()
+        recorder._testInjectSessionController(session)
+
+        let vad = VADProcessor(config: .default)
+        // One scripted "speech" frame fires speechStart on the first VAD sub-chunk;
+        // once the script is exhausted MockVADBackend falls back to .silence(),
+        // which fires speechEnd on the very next sub-chunk (still within this one
+        // processQueuedSamples() call, since the audio was already appended in full).
+        await vad._testInjectBackend(MockVADBackend([.speech()]))
+        recorder._testInjectVADProcessor(vad)
+
+        var receivedChunks: [AudioChunk] = []
+        recorder.onChunkReady = { chunk in receivedChunks.append(chunk) }
+
+        let tenSecondsOfSpeech = [Float](repeating: 0.5, count: Int(10.0 * 16000))
+        recorder._testEnqueueSamples(tenSecondsOfSpeech)
+        await recorder._testInvokeProcessQueuedSamples()
+
+        #expect(await session.hasSpoken, "Sanity: speechStart must have been observed by the session")
+        #expect(!receivedChunks.isEmpty,
+                "speechEnd must emit an early chunk even though buffer duration (~10s) is far below the 60s chunkDuration floor")
+        if let chunk = receivedChunks.first {
+            #expect(chunk.durationSeconds > 9.0,
+                    "Early chunk must contain the full buffered audio, got \(chunk.durationSeconds)s")
+        }
+    }
+}
+
+// MARK: - ChunkDuration invariant (WS-D F-4)
+
+@Suite("ChunkDuration min/max invariant")
+struct ChunkDurationInvariantTests {
+    /// A ChunkDuration case represents a single fixed length, not a range —
+    /// minDuration and maxDuration are deliberately the same value for every
+    /// case. This asserts that equality on purpose rather than leaving it as
+    /// an unstated coincidence between two separately-defined computed
+    /// properties (see doc comments on both).
+    @Test func testMinDurationEqualsMaxDurationForEveryCase() {
+        for chunkDuration in ChunkDuration.allCases {
+            #expect(chunkDuration.minDuration <= chunkDuration.maxDuration,
+                    "\(chunkDuration): minDuration must never exceed maxDuration")
+            #expect(chunkDuration.minDuration == chunkDuration.maxDuration,
+                    "\(chunkDuration): a fixed-length chunk case must have equal min/max duration")
+            #expect(chunkDuration.minDuration == chunkDuration.rawValue)
+        }
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
