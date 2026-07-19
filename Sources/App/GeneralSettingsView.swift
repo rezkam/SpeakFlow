@@ -33,10 +33,10 @@ struct GeneralSettingsView: View {
         let activeProvider = activeConfiguredProvider(from: configured)
         return ActiveModelBanner(
             activeProvider: activeProvider,
-            activeModelId: currentActiveModelId(for: activeProvider?.id ?? state.activeProviderId),
+            activeModelId: ModelCatalog.activeModelId(for: activeProvider?.id ?? state.activeProviderId, in: state),
             configuredProviders: configured,
-            allModels: availableModels(for: configured),
-            onActivate: { model in activate(model: model) },
+            allModels: ModelCatalog.availableModels(for: configured),
+            onActivate: { model in ModelCatalog.activate(model, in: state) },
             onManageProviders: { switchTab(.providers) }
         )
     }
@@ -235,42 +235,6 @@ struct GeneralSettingsView: View {
 
     private func activeConfiguredProvider(from configured: [any TranscriptionProvider]) -> (any TranscriptionProvider)? {
         configured.first { $0.id == state.activeProviderId } ?? configured.first
-    }
-
-    private func availableModels(for configured: [any TranscriptionProvider]) -> [ModelDescriptor] {
-        ModelCatalog.all.filter { model in
-            configured.contains { provider in
-                provider.id == model.providerAccountId || provider.id == model.providerRegistryId
-            }
-        }
-    }
-
-    private func currentActiveModelId(for providerId: String) -> String {
-        switch providerId {
-        case ProviderId.deepgram:
-            state.deepgramModel
-        case ProviderId.mistral:
-            state.mistralModel
-        case ProviderId.mistralBatch:
-            state.mistralBatchModel
-        default:
-            "gpt-4o-transcribe"
-        }
-    }
-
-    private func activate(model: ModelDescriptor) {
-        ProviderSettings.shared.activeProviderId = model.providerRegistryId
-        switch model.providerRegistryId {
-        case ProviderId.deepgram:
-            Settings.shared.deepgramModel = model.id
-        case ProviderId.mistral:
-            Settings.shared.mistralModel = model.id
-        case ProviderId.mistralBatch:
-            Settings.shared.mistralBatchModel = model.id
-        default:
-            break
-        }
-        state.refresh()
     }
 
     private func formatTimeout(_ seconds: Double) -> String {

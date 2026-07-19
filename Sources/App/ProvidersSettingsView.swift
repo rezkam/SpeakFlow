@@ -22,9 +22,9 @@ struct ProvidersSettingsView: View {
                     account: account,
                     isExpanded: expanded.contains(account.id),
                     activeProviderId: state.activeProviderId,
-                    activeModelId: activeModelId(for: state.activeProviderId),
+                    activeModelId: ModelCatalog.activeModelId(for: state.activeProviderId, in: state),
                     onToggle: { toggle(account.id) },
-                    onActivate: { model in activate(model: model) },
+                    onActivate: { model in ModelCatalog.activate(model, in: state) },
                     onAuthAction: { action in handle(action, for: account) }
                 )
             }
@@ -100,21 +100,6 @@ struct ProvidersSettingsView: View {
         }
     }
 
-    private func activate(model: ModelDescriptor) {
-        ProviderSettings.shared.activeProviderId = model.providerRegistryId
-        switch model.providerRegistryId {
-        case ProviderId.deepgram:
-            Settings.shared.deepgramModel = model.id
-        case ProviderId.mistral:
-            Settings.shared.mistralModel = model.id
-        case ProviderId.mistralBatch:
-            Settings.shared.mistralBatchModel = model.id
-        default:
-            break
-        }
-        state.refresh()
-    }
-
     private func handle(_ action: ProviderCard.AuthAction, for account: ProviderAccount) {
         switch (account.id, action) {
         case (ProviderId.chatGPT, .login):
@@ -128,19 +113,6 @@ struct ProvidersSettingsView: View {
             auth.handleRemoveApiKey(for: account.id)
         default:
             break
-        }
-    }
-
-    private func activeModelId(for providerId: String) -> String {
-        switch providerId {
-        case ProviderId.deepgram:
-            state.deepgramModel
-        case ProviderId.mistral:
-            state.mistralModel
-        case ProviderId.mistralBatch:
-            state.mistralBatchModel
-        default:
-            "gpt-4o-transcribe"
         }
     }
 

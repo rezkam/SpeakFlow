@@ -313,6 +313,12 @@ struct ModelDescriptor: Identifiable, Hashable {
 
 /// Catalog used by the settings UI.
 enum ModelCatalog {
+    /// Fallback model id used when no explicit selection exists for the active provider
+    /// (i.e. the provider is ChatGPT, whose only model has no dedicated Settings key).
+    static var defaultModelId: String {
+        all.first { $0.providerRegistryId == ProviderId.chatGPT }?.id ?? ProviderId.chatGPT
+    }
+
     static let all: [ModelDescriptor] = [
         .init(
             id: "gpt-4o-transcribe",
@@ -351,4 +357,52 @@ enum ModelCatalog {
             pricing: "$0.003 / min"
         ),
     ]
+}
+
+// MARK: - Shared activate/select logic (used by Providers, Transcription, and General settings tabs)
+
+extension ModelCatalog {
+    /// Activates `model` as the app's active provider/model, persisting the choice to
+    /// `ProviderSettings.shared` / `Settings.shared` and refreshing `state` so observers pick it up.
+    @MainActor
+    static func activate(_ model: ModelDescriptor, in state: AppState) {
+        ProviderSettings.shared.activeProviderId = model.providerRegistryId
+        switch model.providerRegistryId {
+        case ProviderId.deepgram:
+            Settings.shared.deepgramModel = model.id
+        case ProviderId.mistral:
+            Settings.shared.mistralModel = model.id
+        case ProviderId.mistralBatch:
+            Settings.shared.mistralBatchModel = model.id
+        default:
+            break
+        }
+        state.refresh()
+    }
+
+    /// Returns the active model id for `providerId`, read from `state` (which mirrors
+    /// `Settings.shared` after `refresh()`). Falls back to `defaultModelId` for providers
+    /// (namely ChatGPT) that have no dedicated model-selection key.
+    @MainActor
+    static func activeModelId(for providerId: String, in state: AppState) -> String {
+        switch providerId {
+        case ProviderId.deepgram:
+            state.deepgramModel
+        case ProviderId.mistral:
+            state.mistralModel
+        case ProviderId.mistralBatch:
+            state.mistralBatchModel
+        default:
+            defaultModelId
+        }
+    }
+
+    /// Filters the catalog down to models belonging to a currently configured provider.
+    static func availableModels(for configured: [any TranscriptionProvider]) -> [ModelDescriptor] {
+        all.filter { model in
+            configured.contains { provider in
+                provider.id == model.providerAccountId || provider.id == model.providerRegistryId
+            }
+        }
+    }
 }
