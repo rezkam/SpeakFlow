@@ -21,32 +21,26 @@ public actor VADModelCache {
     private var warmUpThreshold: Float = Config.vadThreshold
     private let logger = Logger(subsystem: "SpeakFlow", category: "VADCache")
 
+    /// Creates the underlying `VadManager`. Overridable so tests can inject a
+    /// deterministic, network-free factory (e.g. one that throws or counts calls)
+    /// instead of loading the real CoreML model.
+    private let managerFactory: @Sendable (Float) async throws -> VadManager
+
+    init(
+        managerFactory: @escaping @Sendable (Float) async throws -> VadManager = { threshold in
+            try await VadManager(config: VadConfig(defaultThreshold: threshold))
+        }
+    ) {
+        self.managerFactory = managerFactory
+    }
+
     /// Pre-load the Silero VAD model in the background.
     /// Safe to call multiple times — concurrent callers coalesce into one load.
     public func warmUp(threshold: Float = Config.vadThreshold) {
         guard cachedManager == nil, warmUpTask == nil else { return }
 
         warmUpThreshold = threshold
-        warmUpTask = Task {
-            do {
-                let start = Date()
-                logger.info("VAD model warm-up starting")
-                let config = VadConfig(defaultThreshold: threshold)
-                let manager = try await VadManager(config: config)
-                let elapsed = Date().timeIntervalSince(start)
-                logger.info("VAD model warm-up complete in \(String(format: "%.2f", elapsed))s")
-                self.cachedManager = manager
-                self.cachedThreshold = threshold
-                self.warmUpTask = nil
-                return manager
-            } catch {
-                // Clear the failed task so subsequent warmUp()/getManager() calls
-                // can retry instead of being permanently stuck on the failed task.
-                self.warmUpTask = nil
-                logger.error("VAD model warm-up failed: \(error.localizedDescription). Will retry on next attempt.")
-                throw error
-            }
-        }
+        warmUpTask = makeLoadTask(threshold: threshold)
     }
 
     /// Get a cached or freshly-loaded VadManager.
@@ -78,17 +72,37 @@ public actor VADModelCache {
 
         // Cold path — load on demand, coalescing concurrent callers via warmUpTask
         logger.warning("VAD model loaded on demand (no warm-up)")
-        let task = Task {
-            let config = VadConfig(defaultThreshold: threshold)
-            let manager = try await VadManager(config: config)
-            self.cachedManager = manager
-            self.cachedThreshold = threshold
-            self.warmUpTask = nil
-            return manager
-        }
+        let task = makeLoadTask(threshold: threshold)
         warmUpTask = task
         warmUpThreshold = threshold
         return try await task.value
+    }
+
+    /// Loads the model via `managerFactory` and caches the result.
+    ///
+    /// The do/catch here is the single point of failure-recovery for both
+    /// `warmUp()` and the `getManager()` cold path: on success it caches the
+    /// manager and threshold; on failure it clears `warmUpTask` so the *next*
+    /// `warmUp()`/`getManager()` call attempts a fresh load instead of
+    /// re-awaiting (and rethrowing from) the same failed task forever.
+    private func makeLoadTask(threshold: Float) -> Task<VadManager, Error> {
+        Task {
+            do {
+                let start = Date()
+                logger.info("VAD model load starting")
+                let manager = try await self.managerFactory(threshold)
+                let elapsed = Date().timeIntervalSince(start)
+                logger.info("VAD model load complete in \(String(format: "%.2f", elapsed))s")
+                self.cachedManager = manager
+                self.cachedThreshold = threshold
+                self.warmUpTask = nil
+                return manager
+            } catch {
+                self.warmUpTask = nil
+                logger.error("VAD model load failed: \(error.localizedDescription). Will retry on next attempt.")
+                throw error
+            }
+        }
     }
 }
 
