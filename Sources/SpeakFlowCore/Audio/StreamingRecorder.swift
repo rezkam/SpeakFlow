@@ -61,17 +61,50 @@ private final class AudioRecordingState: Sendable {
 private final class AudioSampleQueue: @unchecked Sendable {
     private struct QueueState {
         var samples: [[Float]] = []
+        var droppedBatchCount = 0
+        var lastDropLogDate: Date = .distantPast
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: QueueState())
     private let maxQueueSize = 100
 
+    /// Minimum interval between "queue full" warnings so a sustained overflow
+    /// (e.g. the drain timer stalled while a menu/drag event-tracking loop is
+    /// running) logs a heartbeat instead of flooding once per dropped batch.
+    private let dropLogInterval: TimeInterval = 1.0
+
+    /// Total batches dropped (oldest-first) because the queue was at capacity.
+    /// Exposed for diagnostics/tests; only grows.
+    var droppedBatchCount: Int {
+        lock.withLock { $0.droppedBatchCount }
+    }
+
     func enqueue(frames: [Float]) {
-        lock.withLock { state in
-            if state.samples.count >= maxQueueSize {
-                state.samples.removeFirst()
+        // Compute whether this drop should be logged while holding the lock
+        // (so the decision itself is race-free), but do the actual logging
+        // outside the lock to avoid calling into the logging subsystem while
+        // holding an unfair lock that the audio callback also contends on.
+        let droppedCountToLog: Int? = lock.withLock { state in
+            guard state.samples.count >= maxQueueSize else {
+                state.samples.append(frames)
+                return nil
             }
+
+            state.samples.removeFirst()
+            state.droppedBatchCount += 1
             state.samples.append(frames)
+
+            let now = Date()
+            guard now.timeIntervalSince(state.lastDropLogDate) >= self.dropLogInterval else {
+                return nil
+            }
+            state.lastDropLogDate = now
+            return state.droppedBatchCount
+        }
+
+        if let totalDropped = droppedCountToLog {
+            // swiftlint:disable:next line_length
+            Logger.audio.warning("Audio sample queue full — dropping oldest batch (droppedBatchCount=\(totalDropped, privacy: .public)). The main run loop may be stalled (menu tracking, window drag, etc.), losing buffered speech.")
         }
     }
 
@@ -230,19 +263,32 @@ public final class StreamingRecorder {
     }
 
     private func startTimers() {
-        // Timer to process queued samples on main actor
-        processingTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        // Timer to process queued samples on main actor.
+        //
+        // Registered in `.common` mode (not `.default`, which is what
+        // `Timer.scheduledTimer` uses) so it keeps firing while the main run
+        // loop is in `.eventTracking` mode — e.g. the menu bar menu is open
+        // (it contains "Stop Dictation") or a window is being dragged/resized.
+        // Without this, the drain timer stalls, the audio callback keeps
+        // enqueuing into the bounded `AudioSampleQueue`, and once it fills up
+        // the oldest buffered speech is silently dropped.
+        let processing = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.processQueuedSamples()
             }
         }
+        RunLoop.main.add(processing, forMode: .common)
+        processingTimer = processing
 
-        // Timer for periodic chunk/auto-end checks
-        checkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Timer for periodic chunk/auto-end checks. Same `.common`-mode
+        // reasoning as above applies to auto-end/chunk timing.
+        let check = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.periodicCheck()
             }
         }
+        RunLoop.main.add(check, forMode: .common)
+        checkTimer = check
     }
 
     /// Update the transcript text used for thinking-pause detection.
@@ -955,18 +1001,23 @@ public final class StreamingRecorder {
         }
         Logger.audio.info("Starting MOCK recording with \(audioData.count) samples")
         
-        // Start timers (same as real recording)
-        processingTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        // Start timers (same as real recording, including `.common`-mode
+        // registration so they keep firing during menu tracking/window drag).
+        let processing = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.processQueuedSamples()
             }
         }
-        
-        checkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        RunLoop.main.add(processing, forMode: .common)
+        processingTimer = processing
+
+        let check = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.periodicCheck()
             }
         }
+        RunLoop.main.add(check, forMode: .common)
+        checkTimer = check
         
         // Feed samples in a background task
         Task {
@@ -1047,6 +1098,19 @@ extension StreamingRecorder {
     /// Used by tests to bypass the audio tap and inject controlled sample data.
     func _testEnqueueSamples(_ frames: [Float]) {
         sampleQueue.enqueue(frames: frames)
+    }
+
+    /// Drain the internal AudioSampleQueue directly, bypassing `processQueuedSamples`
+    /// (which also feeds `AudioBuffer`/VAD). Used to assert queue capping/drop behavior
+    /// in isolation.
+    func _testDequeueAllSamples() -> [[Float]] {
+        sampleQueue.dequeueAll()
+    }
+
+    /// Number of sample batches dropped because the queue was at capacity.
+    /// Used to assert the overflow-drop path is observable, not silent.
+    var _testDroppedBatchCount: Int {
+        sampleQueue.droppedBatchCount
     }
 
     /// Expose createWav for correctness tests.

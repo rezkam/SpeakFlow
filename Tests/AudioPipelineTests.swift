@@ -557,6 +557,81 @@ struct StreamingRecorderThreadSafeStateAndHelpersTests {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - StreamingRecorder: AudioSampleQueue overflow behavior
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// Regression guard for F-12: while the main run loop is stuck in
+// `.eventTracking` mode (menu bar menu open, window drag/resize), the
+// drain timer cannot fire and the internal AudioSampleQueue (bounded at
+// 100 batches) fills up. The queue must keep dropping the OLDEST batch
+// (not the newest — that would corrupt ordering) and must make the drop
+// observable via `droppedBatchCount` instead of silently discarding audio.
+
+@Suite("StreamingRecorder — AudioSampleQueue overflow")
+struct SampleQueueOverflowTests {
+
+    /// Enqueuing beyond the 100-batch cap must drop the oldest batches first,
+    /// cap the queue at 100, and count every drop. This is new observable
+    /// behavior: if the drop-counter is removed, this test fails.
+    @Test @MainActor func testEnqueueBeyondCapacityDropsOldestAndCounts() async {
+        let recorder = StreamingRecorder()
+
+        // Tag each batch with its index (as the single sample value) so we can
+        // identify which batches survive after overflow.
+        let totalBatches = 150
+        for index in 0..<totalBatches {
+            recorder._testEnqueueSamples([Float(index)])
+        }
+
+        let drained = recorder._testDequeueAllSamples()
+
+        #expect(drained.count == 100, "Queue must cap at maxQueueSize (100) regardless of how many batches were enqueued")
+
+        let survivingIndices = drained.map { Int($0[0]) }
+        #expect(survivingIndices == Array(50..<150),
+                "Oldest batches (0..<50) must be dropped first; the 100 most recent batches must survive in order")
+
+        let expectedDrops = totalBatches - 100
+        #expect(recorder._testDroppedBatchCount == expectedDrops,
+                "droppedBatchCount must equal the number of batches evicted by overflow (\(expectedDrops))")
+    }
+
+    /// A second overflow burst after a drain must keep accumulating
+    /// droppedBatchCount rather than resetting it.
+    @Test @MainActor func testDroppedBatchCountAccumulatesAcrossDrains() async {
+        let recorder = StreamingRecorder()
+
+        for index in 0..<120 {
+            recorder._testEnqueueSamples([Float(index)])
+        }
+        _ = recorder._testDequeueAllSamples()
+        let firstDropCount = recorder._testDroppedBatchCount
+        #expect(firstDropCount == 20, "First overflow burst (120 - 100) must drop exactly 20 batches")
+
+        for index in 0..<130 {
+            recorder._testEnqueueSamples([Float(index)])
+        }
+        _ = recorder._testDequeueAllSamples()
+
+        #expect(recorder._testDroppedBatchCount == firstDropCount + 30,
+                "droppedBatchCount must keep accumulating across separate overflow bursts, not reset on drain")
+    }
+
+    /// Enqueuing at or below capacity must never drop anything.
+    @Test @MainActor func testEnqueueWithinCapacityDropsNothing() async {
+        let recorder = StreamingRecorder()
+
+        for index in 0..<100 {
+            recorder._testEnqueueSamples([Float(index)])
+        }
+
+        let drained = recorder._testDequeueAllSamples()
+        #expect(drained.count == 100)
+        #expect(recorder._testDroppedBatchCount == 0, "No drops must be counted while at or under capacity")
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MARK: - StreamingRecorder: start, startMock & Test Helpers
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
