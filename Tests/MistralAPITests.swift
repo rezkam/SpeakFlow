@@ -4,13 +4,25 @@ import Testing
 
 // MARK: - Mistral API Integration Tests
 //
-// These tests validate real API connectivity. They require:
-//   - MISTRAL_API_KEY environment variable set, OR
-//   - the key stored in UnifiedAuthStorage for ProviderId.mistral
-//
-// Tests are skipped if no key is available.
+// These tests hit the real api.mistral.ai and are opt-in only:
+//   - Set SPEAKFLOW_RUN_LIVE_MISTRAL (any non-empty value) to enable the suite at all.
+//   - The key-requiring tests additionally need MISTRAL_API_KEY set.
+// When not opted in (or opted in without a key), the tests report as SKIPPED,
+// never as a silent pass, and make no network call.
 
-@Suite("Mistral API — Live Integration", .tags(.api))
+/// True iff live Mistral tests are opted into for this run.
+func mistralLiveTestsEnabled(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+    guard let value = environment["SPEAKFLOW_RUN_LIVE_MISTRAL"] else { return false }
+    return !value.isEmpty
+}
+
+/// True iff a Mistral API key is available to the tests that need one.
+func mistralAPIKeyAvailable(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+    guard let value = environment["MISTRAL_API_KEY"] else { return false }
+    return !value.isEmpty
+}
+
+@Suite("Mistral API — Live Integration", .tags(.api), .enabled(if: mistralLiveTestsEnabled()))
 struct MistralAPITests {
 
     /// Get the API key from env var (CI/testing) or skip.
@@ -45,12 +57,9 @@ struct MistralAPITests {
 
     // MARK: - Key Validation
 
-    @Test
+    @Test(.enabled(if: mistralAPIKeyAvailable()))
     func testValidateAPIKey_succeeds() async throws {
-        guard let key = Self.apiKey else {
-            print("⏭️  Skipping: MISTRAL_API_KEY not set")
-            return
-        }
+        let key = try #require(Self.apiKey)
         let provider = await MistralProvider()
         let error = await provider.validateAPIKey(key)
         #expect(error == nil, "Valid key should pass validation, got: \(error ?? "nil")")
@@ -67,12 +76,9 @@ struct MistralAPITests {
 
     // MARK: - Batch Transcription
 
-    @Test
+    @Test(.enabled(if: mistralAPIKeyAvailable()))
     func testBatchTranscription_silentAudio_returnsEmptyText() async throws {
-        guard let key = Self.apiKey else {
-            print("⏭️  Skipping: MISTRAL_API_KEY not set")
-            return
-        }
+        let key = try #require(Self.apiKey)
 
         let wav = Self.silentWAV(durationSeconds: 0.5)
 
@@ -112,12 +118,9 @@ struct MistralAPITests {
         #expect(json["model"] as? String == "voxtral-mini-latest", "Response should echo model")
     }
 
-    @Test
+    @Test(.enabled(if: mistralAPIKeyAvailable()))
     func testBatchTranscription_withLanguageParam() async throws {
-        guard let key = Self.apiKey else {
-            print("⏭️  Skipping: MISTRAL_API_KEY not set")
-            return
-        }
+        let key = try #require(Self.apiKey)
 
         let wav = Self.silentWAV()
         let boundary = "----TestBoundary\(UUID().uuidString)"
@@ -151,12 +154,9 @@ struct MistralAPITests {
         #expect(http.statusCode == 200, "Batch with language should return 200, got \(http.statusCode)")
     }
 
-    @Test
+    @Test(.enabled(if: mistralAPIKeyAvailable()))
     func testBatchTranscription_withTemperatureParam() async throws {
-        guard let key = Self.apiKey else {
-            print("⏭️  Skipping: MISTRAL_API_KEY not set")
-            return
-        }
+        let key = try #require(Self.apiKey)
 
         let wav = Self.silentWAV()
         let boundary = "----TestBoundary\(UUID().uuidString)"
@@ -192,12 +192,9 @@ struct MistralAPITests {
 
     // MARK: - Realtime WebSocket
 
-    @Test
+    @Test(.enabled(if: mistralAPIKeyAvailable()))
     func testRealtimeWebSocket_handshake() async throws {
-        guard let key = Self.apiKey else {
-            print("⏭️  Skipping: MISTRAL_API_KEY not set")
-            return
-        }
+        let key = try #require(Self.apiKey)
 
         var components = URLComponents()
         components.scheme = "wss"
@@ -238,12 +235,9 @@ struct MistralAPITests {
         #expect(audioFormat?["sample_rate"] as? Int == 16000)
     }
 
-    @Test
+    @Test(.enabled(if: mistralAPIKeyAvailable()))
     func testRealtimeWebSocket_endAudioAndDone() async throws {
-        guard let key = Self.apiKey else {
-            print("⏭️  Skipping: MISTRAL_API_KEY not set")
-            return
-        }
+        let key = try #require(Self.apiKey)
 
         // Connect, receive session.created, skip session.update (default format matches),
         // send input_audio.end, verify we get a response.
