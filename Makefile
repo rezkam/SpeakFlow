@@ -1,4 +1,4 @@
-.PHONY: build test test-regression-core test-tsan check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise coverage coverage-html clean
+.PHONY: build test test-regression-core test-tsan check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise test-live-e2e-all test-live-mistral coverage coverage-html clean rc release release-yes help
 
 # Strict check: build + tests, concise output, full log saved
 check:
@@ -52,6 +52,10 @@ test-live-e2e-all:
 	@echo ""
 	@echo "✅ All live E2E suites passed!"
 
+# Run live Mistral API integration tests (real api.mistral.ai; opt-in)
+test-live-mistral:
+	@SPEAKFLOW_RUN_LIVE_MISTRAL=1 swift test --filter MistralAPITests
+
 # Run tests with coverage report
 coverage:
 	@./scripts/coverage.sh
@@ -81,16 +85,6 @@ release:
 release-yes:
 	@./scripts/build-release.sh release --yes
 
-# Run specific test suite
-test-security:
-	swift test --filter SecurityTests
-
-test-cancellation:
-	swift test --filter CancellationTests
-
-test-p2:
-	swift test --filter P2IssueTests
-
 help:
 	@echo "Available commands:"
 	@echo "  make check               - Build + tests"
@@ -104,6 +98,7 @@ help:
 	@echo "  make test-live-e2e-accuracy - Run transcription accuracy E2E suite"
 	@echo "  make test-live-e2e-noise    - Run noise rejection E2E suite"
 	@echo "  make test-live-e2e-all      - Run ALL live E2E suites"
+	@echo "  make test-live-mistral      - Run live Mistral API integration tests (opt-in)"
 	@echo "  make coverage            - Run tests with coverage report"
 	@echo "  make coverage-html       - Run tests with HTML coverage (opens browser)"
 	@echo "  make lint                - Run SwiftLint"
@@ -111,6 +106,3 @@ help:
 	@echo "  make rc                  - Build + sign + install locally (RC, nothing uploaded)"
 	@echo "  make release             - Build + sign + notarize + publish to GitHub"
 	@echo "  make release-yes         - Same as release, skip all confirmations"
-	@echo "  make test-security       - Run security tests only"
-	@echo "  make test-cancellation   - Run cancellation tests only"
-	@echo "  make test-p2             - Run P2 issue tests only"
