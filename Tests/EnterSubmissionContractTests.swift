@@ -211,6 +211,78 @@ struct EnterSubmissionContractTests {
     }
 
     /// Regression guard:
+    /// Enter can arrive while the provider handshake is still in flight. The late
+    /// handshake must not reactivate streaming or play a delayed start cue after stop.
+    @MainActor @Test
+    func enterDuringStreamingStartupDoesNotReactivateStoppedSession() async throws {
+        let transcription = SpyTranscription()
+        let providerSettings = SpyProviderSettings()
+        let providerRegistry = SpyProviderRegistry()
+        let settings = SpySettings()
+        let keyInterceptor = SpyKeyInterceptor()
+        let textInserter = SpyTextInserter()
+        let banner = SpyBannerPresenter()
+        let soundPlayer = SpySoundEffectPlayer()
+        let session = MockStreamingSession()
+        let provider = MultiSessionMockProvider()
+
+        settings.streamingTrailingFinalTimeout = 2
+        provider.reconnectDelay = 0.5
+        provider.sessions = [session]
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        providerRegistry.register(provider)
+
+        let controller = RecordingController(
+            keyInterceptor: keyInterceptor,
+            textInserter: textInserter,
+            appState: banner,
+            providerSettings: providerSettings,
+            providerRegistry: providerRegistry,
+            settings: settings,
+            transcription: transcription,
+            playSoundEffect: { soundPlayer.play($0) }
+        )
+        controller.testMode = .live
+
+        controller.startRecording()
+        try await waitUntil { provider.startSessionCallCount == 1 }
+        #expect(soundPlayer.count(.start) == 1,
+                "Local capture must be acknowledged before the provider handshake completes")
+        guard let startingController = controller.liveStreamingController else {
+            Issue.record("Streaming controller was not created")
+            return
+        }
+
+        keyInterceptor.onEnterPressed?()
+        let startCueCountAfterEnter = soundPlayer.count(.start)
+
+        #expect(!controller.isRecording, "Enter must stop the recording state immediately")
+        #expect(controller.isProcessingFinal, "Enter must begin finalization")
+
+        startingController.onError?(DeepgramError.connectionFailed("late startup failure"))
+        #expect(banner.bannerMessages.isEmpty,
+                "A stale startup callback must not report an error after Enter stopped it")
+
+        try await waitUntil(timeout: .milliseconds(300), interval: .milliseconds(10)) {
+            textInserter.operations.contains(.pressEnterKey)
+                && textInserter.operations.contains(.reset)
+        }
+        #expect(textInserter.operations.contains(.pressEnterKey),
+                "Startup submit must not wait for a trailing-final window without a session")
+        try await Task.sleep(for: .milliseconds(700))
+
+        #expect(!startingController.recording,
+                "A provider handshake completing after Enter must not reactivate streaming")
+        #expect(await session.closeCalled,
+                "A session returned after Enter stopped startup must be closed")
+        #expect(soundPlayer.count(.start) == startCueCountAfterEnter,
+                "Startup completion must not play a delayed start cue after Enter")
+        #expect(!controller.isRecording)
+        #expect(!controller.isProcessingFinal)
+    }
+
+    /// Regression guard:
     /// Enter capture is one-shot. Once Enter has been captured in a lifecycle,
     /// additional Enter callbacks must not re-arm submit.
     @MainActor @Test

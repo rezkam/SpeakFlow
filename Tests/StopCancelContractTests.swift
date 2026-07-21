@@ -181,6 +181,7 @@ struct StreamingStopContractTests {
     @MainActor @Test
     func stopReturnsEarlyAfterTrailingEventQuietsDown() async throws {
         let (controller, lsc, _, _) = makeStreamingContext(trailingFinalTimeout: 60.0)
+        try await waitUntil { lsc.recording }
         let startedAt = ContinuousClock.now
 
         controller.stopRecording(reason: .hotkey)

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+* **Secure Keyboard Input interference is recorded** - Diagnostics now report when macOS secure input prevents Enter and Escape capture at recording start, plus blocked and cleared transitions during recording.
+* **Late streaming errors stay with their recording** - Startup errors arriving after stop or cancel no longer display a banner for a finished recording.
+
 ## 0.8.2 — Dependency Refresh & macOS 26 CI
 
 ### Fixed

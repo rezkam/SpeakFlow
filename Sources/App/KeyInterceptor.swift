@@ -1,5 +1,6 @@
 import ApplicationServices
 import AppKit
+import Carbon.HIToolbox
 import OSLog
 import SpeakFlowCore
 import os
@@ -35,9 +36,18 @@ final class KeyInterceptor: KeyIntercepting {
 
     private let state = OSAllocatedUnfairLock(initialState: EventTapState())
     private let keyboardFocusSnapshotProvider: @Sendable (pid_t) -> KeyboardFocusSnapshot
+    private let secureInputStatusProvider: () -> Bool
+    private let secureInputPollingInterval: Duration
+    private var secureInputMonitorTask: Task<Void, Never>?
+    private var lastSecureInputEnabled: Bool?
 
-    private init() {
+    init(
+        isSecureInputEnabled: @escaping () -> Bool = { IsSecureEventInputEnabled() },
+        secureInputPollingInterval: Duration = .seconds(1)
+    ) {
         keyboardFocusSnapshotProvider = Self.keyboardFocusSnapshot
+        secureInputStatusProvider = isSecureInputEnabled
+        self.secureInputPollingInterval = secureInputPollingInterval
     }
 
 #if DEBUG
@@ -45,6 +55,8 @@ final class KeyInterceptor: KeyIntercepting {
     @MainActor
     init(testKeyboardFocusSnapshotProvider: @escaping @Sendable (pid_t) -> KeyboardFocusSnapshot) {
         keyboardFocusSnapshotProvider = testKeyboardFocusSnapshotProvider
+        secureInputStatusProvider = { IsSecureEventInputEnabled() }
+        secureInputPollingInterval = .seconds(1)
     }
 #endif
 
@@ -66,13 +78,18 @@ final class KeyInterceptor: KeyIntercepting {
             $0.targetPid = targetPid
             $0.enterCaptureArmed = true
         }
+        let secureInputEnabled = secureInputStatusProvider()
         HotkeyDiagnostics.record(
             "key_interceptor_registration_started",
             metadata: [
                 "targetPid": String(targetPid),
-                "accessibilityTrusted": AXIsProcessTrusted() ? "true" : "false"
+                "accessibilityTrusted": AXIsProcessTrusted() ? "true" : "false",
+                "secureInputEnabled": secureInputEnabled ? "true" : "false"
             ]
         )
+        if secureInputEnabled {
+            recordSecureInputDetected(targetPid: targetPid, phase: "start")
+        }
 
         let eventMask = (1 << CGEventType.keyDown.rawValue)
         let tap = CGEvent.tapCreate(
@@ -108,6 +125,7 @@ final class KeyInterceptor: KeyIntercepting {
             $0.recordingRunLoopSource = source
             $0.isActive = true
         }
+        startSecureInputMonitoring(targetPid: targetPid, initialState: secureInputEnabled)
         HotkeyDiagnostics.record(
             "key_interceptor_registration_succeeded",
             metadata: [
@@ -130,6 +148,8 @@ final class KeyInterceptor: KeyIntercepting {
             s.recordingRunLoopSource = nil
             return result
         }
+        recordSecureInputTransitionIfNeeded(targetPid: targetPid, phase: "stop")
+        stopSecureInputMonitoring()
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
         let metadata = [
@@ -144,7 +164,63 @@ final class KeyInterceptor: KeyIntercepting {
         }
     }
 
+    private func startSecureInputMonitoring(targetPid: pid_t, initialState: Bool) {
+        stopSecureInputMonitoring()
+        lastSecureInputEnabled = initialState
+        secureInputMonitorTask = Task { @MainActor [weak self] in
+            guard let interval = self?.secureInputPollingInterval else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, let self else { return }
+                self.recordSecureInputTransitionIfNeeded(targetPid: targetPid, phase: "monitor")
+            }
+        }
+    }
+
+    private func stopSecureInputMonitoring() {
+        secureInputMonitorTask?.cancel()
+        secureInputMonitorTask = nil
+        lastSecureInputEnabled = nil
+    }
+
+    private func recordSecureInputTransitionIfNeeded(targetPid: pid_t, phase: String) {
+        guard let previousState = lastSecureInputEnabled else { return }
+        let currentState = secureInputStatusProvider()
+        guard currentState != previousState else { return }
+        lastSecureInputEnabled = currentState
+
+        if currentState {
+            recordSecureInputDetected(targetPid: targetPid, phase: phase)
+        } else {
+            HotkeyDiagnostics.record(
+                "key_interceptor_secure_input_cleared",
+                metadata: [
+                    "targetPid": String(targetPid),
+                    "phase": phase
+                ]
+            )
+        }
+    }
+
+    private func recordSecureInputDetected(targetPid: pid_t, phase: String) {
+        HotkeyDiagnostics.record(
+            "key_interceptor_secure_input_detected",
+            level: .warning,
+            metadata: [
+                "targetPid": String(targetPid),
+                "enterCaptureAvailable": "false",
+                "escapeCaptureAvailable": "false",
+                "phase": phase
+            ]
+        )
+    }
+
     private func handleEventTapUnavailable(reason: String) {
+        stopSecureInputMonitoring()
         let targetPid = state.withLockUnchecked { $0.targetPid }
         HotkeyDiagnostics.record(
             "key_interceptor_registration_failed",
@@ -206,7 +282,7 @@ final class KeyInterceptor: KeyIntercepting {
                 self?.onEscapePressed?()
             }
             return nil
-        case 36:
+        case 36, 76:
             guard consumeEnterCaptureToken() else {
                 // Enter is one-shot: after the first captured Enter, all subsequent
                 // Enter presses pass through to the app unmodified.
@@ -306,7 +382,7 @@ final class KeyInterceptor: KeyIntercepting {
     }
 
     private nonisolated static func isInterceptedKey(_ keyCode: Int64) -> Bool {
-        keyCode == 53 || keyCode == 36
+        keyCode == 53 || keyCode == 36 || keyCode == 76
     }
 
     private nonisolated static func keyMetadata(keyCode: Int64, targetPid: pid_t) -> [String: String] {
@@ -321,7 +397,7 @@ final class KeyInterceptor: KeyIntercepting {
         switch keyCode {
         case 53:
             return "escape"
-        case 36:
+        case 36, 76:
             return "enter"
         default:
             return "unknown"
@@ -384,6 +460,11 @@ extension KeyInterceptor {
     // swiftlint:disable:next identifier_name
     @MainActor func _testHandleEventTapUnavailableForTests() {
         handleEventTapUnavailable(reason: "Test event tap failure")
+    }
+
+    // swiftlint:disable:next identifier_name
+    @MainActor func _testStartSecureInputMonitoring(targetPid: pid_t, initialState: Bool) {
+        startSecureInputMonitoring(targetPid: targetPid, initialState: initialState)
     }
 }
 #endif

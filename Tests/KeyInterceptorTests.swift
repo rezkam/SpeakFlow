@@ -36,6 +36,20 @@ struct KeyInterceptorEnterCaptureTests {
     }
 
     @MainActor @Test
+    func keypadEnterUsesTheSameOneShotCaptureContract() {
+        let interceptor = KeyInterceptor.shared
+        interceptor.stop()
+        defer { interceptor.stop() }
+
+        interceptor._testArmEnterCaptureForTests(active: true)
+
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 76),
+                "Keypad Enter should be captured and suppressed")
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 76),
+                "Second keypad Enter should pass through after one-shot capture")
+    }
+
+    @MainActor @Test
     func eventTapFailureDisarmsEnterCaptureInsteadOfUsingPassiveMonitor() {
         let interceptor = KeyInterceptor.shared
         interceptor.stop()
@@ -129,6 +143,64 @@ struct KeyInterceptorEnterCaptureTests {
         #expect(events.contains { event in
             event.name == "key_interceptor_enter_passed_capture_not_armed" &&
                 event.metadata["keyName"] == "enter"
+        })
+    }
+
+    @MainActor @Test
+    func secureInputAtStartRecordsBlockedKeyDiagnostics() {
+        let interceptor = KeyInterceptor(isSecureInputEnabled: { true })
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer {
+            HotkeyDiagnostics._testEventHook = nil
+            interceptor.stop()
+        }
+
+        interceptor.start(targetPid: 42)
+
+        #expect(events.contains { event in
+            event.name == "key_interceptor_secure_input_detected" &&
+                event.level == .warning &&
+                event.metadata["targetPid"] == "42" &&
+                event.metadata["enterCaptureAvailable"] == "false" &&
+                event.metadata["escapeCaptureAvailable"] == "false"
+        })
+    }
+
+    @MainActor @Test
+    func secureInputTransitionsDuringRecordingAreRecorded() async throws {
+        var secureInputEnabled = false
+        let interceptor = KeyInterceptor(
+            isSecureInputEnabled: { secureInputEnabled },
+            secureInputPollingInterval: .milliseconds(10)
+        )
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer {
+            HotkeyDiagnostics._testEventHook = nil
+            interceptor.stop()
+        }
+
+        interceptor._testStartSecureInputMonitoring(targetPid: 43, initialState: false)
+        secureInputEnabled = true
+        try await waitUntil(interval: .milliseconds(10)) {
+            events.contains { $0.name == "key_interceptor_secure_input_detected" }
+        }
+
+        #expect(events.contains { event in
+            event.name == "key_interceptor_secure_input_detected" &&
+                event.metadata["targetPid"] == "43" &&
+                event.metadata["phase"] == "monitor"
+        })
+
+        secureInputEnabled = false
+        try await waitUntil(interval: .milliseconds(10)) {
+            events.contains { $0.name == "key_interceptor_secure_input_cleared" }
+        }
+
+        #expect(events.contains { event in
+            event.name == "key_interceptor_secure_input_cleared" &&
+                event.metadata["targetPid"] == "43"
         })
     }
 }
