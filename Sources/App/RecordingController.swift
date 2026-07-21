@@ -894,9 +894,10 @@ extension RecordingController {
             }
             self.observabilityEvent("streaming_reconnected", level: .warning, sessionId: sessionId)
         }
-        controller.onError = { [weak self] error in
+        controller.onError = { [weak self, weak controller] error in
+            guard let self, let controller,
+                  self.liveStreamingController === controller else { return }
             Logger.audio.error("Streaming error: \(error.localizedDescription)")
-            guard let self else { return }
             self.latestStreamingError = error
             self.observabilityEvent(
                 "streaming_error",
@@ -936,7 +937,14 @@ extension RecordingController {
             // Stop/cancel can detach this controller while the initial provider
             // handshake is still in flight. Its late result must not surface an
             // error, alter UI state, or count usage for a finished recording.
-            guard self.liveStreamingController === controller, self.isRecording else { return }
+            guard self.liveStreamingController === controller, self.isRecording else {
+                self.observabilityEvent(
+                    "streaming_start_result_ignored_stale",
+                    level: .debug,
+                    metadata: ["started": started ? "true" : "false"]
+                )
+                return
+            }
 
             if !started {
                 if let error = self.latestStreamingError {
