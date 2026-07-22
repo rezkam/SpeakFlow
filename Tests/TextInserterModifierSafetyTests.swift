@@ -52,19 +52,11 @@ struct TextInserterModifierSafetyTests {
     }
 }
 
-// MARK: - Contract Coverage: the real posting paths route through the gate
+// MARK: - Contract Coverage: real posting paths use guarded pairs
 
-/// Drives the real `insertText`/`deleteChars`/`pressEnterKey` entry points on an
-/// isolated instance, with a scripted modifier-flags source and a capture sink
-/// standing in for the real `CGEvent.post(tap:)`. This is the coverage that was
-/// missing (F-17): none of the tests above ever exercised the posting paths, so
-/// deleting the modifier guard from any of them kept the suite green.
 @Suite("TextInserter Modifier Safety — Guarded Posting Paths", .serialized)
 struct TextInserterGuardedPostingTests {
-
-    /// Minimal description of a posted `CGEvent`, enough to assert identity
-    /// (key-down vs key-up, which key / unicode payload) and ordering.
-    private struct PostedEvent: CustomStringConvertible {
+    private struct PostedEvent: CustomStringConvertible, Equatable {
         let isKeyDown: Bool
         let keyCode: Int64
         let unicode: String
@@ -74,247 +66,266 @@ struct TextInserterGuardedPostingTests {
         }
     }
 
+    private enum TraceEntry {
+        case flagsHeld
+        case flagsClear
+        case posted(PostedEvent)
+    }
+
+    @MainActor
+    private final class ModifierPostingTrace {
+        private(set) var entries: [TraceEntry] = []
+
+        func recordFlags(_ flags: CGEventFlags) {
+            entries.append(TextInserter._testHasActiveModifiers(flags) ? .flagsHeld : .flagsClear)
+        }
+
+        func recordPost(_ event: PostedEvent) {
+            entries.append(.posted(event))
+        }
+    }
+
     private func describe(_ event: CGEvent) -> PostedEvent {
         let isKeyDown = event.type == .keyDown
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         var length = 0
         var buffer = [UniChar](repeating: 0, count: 4)
-        event.keyboardGetUnicodeString(maxStringLength: buffer.count, actualStringLength: &length, unicodeString: &buffer)
+        event.keyboardGetUnicodeString(
+            maxStringLength: buffer.count,
+            actualStringLength: &length,
+            unicodeString: &buffer
+        )
         let unicode = length > 0 ? String(utf16CodeUnits: buffer, count: length) : ""
         return PostedEvent(isKeyDown: isKeyDown, keyCode: keyCode, unicode: unicode)
     }
 
-    /// Creates an isolated instance with a valid, currently-frontmost target
-    /// already captured, so focus checks pass until a test deliberately flips
-    /// `testIsTargetFrontmost`.
-    ///
-    /// The target must be a real running GUI application (not this test
-    /// process's own PID): `ensureTargetFocused()` verifies liveness via
-    /// `NSRunningApplication(processIdentifier:)`, which does not track
-    /// command-line test-runner processes, only bundled applications. Using
-    /// our own PID would make `ensureTargetFocused()` fail before the gate is
-    /// ever reached, for reasons unrelated to modifiers or focus overrides —
-    /// the same pitfall the existing focus tests in `TextInserterFocusTests`
-    /// route around by picking a real background app.
+    /// Uses a deterministic PID and liveness seam. Focus remains injected, so
+    /// these tests exercise production focus decisions without a GUI app.
     @MainActor
-    private func makeFocusedInstance() -> TextInserter? {
-        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
-            $0.activationPolicy == .regular
-        }) else { return nil }
-
+    private func makeFocusedInstance() -> TextInserter {
         let inserter = TextInserter._testMakeIsolatedInstance()
-        inserter.targetElement = AXUIElementCreateApplication(runningApp.processIdentifier)
-        inserter.targetPid = runningApp.processIdentifier
+        inserter.targetElement = AXUIElementCreateApplication(42_424)
+        inserter.targetPid = 42_424
         inserter.testIsTargetFrontmost = true
+        inserter._testSetTargetProcessLiveness { $0 == 42_424 }
         return inserter
     }
 
-    // MARK: insertText / typeTextAsync
-
-    @MainActor @Test
-    func insertTextPostsNothingUntilModifiersReleaseThenPosts() async {
-        guard let inserter = makeFocusedInstance() else { return }
-
-        var trace: [String] = []
-        inserter._testSetEventPoster { event in
-            trace.append("posted:\(self.describe(event))")
-        }
+    @MainActor
+    private func installHeldThenClearTrace(
+        on inserter: TextInserter,
+        trace: ModifierPostingTrace
+    ) {
         var flagCalls = 0
         inserter._testSetFlagsProvider {
             flagCalls += 1
-            let held = flagCalls <= 3
-            trace.append(held ? "flags:held" : "flags:clear")
-            return held ? .maskCommand : []
+            let flags: CGEventFlags = flagCalls <= 3 ? .maskCommand : []
+            trace.recordFlags(flags)
+            return flags
         }
+        inserter._testSetEventPoster { trace.recordPost(describe($0)) }
+    }
+
+    @MainActor
+    private func installHeldClearHeldClearTrace(
+        on inserter: TextInserter,
+        trace: ModifierPostingTrace
+    ) {
+        let sequence: [CGEventFlags] = [
+            .maskCommand, .maskCommand, [],
+            .maskCommand, .maskCommand, []
+        ]
+        var index = 0
+        inserter._testSetFlagsProvider {
+            let flags = sequence[min(index, sequence.count - 1)]
+            index += 1
+            trace.recordFlags(flags)
+            return flags
+        }
+        inserter._testSetEventPoster { trace.recordPost(describe($0)) }
+    }
+
+    @MainActor
+    private func expectGuardedSinglePair(
+        _ trace: ModifierPostingTrace,
+        keyCode: Int64,
+        unicode: String = ""
+    ) {
+        let entries = trace.entries
+        let firstHeldIndex = entries.firstIndex { if case .flagsHeld = $0 { true } else { false } }
+        let firstClearIndex = entries.firstIndex { if case .flagsClear = $0 { true } else { false } }
+        let firstPostIndex = entries.firstIndex { if case .posted = $0 { true } else { false } }
+        let events = entries.compactMap { if case let .posted(event) = $0 { event } else { nil } }
+
+        #expect(firstHeldIndex != nil, "The held-modifier branch must execute")
+        #expect(firstClearIndex != nil, "The clear modifier state must be observed")
+        #expect(firstPostIndex != nil, "The action must eventually post")
+        if let firstClearIndex, let firstPostIndex {
+            #expect(firstPostIndex > firstClearIndex, "The first event must post after modifiers first clear")
+        }
+        #expect(events.count == 2, "Each synthetic action must emit exactly two events")
+        guard events.count == 2 else { return }
+        #expect(events[0].isKeyDown)
+        #expect(!events[1].isKeyDown)
+        #expect(events[0].keyCode == keyCode)
+        #expect(events[1].keyCode == keyCode)
+        #expect(events[0].unicode == events[1].unicode)
+        if !unicode.isEmpty { #expect(events[0].unicode == unicode) }
+    }
+
+    @MainActor
+    private func expectSinglePair(
+        _ events: [PostedEvent],
+        keyCode: Int64,
+        unicode: String = ""
+    ) {
+        #expect(events.count == 2, "Each synthetic action must emit exactly two events")
+        guard events.count == 2 else { return }
+        #expect(events[0].isKeyDown)
+        #expect(!events[1].isKeyDown)
+        #expect(events[0].keyCode == keyCode)
+        #expect(events[1].keyCode == keyCode)
+        #expect(events[0].unicode == events[1].unicode)
+        if !unicode.isEmpty { #expect(events[0].unicode == unicode) }
+    }
+
+    @MainActor @Test
+    func insertTextWaitsForModifiersAndPostsOrderedPair() async {
+        let inserter = makeFocusedInstance()
+        let trace = ModifierPostingTrace()
+        installHeldThenClearTrace(on: inserter, trace: trace)
 
         inserter.insertText("a")
         await inserter.waitForPendingInsertions()
 
-        let firstPostedIndex = trace.firstIndex { $0.hasPrefix("posted:") }
-        let lastHeldIndex = trace.lastIndex(of: "flags:held")
-
-        #expect(!trace.isEmpty, "Test should have exercised the flags provider and posting sink")
-        #expect(lastHeldIndex != nil, "Test must actually exercise the held-modifier branch")
-        #expect(firstPostedIndex != nil, "insertText should eventually post once modifiers clear")
-        if let firstPostedIndex, let lastHeldIndex {
-            #expect(firstPostedIndex > lastHeldIndex,
-                    "No key event may be posted while modifiers are still reported held")
-        }
+        expectGuardedSinglePair(trace, keyCode: 0, unicode: "a")
     }
 
     @MainActor @Test
-    func insertTextAbortsIfFocusLostDuringModifierWait() async {
-        guard let inserter = makeFocusedInstance() else { return }
-
-        // Write a sub-second timeout directly to the test UserDefaults suite.
-        // The setter clamps to 10s minimum, but the getter trusts stored
-        // values, so writing directly to defaults enables fast test execution
-        // (see the identical technique in TextInserterFocusTests.swift).
-        let suiteName = "nu.rez.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
-        guard let testDefaults = UserDefaults(suiteName: suiteName) else { return }
-        testDefaults.set(0.05, forKey: "settings.focusWaitTimeout")
-        defer {
-            testDefaults.removeObject(forKey: "settings.focusWaitTimeout")
-            inserter.testIsTargetFrontmost = nil
-        }
-
-        var posted: [String] = []
-        inserter._testSetEventPoster { _ in posted.append("posted") }
-
-        var flagCalls = 0
-        inserter._testSetFlagsProvider { [weak inserter] in
-            flagCalls += 1
-            if flagCalls > 3 {
-                // Modifiers just cleared — simulate the user having switched
-                // away from the target app while we were waiting.
-                inserter?.testIsTargetFrontmost = false
-                return []
-            }
-            return .maskCommand
-        }
+    func insertTextRechecksModifiersAfterFocusValidation() async {
+        let inserter = makeFocusedInstance()
+        let trace = ModifierPostingTrace()
+        installHeldClearHeldClearTrace(on: inserter, trace: trace)
 
         inserter.insertText("a")
         await inserter.waitForPendingInsertions()
 
-        #expect(posted.isEmpty,
-                "No event should post when the target app lost focus during the modifier-release wait")
+        let entries = trace.entries
+        let heldIndices = entries.indices.filter {
+            if case .flagsHeld = entries[$0] { return true }
+            return false
+        }
+        let clearIndices = entries.indices.filter {
+            if case .flagsClear = entries[$0] { return true }
+            return false
+        }
+        let firstPostIndex = entries.firstIndex {
+            if case .posted = $0 { return true }
+            return false
+        }
+
+        #expect(heldIndices.count >= 4, "Modifiers must be observed held again after focus validation")
+        #expect(clearIndices.count >= 3, "The final clear state must be observed before posting")
+        if let finalClearIndex = clearIndices.last, let firstPostIndex {
+            #expect(firstPostIndex > finalClearIndex, "No event may post during the second held-modifier period")
+        }
+        expectGuardedSinglePair(trace, keyCode: 0, unicode: "a")
     }
 
-    // MARK: deleteChars / deleteCharsAsync
-
     @MainActor @Test
-    func deleteCharsPostsNothingUntilModifiersReleaseThenPosts() async {
-        guard let inserter = makeFocusedInstance() else { return }
-
-        var trace: [String] = []
-        inserter._testSetEventPoster { event in
-            trace.append("posted:\(self.describe(event))")
-        }
-        var flagCalls = 0
-        inserter._testSetFlagsProvider {
-            flagCalls += 1
-            let held = flagCalls <= 3
-            trace.append(held ? "flags:held" : "flags:clear")
-            return held ? .maskCommand : []
-        }
+    func deleteCharsWaitsForModifiersAndPostsOrderedPair() async {
+        let inserter = makeFocusedInstance()
+        let trace = ModifierPostingTrace()
+        installHeldThenClearTrace(on: inserter, trace: trace)
 
         inserter.deleteChars(1)
         await inserter.waitForPendingInsertions()
 
-        let firstPostedIndex = trace.firstIndex { $0.hasPrefix("posted:") }
-        let lastHeldIndex = trace.lastIndex(of: "flags:held")
-
-        #expect(lastHeldIndex != nil, "Test must actually exercise the held-modifier branch")
-        #expect(firstPostedIndex != nil, "deleteChars should eventually post once modifiers clear")
-        if let firstPostedIndex, let lastHeldIndex {
-            #expect(firstPostedIndex > lastHeldIndex,
-                    "No Delete key event may be posted while modifiers are still reported held")
-        }
+        expectGuardedSinglePair(trace, keyCode: 51)
     }
 
     @MainActor @Test
-    func deleteCharsAbortsIfFocusLostDuringModifierWait() async {
-        guard let inserter = makeFocusedInstance() else { return }
-
-        // Write a sub-second timeout directly to the test UserDefaults suite.
-        // The setter clamps to 10s minimum, but the getter trusts stored
-        // values, so writing directly to defaults enables fast test execution
-        // (see the identical technique in TextInserterFocusTests.swift).
-        let suiteName = "nu.rez.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
-        guard let testDefaults = UserDefaults(suiteName: suiteName) else { return }
-        testDefaults.set(0.05, forKey: "settings.focusWaitTimeout")
-        defer {
-            testDefaults.removeObject(forKey: "settings.focusWaitTimeout")
-            inserter.testIsTargetFrontmost = nil
-        }
-
-        var posted: [String] = []
-        inserter._testSetEventPoster { _ in posted.append("posted") }
-
-        var flagCalls = 0
-        inserter._testSetFlagsProvider { [weak inserter] in
-            flagCalls += 1
-            if flagCalls > 3 {
-                inserter?.testIsTargetFrontmost = false
-                return []
-            }
-            return .maskCommand
-        }
-
-        inserter.deleteChars(1)
-        await inserter.waitForPendingInsertions()
-
-        #expect(posted.isEmpty,
-                "No Delete key event should post when focus was lost during the modifier-release wait")
-    }
-
-    // MARK: pressEnterKey
-
-    @MainActor @Test
-    func pressEnterKeyPostsNothingUntilModifiersReleaseThenPosts() async throws {
-        guard let inserter = makeFocusedInstance() else { return }
-
-        var trace: [String] = []
-        inserter._testSetEventPoster { event in
-            trace.append("posted:\(self.describe(event))")
-        }
-        var flagCalls = 0
-        inserter._testSetFlagsProvider {
-            flagCalls += 1
-            let held = flagCalls <= 3
-            trace.append(held ? "flags:held" : "flags:clear")
-            return held ? .maskCommand : []
-        }
+    func pressEnterWaitsForModifiersAndPostsOrderedPair() async {
+        let inserter = makeFocusedInstance()
+        let trace = ModifierPostingTrace()
+        installHeldThenClearTrace(on: inserter, trace: trace)
 
         inserter.pressEnterKey()
-        try await waitUntil(timeout: .seconds(3)) {
-            trace.contains { $0.hasPrefix("posted:") }
+        await inserter.waitForPendingInsertions()
+
+        expectGuardedSinglePair(trace, keyCode: 36)
+    }
+
+    @MainActor @Test(arguments: ["text", "delete", "enter"])
+    func releasePostsAfterFocusAndModifierChangeFollowingKeyDown(_ path: String) async {
+        let inserter = makeFocusedInstance()
+        var events: [PostedEvent] = []
+        inserter._testSetFlagsProvider { [] }
+        inserter._testSetEventPoster { event in
+            events.append(describe(event))
+            if event.type == .keyDown {
+                // This state change happens after the safety check. It must not
+                // turn a required release into a second guarded action.
+                inserter.testIsTargetFrontmost = false
+                inserter._testSetFlagsProvider { .maskCommand }
+            }
         }
 
-        let firstPostedIndex = trace.firstIndex { $0.hasPrefix("posted:") }
-        let lastHeldIndex = trace.lastIndex(of: "flags:held")
-
-        #expect(lastHeldIndex != nil, "Test must actually exercise the held-modifier branch")
-        #expect(firstPostedIndex != nil, "pressEnterKey should eventually post once modifiers clear")
-        if let firstPostedIndex, let lastHeldIndex {
-            #expect(firstPostedIndex > lastHeldIndex,
-                    "No Enter key event may be posted while modifiers are still reported held")
+        switch path {
+        case "text": inserter.insertText("a")
+        case "delete": inserter.deleteChars(1)
+        default: inserter.pressEnterKey()
         }
+        await inserter.waitForPendingInsertions()
+
+        let code: Int64 = path == "delete" ? 51 : path == "enter" ? 36 : 0
+        expectSinglePair(events, keyCode: code, unicode: path == "text" ? "a" : "")
     }
 
     @MainActor @Test
-    func pressEnterKeyAbortsIfFocusLostDuringModifierWait() async throws {
-        guard let inserter = makeFocusedInstance() else { return }
-
-        // Write a sub-second timeout directly to the test UserDefaults suite.
-        // The setter clamps to 10s minimum, but the getter trusts stored
-        // values, so writing directly to defaults enables fast test execution
-        // (see the identical technique in TextInserterFocusTests.swift).
-        let suiteName = "nu.rez.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
-        guard let testDefaults = UserDefaults(suiteName: suiteName) else { return }
-        testDefaults.set(0.05, forKey: "settings.focusWaitTimeout")
-        defer {
-            testDefaults.removeObject(forKey: "settings.focusWaitTimeout")
-            inserter.testIsTargetFrontmost = nil
-        }
-
-        var posted: [String] = []
-        inserter._testSetEventPoster { _ in posted.append("posted") }
-
-        var flagCalls = 0
-        inserter._testSetFlagsProvider { [weak inserter] in
-            flagCalls += 1
-            if flagCalls > 3 {
-                inserter?.testIsTargetFrontmost = false
-                return []
+    func enterReleasePostsWhenCancellationArrivesDuringRegistrationDelay() async {
+        let inserter = makeFocusedInstance()
+        var events: [PostedEvent] = []
+        inserter._testSetFlagsProvider { [] }
+        inserter._testSetEventPoster { event in
+            events.append(describe(event))
+            if event.type == .keyDown {
+                inserter.cancelAndReset()
             }
-            return .maskCommand
         }
 
         inserter.pressEnterKey()
         await inserter.waitForPendingInsertions()
 
-        #expect(posted.isEmpty,
-                "No Enter key event should post when focus was lost during the modifier-release wait")
+        expectSinglePair(events, keyCode: 36)
+    }
+
+    @MainActor @Test(arguments: ["text", "delete", "enter"])
+    func focusLossBeforeKeyDownPostsNothing(_ path: String) async {
+        let inserter = makeFocusedInstance()
+        var events: [PostedEvent] = []
+        var calls = 0
+        var targetIsRunning = true
+        inserter._testSetTargetProcessLiveness { _ in targetIsRunning }
+        inserter._testSetEventPoster { events.append(describe($0)) }
+        inserter._testSetFlagsProvider {
+            calls += 1
+            if calls > 2 {
+                inserter.testIsTargetFrontmost = false
+                targetIsRunning = false
+                return []
+            }
+            return .maskCommand
+        }
+
+        switch path {
+        case "text": inserter.insertText("a")
+        case "delete": inserter.deleteChars(1)
+        default: inserter.pressEnterKey()
+        }
+        await inserter.waitForPendingInsertions()
+
+        #expect(calls > 2, "The modifier wait must have completed before focus is revalidated")
+        #expect(events.isEmpty, "Safety validation failure before key-down must post nothing")
     }
 }
