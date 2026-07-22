@@ -784,6 +784,10 @@ final class TextInserter: TextInserting {
                 stringLength: unichar.count,
                 unicodeString: &unichar
             )
+            keyUp.keyboardSetUnicodeString(
+                stringLength: unichar.count,
+                unicodeString: &unichar
+            )
 
             guard await postGuardedKeyPair(keyDown, keyUp) else { return }
 
