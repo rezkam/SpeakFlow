@@ -2,45 +2,55 @@
 
 ## Unreleased
 
+## 0.8.0 — macOS 26, Usage Dashboard & Dictation Reliability
+
 ### Breaking Changes
 
-* **Minimum supported macOS version is now 26** - SpeakFlow now targets macOS 26 or later.
-
-### Bug Fixes
-
-* **Streaming sessions recover from transient connection loss** - Deepgram and Mistral now share one WebSocket lifecycle that classifies remote disconnects consistently, allowing the one-shot reconnect path to run before recording is stopped.
-* **Rejected streaming credentials fail before recording readiness** - Deepgram now waits for the WebSocket upgrade before reporting startup success. Invalid or expired keys show an actionable banner and error cue without playing the successful start cue or counting an API call.
-* **Recording failures now show one actionable banner** - Streaming startup and mid-session failures use one shared error presentation path, avoiding silent failures and duplicate banners when startup reports through two callbacks.
-* **Cancel and immediate restart no longer orphan the microphone** - Asynchronous teardown now owns only the controller that was cancelled, so finishing an old cancellation cannot clear or close a replacement streaming session.
-* **Empty batch submissions preserve captured Enter** - If Enter stops a batch recording that produces no transcript, SpeakFlow now waits for pending insertions and synthesizes the swallowed Enter exactly once.
-* **Streaming teardown now releases audio sender tasks** - Terminal stop, cancel, and failed-start cleanup explicitly shut down each session's audio sender while reconnect keeps it reusable, preventing one leaked suspended task per dictation.
-* **OAuth callback failures no longer end silently** - ChatGPT login now shows an error banner when its local callback fails or reaches the timeout instead of leaving the Providers screen unchanged.
-
-### Test Coverage
-
-* **Added provider-parity WebSocket contracts** - Shared regressions now cover HTTP upgrade rejection, handshake timeout, cancellation, concurrent connection attempts, receive-error routing, observability correlation, reconnect success, and reconnect exhaustion for both streaming providers.
-
-## 0.7.12 — Settings Dashboard & Statistics Accuracy
+* **macOS 26 is now required** - SpeakFlow no longer supports earlier macOS releases.
 
 ### New
 
-* **Statistics dashboard redesign** - The Statistics tab now shows a 30-day trend hero, four metric cards (total duration, words, API calls, time saved), provider and language breakdowns, a 30-day activity heatmap, and a clear reset action. Recent session data is loaded asynchronously and falls back to per-session metrics when persisted aggregates are missing.
-* **Providers tab consolidates account setup** - Account credentials, OAuth, model selection, and provider readiness now live under a single Providers tab. The old Accounts tab is removed.
+* **Statistics dashboard redesign** - The Statistics tab now shows a 30-day trend summary, total duration, word, API-call, and time-saved metrics, provider and language breakdowns, a 30-day activity heatmap, and a clear reset action. Recent session data loads asynchronously and falls back to per-session metrics when persisted aggregates are missing.
+* **Providers tab consolidates account setup** - API keys, ChatGPT sign-in, model selection, and provider readiness now live under one Providers tab. The separate Accounts tab is removed.
 
-### Bug Fixes
+### Reliability & Safety
 
-* **Streaming dictation now contributes to total duration** - Streaming finals previously recorded `audioDurationSeconds: 0`, so `totalSecondsTranscribed`, per-provider seconds, and the dashboard "time saved" estimate stayed at zero for streaming users while word and recording counters still grew. Each streaming final now contributes its elapsed segment time.
-* **API calls and recordings are tracked separately** - In batch mode, `Transcription.transcribe` runs once per audio chunk; counting each chunk as a "recording" inflated provider, language, daily, and period totals for long dictations. The per-recording counters are now incremented once per user recording (at recording start), while `totalApiCalls` continues to grow per actual provider request (per chunk in batch, per session in streaming). The dashboard metric card is relabeled "API calls" to reflect what is being counted, and the historical breakdown row is annotated the same way.
-* **Resetting statistics no longer leaves pre-reset sessions behind** - The dashboard's recent-sessions fallback now filters by `Statistics.lastResetDate` so provider breakdowns and the 30-day heatmap do not surface sessions from before the reset.
-* **Auto-end silence slider honors 1-second selection** - The Settings storage no longer clamps `autoEndSilenceDuration` to 3 seconds. Selecting 1 s or 2 s in the slider now round-trips correctly.
-* **Speech-ratio slider honors 0% selection** - The Settings storage now distinguishes "explicit zero" from "unset" for `minSpeechRatio`, so dragging the slider to 0% actually disables the speech-ratio gate instead of snapping back to 1%.
-* **Stored Deepgram `nova-2` model migrates to `nova-3`** - Users upgrading with a `nova-2` selection now land on `nova-3` so the redesigned model picker keeps showing Deepgram options instead of falling through to the default branch.
-* **About: Privacy link relabeled "License"** - The link previously labeled "Privacy" points at `LICENSE`. It now says License so the label matches the destination.
-* **Dashboard no longer fabricates "Historical data" rows** - After splitting API calls from recordings, deriving "missing recordings" from `totalApiCalls - knownRecordings` was always positive for any batch dictation, injecting a bogus Historical-data provider row and an Unknown-language row on every dashboard view. Provider and language breakdowns now show only what was actually attributed.
+* **Streaming startup and recovery are more reliable** - Deepgram and Mistral now share a WebSocket lifecycle with explicit connection readiness, consistent disconnect classification, and one automatic reconnect attempt before recording ends.
+* **Rejected streaming credentials fail before recording readiness** - Deepgram waits for the WebSocket upgrade before reporting startup success. Invalid or expired credentials show an actionable error without playing the successful-start cue or counting an API call.
+* **Recording failures now show one actionable banner** - Streaming startup and mid-session failures use one error presentation path, preventing silent failures and duplicate banners when a startup error arrives through multiple callbacks.
+* **Cancel and immediate restart no longer orphan the microphone** - Asynchronous teardown owns only the controller that was cancelled, so an older cleanup cannot clear or close a replacement streaming session.
+* **Streaming teardown now releases audio sender tasks** - Terminal stop, cancellation, and failed-start cleanup close each session's audio sender while reconnect keeps it reusable, preventing suspended sender tasks from accumulating across dictations.
+* **Short batch dictations can transcribe at speech end** - Speech-end early emission now uses a dedicated short-audio threshold, allowing thinking-pause detection to receive a transcript without weakening normal chunk sizing.
+* **Audio capture keeps draining while menus are open or windows are dragged** - Recording timers continue during event-tracking modes, and full-queue audio drops are surfaced through rate-limited diagnostics instead of remaining silent.
+* **VAD recovers after a failed model load** - A failed cold model load is no longer cached for the rest of the app session. Later recordings retry initialization instead of permanently falling back to no-VAD mode.
+* **ChatGPT sign-in tolerates stray local connections** - Browser preconnects, favicon requests, port probes, and malformed callbacks no longer stop the callback server before the real authorization redirect arrives. Callback failures and timeouts also show an actionable error.
+* **Empty batch submissions preserve captured Enter** - If Enter stops a batch recording that produces no transcript, SpeakFlow waits for pending insertions and synthesizes the captured Enter exactly once.
+* **Synthetic typing is safer** - Text, deletion, and Enter wait for held modifiers to clear and revalidate focus before posting. Every emitted key-down receives one matching key-up, and explicit Unicode on both events keeps typing independent of the active keyboard layout.
+
+### Statistics & Settings Accuracy
+
+* **Streaming dictation contributes to total duration** - Streaming finals now contribute elapsed segment time, so total transcribed duration, per-provider duration, and the time-saved estimate no longer remain at zero for streaming users.
+* **API calls and recordings are tracked separately** - Recording totals increment once per dictation, while API calls increment per provider request. Long batch recordings no longer inflate recording, provider, language, daily, or period totals.
+* **Reset statistics consistently excludes earlier sessions** - Recent-session fallbacks, provider and language breakdowns, and the 30-day heatmap exclude sessions from before the most recent reset. Breakdowns also no longer fabricate Historical-data or Unknown-language rows from API-call counts.
+* **Settings honor their displayed values** - The auto-end slider preserves 1- and 2-second selections, and selecting a 0% speech ratio disables that gate instead of reverting to 1%.
+* **Legacy Deepgram `nova-2` selections are treated as `nova-3`** - Existing preferences remain valid in the redesigned model picker instead of falling through to a default model.
+* **The About link now matches its destination** - The link to `LICENSE` is labeled License instead of Privacy.
+
+### Privacy & Security
+
+* **Diagnostics logs are private to the current user** - Observability directories and event logs, including existing and rotated logs, use owner-only permissions. This protects dictated text when diagnostic payload capture is enabled.
+* **Transcript-bearing provider logs use one privacy boundary** - Deepgram and Mistral transcript content and API-response text are consistently marked as private hashed data rather than public log output.
+
+### Test Coverage
+
+* **Added provider-parity WebSocket contracts** - Shared regressions cover HTTP upgrade rejection, handshake timeout, cancellation, concurrent connection attempts, receive-error routing, observability correlation, reconnect success, and reconnect exhaustion for both streaming providers.
+* **Added focused safety regressions** - Coverage now exercises modifier-safe synthetic key pairs, captured-app Enter pass-through, menu-tracking audio drainage, callback-server noise, failed VAD loads, short speech-end chunking, focus-safe insertion, and streaming timer cancellation and restart behavior.
 
 ### CI / Tooling
 
-* **SwiftLint is now enforced in CI** - The CI workflow installs SwiftLint and runs `swiftlint lint` so error-level violations fail the build. Existing error-level violations across `MistralAPITests`, `MistralBatchProviderTests`, `MistralRealtimeRegressionTests`, `TextInserter`, `RecordingController`, and `GeneralSettingsView` were cleaned up so the gate passes on a clean tree.
+* **SwiftLint is enforced in CI** - Error-level violations now fail the build while existing warning debt remains visible through GitHub annotations.
+* **Default and regression test gates are deterministic** - Full suites run serially where process-wide resources are shared; VAD model tests explicitly provision or skip their dependency; live Mistral tests require opt-in; and regression scripts verify that protected feature suites actually execute.
+* **Documentation consistency is checked during linting** - README and repository guidance are validated against supported setup, settings, and test commands so stale product claims fail the lint gate.
 
 ## 0.7.11 — Streaming Auto-End Consistency
 
