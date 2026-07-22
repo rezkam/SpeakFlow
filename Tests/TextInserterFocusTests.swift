@@ -402,19 +402,33 @@ struct TextInserterPidFocusTests {
         inserter.targetElement = AXUIElementCreateApplication(backgroundApp.processIdentifier)
         inserter.targetPid = backgroundApp.processIdentifier
 
-        // ensureTargetFocused should NOT return immediately — it should poll and
-        // then fail once the focus wait timeout expires.
-        let originalTimeout = Settings.shared.focusWaitTimeout
-        Settings.shared.focusWaitTimeout = 0.3
-        defer { Settings.shared.focusWaitTimeout = originalTimeout }
+        // Write a sub-second timeout directly to the isolated test defaults.
+        // The Settings setter clamps to 10 seconds, while its getter reads this
+        // stored value unchanged.
+        let suiteName = "nu.rez.speakflow.tests.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let testDefaults = UserDefaults(suiteName: suiteName) else { return }
+        let timeoutKey = "settings.focusWaitTimeout"
+        let originalTimeout = testDefaults.object(forKey: timeoutKey)
+        testDefaults.set(0.3, forKey: timeoutKey)
+        defer {
+            if let originalTimeout {
+                testDefaults.set(originalTimeout, forKey: timeoutKey)
+            } else {
+                testDefaults.removeObject(forKey: timeoutKey)
+            }
+        }
 
+        let startTime = ContinuousClock.now
         let result = await inserter.ensureTargetFocused()
+        let elapsed = startTime.duration(to: .now)
 
         // The result must be false: true would mean the function incorrectly
         // treated the target as frontmost (regression: was returning immediately
         // with true before the PID fix was applied).
         #expect(!result,
                 "ensureTargetFocused must return false — returning true means it incorrectly treated the target app as frontmost (pre-PID-fix regression)")
+        #expect(elapsed < .seconds(2),
+                "The directly configured 0.3-second timeout must not be clamped to 10 seconds")
     }
 
     /// When targetPid points to a terminated app, ensureTargetFocused
