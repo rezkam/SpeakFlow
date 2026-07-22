@@ -4,7 +4,8 @@
 # =============================================================================
 #
 # USAGE
-#   ./scripts/build-release.sh rc               — build, sign, install locally for testing
+#   ./scripts/build-release.sh rc               — build, sign, install a local RC for testing
+#   ./scripts/build-release.sh local            — build, sign, validate, and install a production-version app locally
 #   ./scripts/build-release.sh release          — build, sign, notarize, publish to GitHub
 #   ./scripts/build-release.sh release --yes    — same, skip all confirmations (non-interactive)
 #   ./scripts/build-release.sh release -y       — shorthand for --yes
@@ -49,7 +50,7 @@ warn() { printf "  ${YELLOW}⚠${RESET}  %s\n" "$*"; }
 
 install_and_verify() {
     # Install the just-built, just-signed app to /Applications and verify it.
-    # Called from both rc and release paths.
+    # Called from local-install and release paths.
     step "Installing to /Applications"
 
     if pgrep -x "$APP_NAME" &>/dev/null; then
@@ -83,7 +84,7 @@ install_and_verify() {
     ok "Installed app signature valid"
 
     VERIFY_NOTARY_FLAG="--require-notarization"
-    if [[ "$MODE" == "rc" ]]; then
+    if [[ "$MODE" != "release" ]]; then
         VERIFY_NOTARY_FLAG="--skip-notarization"
     fi
     ./scripts/verify-release-artifact.sh \
@@ -178,8 +179,8 @@ for arg in "$@"; do
     [[ "$arg" == "--yes" || "$arg" == "-y" ]] && YES=1
 done
 
-if [[ "$MODE" != "rc" && "$MODE" != "release" ]]; then
-    printf "${RED}Usage: %s rc | release [--yes|-y]${RESET}\n" "$(basename "$0")" >&2
+if [[ "$MODE" != "rc" && "$MODE" != "local" && "$MODE" != "release" ]]; then
+    printf "${RED}Usage: %s rc | local | release [--yes|-y]${RESET}\n" "$(basename "$0")" >&2
     exit 1
 fi
 
@@ -237,6 +238,9 @@ BUILD_GIT_DESCRIBE=$(git describe --tags --always --dirty 2>/dev/null || printf 
 if [[ "$MODE" == "rc" ]]; then
     banner "🔨 SpeakFlow $DISPLAY_VERSION — Release Candidate" \
            "Local install only · nothing pushed · nothing uploaded"
+elif [[ "$MODE" == "local" ]]; then
+    banner "🔨 SpeakFlow $DISPLAY_VERSION — Local Production Build" \
+           "Signed · Installed locally · nothing pushed, uploaded, or notarized"
 else
     banner "🚀 SpeakFlow $DISPLAY_VERSION — Production Release" \
            "Signed · Notarized · Published to GitHub"
@@ -416,8 +420,8 @@ else
     else
         warn "Tests failed — see log: $TEST_LOG"
     fi
-    if [[ "$MODE" == "release" ]]; then
-        fail "Release blocked because the test suite did not pass"
+    if [[ "$MODE" != "rc" ]]; then
+        fail "Local production build and release are blocked because the test suite did not pass"
     fi
     confirm "Continue with RC build anyway?"
 fi
@@ -630,8 +634,9 @@ if [[ "$MODE" == "release" ]]; then
 fi
 
 # =============================================================================
-# STAGE 7 — DMG
+# STAGE 7 — DMG (RC and release only)
 # =============================================================================
+if [[ "$MODE" != "local" ]]; then
 step "Creating DMG"
 
 rm -f "$APP_NAME.dmg"
@@ -668,6 +673,7 @@ info "DMG SHA-256: $DMG_SHA256"
     "$APP_NAME.dmg" 2>&1 | sed 's/^/  /' \
     || fail "Signed DMG artifact validation failed"
 ok "Signed DMG artifact validation passed"
+fi
 
 # =============================================================================
 # STAGE 8 — DMG notarization (release only)
@@ -701,9 +707,9 @@ if [[ "$MODE" == "release" ]]; then
 fi
 
 # =============================================================================
-# STAGE 9 — Install verification (RC) / Release notes confirmation (release)
+# STAGE 9 — Install verification (RC/local) / Release notes confirmation (release)
 # =============================================================================
-if [[ "$MODE" == "rc" ]]; then
+if [[ "$MODE" == "rc" || "$MODE" == "local" ]]; then
     install_and_verify
 
 else
@@ -789,6 +795,11 @@ if [[ "$MODE" == "rc" ]]; then
     printf "${DIM}     Installed at /Applications/SpeakFlow.app${RESET}\n"
     printf "${DIM}     Binary SHA-256: $BINARY_SHA256${RESET}\n"
     printf "${DIM}     Nothing was pushed or uploaded.${RESET}\n"
+elif [[ "$MODE" == "local" ]]; then
+    printf "${GREEN}${BOLD}  ✅ Local production build ready: SpeakFlow $DISPLAY_VERSION${RESET}\n"
+    printf "${DIM}     Installed at /Applications/SpeakFlow.app${RESET}\n"
+    printf "${DIM}     Binary SHA-256: $BINARY_SHA256${RESET}\n"
+    printf "${DIM}     Nothing was pushed, uploaded, or notarized.${RESET}\n"
 else
     printf "${GREEN}${BOLD}  ✅ Released: SpeakFlow v$DISPLAY_VERSION${RESET}\n"
     REPO_URL=$(gh repo view --json url -q .url 2>/dev/null || echo "https://github.com")

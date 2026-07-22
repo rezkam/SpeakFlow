@@ -92,8 +92,12 @@ git clone https://github.com/rezkam/SpeakFlow.git
 cd SpeakFlow
 swift build -c release --product SpeakFlow
 
-# Or build the full .app bundle + DMG:
-bash scripts/build-release.sh rc
+# Or build and install a signed production-version .app locally,
+# without notarizing or publishing it:
+make local
+
+# To build a local release candidate with an RC display suffix:
+make rc
 ```
 
 Requires **macOS 26+** and **Swift 6.2+** (Xcode 26 or later).
