@@ -69,9 +69,10 @@ clean:
 	swift package clean
 	rm -rf .build/coverage
 
-# Run SwiftLint
+# Run SwiftLint and documentation consistency checks
 lint:
 	swiftlint lint --quiet
+	@./scripts/check-documentation-consistency.sh
 
 # RC build: compile, sign, install locally — nothing pushed or uploaded
 rc:
