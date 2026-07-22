@@ -133,7 +133,7 @@ public enum DeepgramError: Error, LocalizedError {
 public actor DeepgramStreamingSession: StreamingSession {
     private let apiKey: String
     private let config: StreamingSessionConfig
-    private let logger = Logger(subsystem: "SpeakFlow", category: "DeepgramSession")
+    private let logger: any ProviderLogging
 
     private let core: WebSocketSessionCore
     private var messageSequence: UInt64 = 0
@@ -149,11 +149,13 @@ public actor DeepgramStreamingSession: StreamingSession {
         handshakeTimeout: TimeInterval = 10,
         connectionFactory: @escaping WebSocketConnectionFactory = { request, timeout in
             try await WebSocketConnector.connect(request: request, timeout: timeout)
-        }
+        },
+        logger: any ProviderLogging = OSLogProviderLogger(category: "DeepgramSession")
     ) {
         self.apiKey = apiKey
         self.config = config
         self.handshakeTimeout = handshakeTimeout
+        self.logger = logger
         self.core = WebSocketSessionCore(
             component: "DeepgramSession",
             connectionFactory: connectionFactory,
@@ -167,7 +169,7 @@ public actor DeepgramStreamingSession: StreamingSession {
 
     func connect() async throws {
         let url = buildURL()
-        logger.info("Connecting to Deepgram: \(url.absoluteString, privacy: .public)")
+        logger.log("Connecting to Deepgram: \(url.absoluteString)", level: .info, visibility: .public)
 
         var request = URLRequest(url: url)
         request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -179,7 +181,7 @@ public actor DeepgramStreamingSession: StreamingSession {
             try await core.startReceiving { [weak self] text in
                 await self?.parseMessage(text)
             }
-            logger.info("WebSocket handshake completed")
+            logger.log("WebSocket handshake completed", level: .info, visibility: .public)
         } catch {
             if openedTransport {
                 await core.close(code: .goingAway)
@@ -195,7 +197,7 @@ public actor DeepgramStreamingSession: StreamingSession {
     public func finalize() async throws {
         let msg = #"{"type":"Finalize"}"#
         try await core.send(.string(msg), disconnectedError: DeepgramError.sessionClosed)
-        logger.debug("Sent Finalize")
+        logger.log("Sent Finalize", level: .debug, visibility: .public)
     }
 
     public func close() async throws {
@@ -204,7 +206,7 @@ public actor DeepgramStreamingSession: StreamingSession {
             try? await core.send(.string(msg), disconnectedError: DeepgramError.sessionClosed)
         }
         await core.close()
-        logger.info("WebSocket closed")
+        logger.log("WebSocket closed", level: .info, visibility: .public)
     }
 
     public func keepAlive() async throws {
@@ -308,12 +310,12 @@ public actor DeepgramStreamingSession: StreamingSession {
                 if msg.isFinal == true {
                     await core.yield(.finalResult(result))
                     if !alt.transcript.isEmpty {
-                        logger.info("FINAL: \(alt.transcript, privacy: .private(mask: .hash))")
+                        logger.log("FINAL: \(alt.transcript)", level: .info, visibility: .privateHash)
                     }
                 } else {
                     await core.yield(.interim(result))
                     if !alt.transcript.isEmpty {
-                        logger.debug("interim: \(alt.transcript, privacy: .private(mask: .hash))")
+                        logger.log("interim: \(alt.transcript)", level: .debug, visibility: .privateHash)
                     }
                 }
 
@@ -328,7 +330,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                 )
                 let lastWordEnd = msg.lastWordEnd ?? 0
                 await core.yield(.utteranceEnd(lastWordEnd: lastWordEnd))
-                logger.info("UtteranceEnd at \(String(format: "%.2f", lastWordEnd))s")
+                logger.log("UtteranceEnd at \(String(format: "%.2f", lastWordEnd))s", level: .info, visibility: .public)
 
             case "SpeechStarted":
                 observabilityEvent(
@@ -341,7 +343,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                 )
                 let timestamp = msg.timestamp ?? 0
                 await core.yield(.speechStarted(timestamp: timestamp))
-                logger.debug("SpeechStarted at \(String(format: "%.2f", timestamp))s")
+                logger.log("SpeechStarted at \(String(format: "%.2f", timestamp))s", level: .debug, visibility: .public)
 
             case "Metadata":
                 observabilityEvent(
@@ -354,7 +356,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                 )
                 let requestId = msg.requestId ?? "unknown"
                 await core.yield(.metadata(requestId: requestId))
-                logger.info("Session metadata: requestId=\(requestId, privacy: .public)")
+                logger.log("Session metadata: requestId=\(requestId)", level: .info, visibility: .public)
 
             default:
                 observabilityEvent(
@@ -364,7 +366,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                         "messageType": msg.type
                     ]
                 )
-                logger.debug("Unknown message type: \(msg.type, privacy: .public)")
+                logger.log("Unknown message type: \(msg.type)", level: .debug, visibility: .public)
             }
         } catch {
             let metadata: [String: String] = [
@@ -375,7 +377,7 @@ public actor DeepgramStreamingSession: StreamingSession {
                 "error": error.localizedDescription
             ]
             observabilityEvent("provider_message_parse_failed", level: .error, metadata: metadata)
-            logger.error("Failed to parse message: \(error.localizedDescription)")
+            logger.log("Failed to parse message: \(error.localizedDescription)", level: .error, visibility: .public)
         }
     }
 
