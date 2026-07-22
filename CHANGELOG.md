@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.8.1 — OAuth & Regression-Gate Reliability
+
+### Fixed
+
+* **Cancelled ChatGPT sign-ins fail promptly** - A matching-state OAuth callback without an authorization code, such as a provider denial, now ends the login attempt immediately instead of waiting for the full callback timeout. Stray connections and wrong-state callbacks continue to be ignored while the real callback is awaited.
+* **Regression-core supports intentional VAD skips** - On platforms where VAD is unavailable, the regression gate now accepts only the explicitly reported VAD integration-suite skip. Unexpected zero-test filters still fail the gate.
+
+### Test Coverage
+
+* **Added OAuth denial and regression-script contracts** - Tests verify prompt handling of matching-state provider errors, continued acceptance after a wrong-state callback, and both accepted and rejected zero-test VAD outcomes.
+
 ## 0.8.0 — macOS 26, Usage Dashboard & Dictation Reliability
 
 ### Breaking Changes
