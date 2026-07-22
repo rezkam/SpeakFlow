@@ -101,8 +101,8 @@ final class TextInserter: TextInserting {
     /// Defaults to `nil` (production behavior).
     var testIsTargetFrontmost: Bool?
 
-    /// Source of current modifier-key flags, consulted by `postGuardedKeyEvent`
-    /// before every synthetic keystroke. Defaults to live hardware state;
+    /// Source of current modifier-key flags, consulted before each synthetic key pair.
+    /// Defaults to live hardware state;
     /// tests inject a scripted sequence (see `_testSetFlagsProvider`) so the
     /// real insertion paths can be driven deterministically.
     private var flagsProvider: () -> CGEventFlags = { TextInserter.currentHardwareModifierFlags() }
@@ -112,6 +112,12 @@ final class TextInserter: TextInserting {
     /// (see `_testSetEventPoster`) so the modifier-safety gate can be
     /// exercised end-to-end without emitting real OS events.
     private var eventPoster: (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }
+
+    /// Liveness check for the captured target process. Production uses AppKit;
+    /// tests inject a deterministic process identity without requiring a GUI app.
+    private var isTargetProcessRunning: (pid_t) -> Bool = {
+        NSRunningApplication(processIdentifier: $0) != nil
+    }
 
     /// The current task chain for text operations.
     /// Each new operation creates a task that awaits this one, forming a serial queue.
@@ -396,31 +402,24 @@ final class TextInserter: TextInserting {
         textInsertionTask = Task { [weak self] in
             await previousTask?.value
 
-            // Ensure the target element has focus before pressing Enter
-            guard await self?.ensureTargetFocused() == true else { return }
-
-            // Create key-down event. Routed through the single modifier-safety
-            // gate: never posted while Cmd/Ctrl/Option/Shift is held, and
-            // focus is re-verified if we had to wait for release.
-            if let keyDown = CGEvent(
-                keyboardEventSource: nil,
-                virtualKey: Self.enterKeyCode,
-                keyDown: true
-            ) {
-                guard await self?.postGuardedKeyEvent(keyDown) == true else { return }
-            }
-
-            // Brief delay between key-down and key-up for proper registration
-            try? await Task.sleep(nanoseconds: Self.enterKeyDelayNanoseconds)
-
-            if let keyUp = CGEvent(
-                keyboardEventSource: nil,
-                virtualKey: Self.enterKeyCode,
-                keyDown: false
-            ) {
-                guard await self?.postGuardedKeyEvent(keyUp) == true else { return }
-            }
-            self?.observabilityEvent(
+            guard let self,
+                  await self.ensureTargetFocused(),
+                  let keyDown = CGEvent(
+                      keyboardEventSource: nil,
+                      virtualKey: Self.enterKeyCode,
+                      keyDown: true
+                  ),
+                  let keyUp = CGEvent(
+                      keyboardEventSource: nil,
+                      virtualKey: Self.enterKeyCode,
+                      keyDown: false
+                  ),
+                  await self.postGuardedKeyPair(
+                      keyDown,
+                      keyUp,
+                      releaseDelayNanoseconds: Self.enterKeyDelayNanoseconds
+                  ) else { return }
+            self.observabilityEvent(
                 "press_enter_emitted",
                 metadata: ["operationId": String(operationId)]
             )
@@ -531,11 +530,7 @@ final class TextInserter: TextInserting {
                 keyDown: false
             ) else { continue }
 
-            // Routed through the single modifier-safety gate: never posted
-            // while Cmd/Ctrl/Option/Shift is held, and focus is re-verified
-            // if we had to wait for release.
-            guard await postGuardedKeyEvent(keyDown) else { return false }
-            guard await postGuardedKeyEvent(keyUp) else { return false }
+            guard await postGuardedKeyPair(keyDown, keyUp) else { return false }
 
             // Small delay to ensure the app processes the deletion
             try? await Task.sleep(
@@ -579,7 +574,7 @@ final class TextInserter: TextInserting {
         if isTargetAppFrontmost() { return true }
 
         // Verify the target app is still running before waiting
-        guard NSRunningApplication(processIdentifier: targetPid) != nil || recoverTargetPidIfNeeded() else {
+        guard isTargetProcessRunning(targetPid) || recoverTargetPidIfNeeded() else {
             return false
         }
 
@@ -605,7 +600,7 @@ final class TextInserter: TextInserting {
             }
 
             // If the target app was terminated while waiting, stop
-            if NSRunningApplication(processIdentifier: targetPid) == nil, !recoverTargetPidIfNeeded() {
+            if !isTargetProcessRunning(targetPid), !recoverTargetPidIfNeeded() {
                 return false
             }
 
@@ -687,7 +682,7 @@ final class TextInserter: TextInserting {
     /// Returns false only if the original PID is gone and no matching running app
     /// can be found for the captured target bundle identifier.
     private func recoverTargetPidIfNeeded() -> Bool {
-        if targetPid != 0, NSRunningApplication(processIdentifier: targetPid) != nil {
+        if targetPid != 0, isTargetProcessRunning(targetPid) {
             return true
         }
 
@@ -790,12 +785,7 @@ final class TextInserter: TextInserting {
                 unicodeString: &unichar
             )
 
-            // Routed through the single modifier-safety gate: never posts
-            // while Cmd/Ctrl/Option/Shift is held (waits/retries this same
-            // character indefinitely until release), and re-verifies focus
-            // if we had to wait.
-            guard await postGuardedKeyEvent(keyDown) else { return }
-            guard await postGuardedKeyEvent(keyUp) else { return }
+            guard await postGuardedKeyPair(keyDown, keyUp) else { return }
 
             // Small delay to ensure the character is processed
             try? await Task.sleep(
@@ -898,42 +888,41 @@ final class TextInserter: TextInserting {
 
     // MARK: - Synthetic Event Gate
 
-    /// The single choke point through which every synthesized key event must
-    /// pass before being posted to the system (AGENTS.md contract 6: never
-    /// synthesize text while Cmd/Ctrl/Option/Shift is active).
-    ///
-    /// Waits for modifiers to release, polling in `waitForModifiersReleased`
-    /// windows and retrying indefinitely across windows until they clear (or
-    /// the task is cancelled). Because modifier state and focus can both
-    /// change while waiting, focus is re-verified once modifiers clear and
-    /// before the event is actually posted. Every posting path (typing,
-    /// deleting, Enter) routes through this one function, so a future
-    /// insertion path has no way to post an event without also passing
-    /// through this guard.
-    ///
-    /// - Returns: `true` once the event was posted; `false` if the task was
-    ///   cancelled, or if the target app lost focus while waiting for
-    ///   modifiers to release (the caller should abort, not post).
-    private func postGuardedKeyEvent(_ event: CGEvent) async -> Bool {
+    /// The single choke point through which every synthesized key action must
+    /// pass. Validation happens before key-down only. After that point the
+    /// matching key-up is mandatory cleanup and is posted exactly once, in
+    /// order, regardless of cancellation, modifier changes, or focus changes.
+    private func postGuardedKeyPair(
+        _ keyDown: CGEvent,
+        _ keyUp: CGEvent,
+        releaseDelayNanoseconds: UInt64 = 0
+    ) async -> Bool {
         while true {
             if Task.isCancelled { return false }
 
             if Self.hasActiveModifiers(flagsProvider()) {
                 let released = await waitForModifiersReleased()
                 if Task.isCancelled { return false }
-
-                // Still held after the poll window: keep waiting rather than
-                // ever posting a keystroke while a modifier is active.
                 if !released { continue }
 
-                // Focus may have changed while we were waiting for release.
+                // Focus may have changed while modifiers were held. Re-enter
+                // the loop because modifiers or cancellation can change while
+                // focus validation suspends.
                 guard await ensureTargetFocused() else { return false }
+                continue
             }
 
-            eventPoster(event)
+            eventPoster(keyDown)
+            if releaseDelayNanoseconds > 0 {
+                // Cancellation can end this delay early, but cannot suppress
+                // the release for a key-down that has already been emitted.
+                try? await Task.sleep(nanoseconds: releaseDelayNanoseconds)
+            }
+            eventPoster(keyUp)
             return true
         }
     }
+
 }
 
 #if DEBUG
@@ -989,7 +978,7 @@ extension TextInserter {
     }
 
     // Installs a scripted modifier-flags source consulted by the real
-    // `postGuardedKeyEvent` gate (and therefore by `insertText`/
+    // `postGuardedKeyPair` gate (and therefore by `insertText`/
     // `deleteChars`/`pressEnterKey`), so tests can drive those real entry
     // points deterministically without depending on live hardware state.
     // swiftlint:disable:next identifier_name
@@ -1003,6 +992,11 @@ extension TextInserter {
     // swiftlint:disable:next identifier_name
     func _testSetEventPoster(_ poster: @escaping (CGEvent) -> Void) {
         eventPoster = poster
+    }
+
+    // swiftlint:disable:next identifier_name
+    func _testSetTargetProcessLiveness(_ provider: @escaping (pid_t) -> Bool) {
+        isTargetProcessRunning = provider
     }
 
     // swiftlint:disable:next identifier_name
