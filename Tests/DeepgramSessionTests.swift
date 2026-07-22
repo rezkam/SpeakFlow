@@ -394,15 +394,28 @@ struct DeepgramReceiveFailureRoutingTests {
 }
 
 @Suite("DeepgramStreamingSession — transcript log privacy")
-struct DeepgramTranscriptPrivacySourceTests {
+struct DeepgramTranscriptPrivacyTests {
     @Test
-    func transcriptLogsAreNotPublic() throws {
-        let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let repoRoot = testsDir.deletingLastPathComponent()
-        let sourceURL = repoRoot.appendingPathComponent("Sources/SpeakFlowCore/Providers/DeepgramProvider.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    func finalAndInterimTranscriptLogsArePrivate() async {
+        let logger = SpyProviderLogger()
+        let session = DeepgramStreamingSession(apiKey: "test-key", config: .default, logger: logger)
+        let finalSentinel = "deepgram-final-private-sentinel"
+        let interimSentinel = "deepgram-interim-private-sentinel"
 
-        #expect(!source.contains("FINAL: \\(alt.transcript, privacy: .public)"))
-        #expect(!source.contains("interim: \\(alt.transcript, privacy: .public)"))
+        await session.parseMessage("""
+        {"type":"Results","channel":{"alternatives":[{"transcript":"\(finalSentinel)","confidence":0.99}]},"is_final":true}
+        """)
+        await session.parseMessage("""
+        {"type":"Results","channel":{"alternatives":[{"transcript":"\(interimSentinel)","confidence":0.5}]},"is_final":false}
+        """)
+
+        let transcriptEntries = logger.capturedEntries().filter {
+            $0.message.contains(finalSentinel) || $0.message.contains(interimSentinel)
+        }
+        #expect(transcriptEntries.count == 2, "Final and interim parsing must both log their transcript")
+        #expect(transcriptEntries.allSatisfy { $0.visibility == .privateHash })
+        #expect(!transcriptEntries.contains { $0.visibility == .public })
+        #expect(transcriptEntries.contains { $0.level == .info && $0.message.contains(finalSentinel) })
+        #expect(transcriptEntries.contains { $0.level == .debug && $0.message.contains(interimSentinel) })
     }
 }

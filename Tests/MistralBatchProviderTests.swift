@@ -433,6 +433,76 @@ struct MistralBatchSettingsIntegrationTests {
     }
 }
 
+@Suite("MistralBatchProvider — transcript log privacy")
+struct MistralBatchTranscriptPrivacyTests {
+    @Test @MainActor
+    func successfulTranscriptLogIsPrivate() async throws {
+        let sentinel = "mistral-batch-transcript-private-sentinel"
+        let logger = SpyProviderLogger()
+        let httpProvider = MockHTTPProvider(
+            responseData: Data("{\"text\":\"\(sentinel)\"}".utf8),
+            statusCode: 200
+        )
+        let provider = makeProvider(logger: logger, httpDataProvider: httpProvider)
+
+        let transcript = try await provider.transcribe(audio: Data("audio".utf8))
+
+        let transcriptEntries = logger.capturedEntries().filter { $0.message.contains(sentinel) }
+        #expect(transcript == sentinel)
+        #expect(httpProvider.requestCount == 1)
+        #expect(transcriptEntries.count == 1, "A successful response must log the transcript")
+        #expect(transcriptEntries.allSatisfy { $0.visibility == .privateHash })
+        #expect(!transcriptEntries.contains { $0.visibility == .public })
+        #expect(transcriptEntries.first?.level == .info)
+    }
+
+    @Test @MainActor
+    func non2xxResponseBodyLogIsPrivate() async {
+        let sentinel = "mistral-batch-error-body-private-sentinel"
+        let logger = SpyProviderLogger()
+        let httpProvider = MockHTTPProvider(responseData: Data(sentinel.utf8), statusCode: 500)
+        let provider = makeProvider(logger: logger, httpDataProvider: httpProvider)
+
+        do {
+            _ = try await provider.transcribe(audio: Data("audio".utf8))
+            Issue.record("Expected HTTP error")
+        } catch let error as MistralBatchError {
+            guard case .httpError(let statusCode, let body) = error else {
+                Issue.record("Expected httpError, got \(error)")
+                return
+            }
+            #expect(statusCode == 500)
+            #expect(body == sentinel)
+        } catch {
+            Issue.record("Expected MistralBatchError, got \(error)")
+        }
+
+        let bodyEntries = logger.capturedEntries().filter { $0.message.contains(sentinel) }
+        #expect(httpProvider.requestCount == 1)
+        #expect(bodyEntries.count == 1, "A non-2xx response must log its body")
+        #expect(bodyEntries.allSatisfy { $0.visibility == .privateHash })
+        #expect(!bodyEntries.contains { $0.visibility == .public })
+        #expect(bodyEntries.first?.level == .error)
+    }
+
+    @MainActor
+    private func makeProvider(
+        logger: any ProviderLogging,
+        httpDataProvider: any HTTPDataProvider
+    ) -> MistralBatchProvider {
+        let settings = SpyMistralSettings()
+        let providerSettings = SpyMistralProviderSettings()
+        providerSettings.storedKeys[ProviderId.mistral] = "test-key"
+        return MistralBatchProvider(
+            providerSettings: providerSettings,
+            settings: settings,
+            hasAPIKey: { _ in true },
+            logger: logger,
+            httpDataProvider: httpDataProvider
+        )
+    }
+}
+
 // MARK: - Spy for MistralSettingsProviding
 
 @MainActor

@@ -93,6 +93,29 @@ final class MockHTTPProvider: HTTPDataProvider, @unchecked Sendable {
     }
 }
 
+// MARK: - Provider Logging Testability
+
+struct CapturedProviderLogEntry: Sendable {
+    let message: String
+    let level: ProviderLogLevel
+    let visibility: ProviderLogVisibility
+}
+
+final class SpyProviderLogger: ProviderLogging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries = [CapturedProviderLogEntry]()
+
+    func log(_ message: String, level: ProviderLogLevel, visibility: ProviderLogVisibility) {
+        lock.withLock {
+            entries.append(CapturedProviderLogEntry(message: message, level: level, visibility: visibility))
+        }
+    }
+
+    func capturedEntries() -> [CapturedProviderLogEntry] {
+        lock.withLock { entries }
+    }
+}
+
 // MARK: - OAuth Callback Server Tests
 
 /// Assigns unique ports to each OAuth test to prevent bind collisions when tests

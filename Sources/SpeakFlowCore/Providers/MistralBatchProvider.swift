@@ -22,7 +22,8 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         hasAPIKey(ProviderId.mistral)
     }
 
-    private let logger = Logger(subsystem: "SpeakFlow", category: "MistralBatch")
+    private let logger: any ProviderLogging
+    private let httpDataProvider: any HTTPDataProvider
     private let providerSettings: any ProviderSettingsProviding
     private let settings: any MistralSettingsProviding
     private let hasAPIKey: @Sendable (String) -> Bool
@@ -35,7 +36,9 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         self.init(
             providerSettings: providerSettings,
             settings: settings,
-            hasAPIKey: { ProviderAPIKeys.hasAPIKey(for: $0) }
+            hasAPIKey: { ProviderAPIKeys.hasAPIKey(for: $0) },
+            logger: OSLogProviderLogger(category: "MistralBatch"),
+            httpDataProvider: URLSession.shared
         )
     }
 
@@ -43,8 +46,12 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
     init(
         providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
         settings: any MistralSettingsProviding = Settings.shared,
-        hasAPIKey: @escaping @Sendable (String) -> Bool
+        hasAPIKey: @escaping @Sendable (String) -> Bool,
+        logger: any ProviderLogging = OSLogProviderLogger(category: "MistralBatch"),
+        httpDataProvider: any HTTPDataProvider = URLSession.shared
     ) {
+        self.logger = logger
+        self.httpDataProvider = httpDataProvider
         self.providerSettings = providerSettings
         self.settings = settings
         self.hasAPIKey = hasAPIKey
@@ -182,11 +189,11 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         )
 
         let dataSize = String(format: "%.1f", Double(audio.count) / 1000.0)
-        logger.info("Sending \(dataSize)KB to Mistral batch transcription (model: \(model, privacy: .public))")
+        logger.log("Sending \(dataSize)KB to Mistral batch transcription (model: \(model))", level: .info, visibility: .public)
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await httpDataProvider.data(for: request)
         } catch let urlError as URLError {
             throw MistralBatchError.networkError(urlError.localizedDescription)
         } catch {
@@ -200,7 +207,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         // Handle errors
         guard (200...299).contains(http.statusCode) else {
             let bodyText = String(data: data.prefix(500), encoding: .utf8) ?? ""
-            logger.error("Mistral API error HTTP \(http.statusCode): \(bodyText, privacy: .private(mask: .hash))")
+            logger.log("Mistral API error HTTP \(http.statusCode): \(bodyText)", level: .error, visibility: .privateHash)
 
             if http.statusCode == 429 {
                 throw MistralBatchError.rateLimited
@@ -211,7 +218,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         // Parse response — Python SDK model: TranscriptionResponse { text, model, usage, language }
         do {
             let result = try JSONDecoder().decode(MistralTranscriptionResponse.self, from: data)
-            logger.info("Transcription complete: \(result.text.prefix(80), privacy: .private(mask: .hash))...")
+            logger.log("Transcription complete: \(result.text.prefix(80))...", level: .info, visibility: .privateHash)
             return result.text
         } catch {
             // Fallback: try extracting "text" from raw JSON

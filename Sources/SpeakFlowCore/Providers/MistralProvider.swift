@@ -165,7 +165,7 @@ public enum MistralError: Error, LocalizedError {
 public actor MistralStreamingSession: StreamingSession {
     private let apiKey: String
     private let config: StreamingSessionConfig
-    private let logger = Logger(subsystem: "SpeakFlow", category: "MistralSession")
+    private let logger: any ProviderLogging
 
     private let core: WebSocketSessionCore
     private let handshakeTimeout: TimeInterval
@@ -184,11 +184,13 @@ public actor MistralStreamingSession: StreamingSession {
         handshakeTimeout: TimeInterval = 10,
         connectionFactory: @escaping WebSocketConnectionFactory = { request, timeout in
             try await WebSocketConnector.connect(request: request, timeout: timeout)
-        }
+        },
+        logger: any ProviderLogging = OSLogProviderLogger(category: "MistralSession")
     ) {
         self.apiKey = apiKey
         self.config = config
         self.handshakeTimeout = handshakeTimeout
+        self.logger = logger
         self.core = WebSocketSessionCore(
             component: "MistralSession",
             connectionFactory: connectionFactory,
@@ -202,7 +204,7 @@ public actor MistralStreamingSession: StreamingSession {
 
     func connect() async throws {
         let url = buildURL()
-        logger.info("Connecting to Mistral Realtime: \(url.absoluteString, privacy: .public)")
+        logger.log("Connecting to Mistral Realtime: \(url.absoluteString)", level: .info, visibility: .public)
 
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -214,12 +216,12 @@ public actor MistralStreamingSession: StreamingSession {
 
             // Wait for session.created handshake (matches Python SDK's _recv_handshake).
             let serverFormat = try await waitForSessionCreated()
-            logger.info("Mistral WebSocket connected — session created")
+            logger.log("Mistral WebSocket connected — session created", level: .info, visibility: .public)
 
             // Only send session.update if the server's default format differs from ours.
             if serverFormat.encoding != "pcm_s16le" || serverFormat.sampleRate != config.sampleRate {
                 try await sendSessionUpdate()
-                logger.info("Sent session.update (format mismatch)")
+                logger.log("Sent session.update (format mismatch)", level: .info, visibility: .public)
             }
 
             try await core.startReceiving { [weak self] text in
@@ -294,7 +296,7 @@ public actor MistralStreamingSession: StreamingSession {
         {"type":"session.update","session":{"audio_format":{"encoding":"pcm_s16le","sample_rate":\(config.sampleRate)}}}
         """
         try await core.send(.string(msg), disconnectedError: MistralError.sessionClosed)
-        logger.debug("Sent session.update with pcm_s16le @ \(self.config.sampleRate)Hz")
+        logger.log("Sent session.update with pcm_s16le @ \(self.config.sampleRate)Hz", level: .debug, visibility: .public)
     }
 
     public func sendAudio(_ data: Data) async throws {
@@ -307,7 +309,7 @@ public actor MistralStreamingSession: StreamingSession {
     public func finalize() async throws {
         let msg = #"{"type":"input_audio.end"}"#
         try await core.send(.string(msg), disconnectedError: MistralError.sessionClosed)
-        logger.debug("Sent input_audio.end")
+        logger.log("Sent input_audio.end", level: .debug, visibility: .public)
     }
 
     public func close() async throws {
@@ -323,7 +325,7 @@ public actor MistralStreamingSession: StreamingSession {
         }
 
         await core.close()
-        logger.info("WebSocket closed")
+        logger.log("WebSocket closed", level: .info, visibility: .public)
     }
 
     public func keepAlive() async throws {
@@ -369,8 +371,10 @@ public actor MistralStreamingSession: StreamingSession {
                 speechFinal: false
             )
             await core.yield(.interim(result))
-            logger.debug(
-                "delta: \(text, privacy: .private(mask: .hash)) → accumulated: \(self.pendingDeltaText, privacy: .private(mask: .hash))"
+            logger.log(
+                "delta: \(text) → accumulated: \(self.pendingDeltaText)",
+                level: .debug,
+                visibility: .privateHash
             )
 
         // --- transcription.segment ---
@@ -396,8 +400,10 @@ public actor MistralStreamingSession: StreamingSession {
                     speechFinal: true
                 )
                 await core.yield(.finalResult(result))
-                logger.info(
-                    "SEGMENT [\(String(format: "%.1f", start))–\(String(format: "%.1f", start + duration))s]: \(segmentText, privacy: .private(mask: .hash))"
+                logger.log(
+                    "SEGMENT [\(String(format: "%.1f", start))–\(String(format: "%.1f", start + duration))s]: \(segmentText)",
+                    level: .info,
+                    visibility: .privateHash
                 )
             }
 
@@ -412,7 +418,7 @@ public actor MistralStreamingSession: StreamingSession {
         // Python model: TranscriptionStreamLanguage { audio_language: str }
         case "transcription.language":
             if let language = obj["audio_language"] as? String {
-                logger.info("Detected language: \(language, privacy: .public)")
+                logger.log("Detected language: \(language)", level: .info, visibility: .public)
             }
 
         // --- transcription.done ---
@@ -429,7 +435,7 @@ public actor MistralStreamingSession: StreamingSession {
                 await core.yield(.finalResult(result))
                 pendingDeltaText = ""
             }
-            logger.info("Transcription done")
+            logger.log("Transcription done", level: .info, visibility: .public)
 
         // --- session.created ---
         // May arrive again after handshake (already handled in waitForSessionCreated).
@@ -438,22 +444,22 @@ public actor MistralStreamingSession: StreamingSession {
                let requestId = session["request_id"] as? String {
                 await core.yield(.metadata(requestId: requestId))
             }
-            logger.info("Session created event received")
+            logger.log("Session created event received", level: .info, visibility: .public)
 
         // --- session.updated ---
         // Confirmation of session.update. Informational.
         case "session.updated":
-            logger.info("Session updated confirmed")
+            logger.log("Session updated confirmed", level: .info, visibility: .public)
 
         // --- error ---
         // Server error. Python model: RealtimeTranscriptionError { error: { message: str|dict, code: int } }
         case "error":
             let (msg, code) = extractError(obj)
-            logger.error("Server error (\(code)): \(msg, privacy: .public)")
+            logger.log("Server error (\(code)): \(msg)", level: .error, visibility: .public)
             await core.yield(.error(MistralError.serverError(msg, code: code)))
 
         default:
-            logger.debug("Unknown message type: \(type, privacy: .public)")
+            logger.log("Unknown message type: \(type)", level: .debug, visibility: .public)
         }
     }
 
