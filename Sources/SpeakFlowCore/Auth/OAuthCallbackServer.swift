@@ -7,6 +7,11 @@ import os
 /// All mutable shared state is protected by a single unfair lock to prevent races
 /// between start/stop/accept paths and continuation resume.
 public final class OAuthCallbackServer: @unchecked Sendable {
+    private enum ClientResult {
+        case ignored
+        case completed(String?)
+    }
+
     private struct State {
         var socket: Int32 = -1
         var isRunning = false
@@ -215,17 +220,20 @@ public final class OAuthCallbackServer: @unchecked Sendable {
                     continue
                 }
 
-                let code = handleClient(clientSocket)
+                let result = handleClient(clientSocket)
                 Darwin.close(clientSocket)
 
-                if let code {
+                switch result {
+                case .ignored:
+                    // Not a valid callback (noise, probe, wrong path, bad state, etc.).
+                    // Keep accepting until the real redirect arrives or we time out.
+                    continue
+                case let .completed(code):
+                    // A matching-state callback is terminal even when the provider
+                    // returns an OAuth error instead of an authorization code.
                     resumeOnce(returning: code)
                     return
                 }
-
-                // Not a valid callback (noise, probe, wrong path, bad state, etc.).
-                // Keep accepting until the real redirect arrives or we time out.
-                continue
             }
 
             try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
@@ -236,10 +244,10 @@ public final class OAuthCallbackServer: @unchecked Sendable {
     }
 
     /// Handles one accepted connection to completion: reads the request, writes the
-    /// matching HTTP response, and returns the authorization code on a valid callback
-    /// or `nil` if this connection was not a valid callback (caller should keep
-    /// listening rather than tearing the server down).
-    private func handleClient(_ clientSocket: Int32) -> String? {
+    /// matching HTTP response, and distinguishes ignorable connection noise from a
+    /// terminal matching-state OAuth response. A terminal response can contain either
+    /// an authorization code or a provider error represented by `completed(nil)`.
+    private func handleClient(_ clientSocket: Int32) -> ClientResult {
         // Robustly read until end-of-headers. A single `read` is not guaranteed to
         // return the full HTTP request line; under load we can receive a partial
         // first packet (e.g. truncated query string), which causes false
@@ -275,7 +283,7 @@ public final class OAuthCallbackServer: @unchecked Sendable {
             }
 
             sendResponse(clientSocket, status: "400 Bad Request", body: "Read error")
-            return nil
+            return .ignored
         }
 
         guard !requestData.isEmpty,
@@ -283,19 +291,19 @@ public final class OAuthCallbackServer: @unchecked Sendable {
               let firstLine = request.split(separator: "\r\n").first,
               let pathPart = firstLine.split(separator: " ").dropFirst().first else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Invalid request")
-            return nil
+            return .ignored
         }
 
         let path = String(pathPart)
 
         guard path.hasPrefix("/auth/callback") else {
             sendResponse(clientSocket, status: "404 Not Found", body: "Not found")
-            return nil
+            return .ignored
         }
 
         guard let queryStart = path.firstIndex(of: "?") else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Missing query parameters")
-            return nil
+            return .ignored
         }
 
         let queryString = String(path[path.index(after: queryStart)...])
@@ -306,17 +314,17 @@ public final class OAuthCallbackServer: @unchecked Sendable {
             // probe or an actual CSRF attempt, not a value worth logging either way.
             Logger.auth.info("OAuth callback rejected: state mismatch")
             sendResponse(clientSocket, status: "400 Bad Request", body: "State mismatch")
-            return nil
+            return .ignored
         }
 
         guard let code = params["code"] else {
             sendResponse(clientSocket, status: "400 Bad Request", body: "Missing authorization code")
-            return nil
+            return .completed(nil)
         }
 
         sendResponse(clientSocket, status: "200 OK", body: successHTML, contentType: "text/html")
         Logger.auth.info("Received OAuth callback with authorization code")
-        return code
+        return .completed(code)
     }
 
     private func parseQueryString(_ query: String) -> [String: String] {

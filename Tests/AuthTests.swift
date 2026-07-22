@@ -381,24 +381,56 @@ struct OAuthCallbackServerTests {
     }
 
     /// State mismatch gets its 400 on that connection, but the server keeps
-    /// listening (it does not tear down the whole callback wait) — since nothing
-    /// valid follows, this now only resolves at the timeout deadline rather than
-    /// immediately, so the timeout here is kept short.
-    @Test func testStateMismatchReturnsNil() async throws {
+    /// listening rather than allowing a stray or forged callback to terminate
+    /// the real login response that follows.
+    @Test func testStateMismatchDoesNotAbortLogin() async throws {
         let port = randomOAuthTestPort()
-        let server = OAuthCallbackServer(expectedState: "expected", port: port)
+        let expectedState = "expected"
+        let server = OAuthCallbackServer(expectedState: expectedState, port: port)
 
         #expect(server.prepareForCallback())
 
-        async let code = server.waitForPreparedCallback(timeout: 1.5)
+        let waitTask = Task { await server.waitForPreparedCallback(timeout: 5.0) }
+        let rejectedStatus = try await hitOAuthCallback(
+            port: port,
+            query: "code=forged&state=wrong"
+        )
+        let acceptedStatus = try await hitOAuthCallback(
+            port: port,
+            query: "code=real-code&state=\(expectedState)"
+        )
+        let receivedCode = await waitTask.value
+
+        #expect(rejectedStatus == 400)
+        #expect(acceptedStatus == 200)
+        #expect(receivedCode == "real-code",
+                "A state mismatch must not terminate the wait for the real callback")
+    }
+
+    /// A provider denial is the terminal OAuth response when its state matches.
+    /// It must finish the login immediately rather than being mistaken for a
+    /// stray probe and leaving the user waiting for the full callback timeout.
+    @Test func testMatchingStateOAuthErrorReturnsNilImmediately() async throws {
+        let port = randomOAuthTestPort()
+        let expectedState = "denied-state"
+        let server = OAuthCallbackServer(expectedState: expectedState, port: port)
+
+        #expect(server.prepareForCallback())
+
+        let start = Date()
+        async let code = server.waitForPreparedCallback(timeout: 4.0)
         async let status = hitOAuthCallback(
             port: port,
-            query: "code=abc&state=wrong"
+            query: "error=access_denied&state=\(expectedState)"
         )
 
         let (receivedCode, httpStatus) = try await (code, status)
+        let elapsed = Date().timeIntervalSince(start)
+
         #expect(httpStatus == 400)
         #expect(receivedCode == nil)
+        #expect(elapsed < 2.0,
+                "A matching-state OAuth failure must finish promptly, took \(elapsed)s")
     }
 
     /// Regression for the one-shot accept loop: a stray connection that sends no
