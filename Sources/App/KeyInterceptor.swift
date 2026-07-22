@@ -34,8 +34,19 @@ final class KeyInterceptor: KeyIntercepting {
     }
 
     private let state = OSAllocatedUnfairLock(initialState: EventTapState())
+    private let keyboardFocusSnapshotProvider: @Sendable (pid_t) -> KeyboardFocusSnapshot
 
-    private init() {}
+    private init() {
+        keyboardFocusSnapshotProvider = Self.keyboardFocusSnapshot
+    }
+
+#if DEBUG
+    /// Creates an isolated interceptor with a deterministic keyboard-focus source.
+    @MainActor
+    init(testKeyboardFocusSnapshotProvider: @escaping @Sendable (pid_t) -> KeyboardFocusSnapshot) {
+        keyboardFocusSnapshotProvider = testKeyboardFocusSnapshotProvider
+    }
+#endif
 
     // MARK: - Start / Stop
 
@@ -175,7 +186,7 @@ final class KeyInterceptor: KeyIntercepting {
         // If the user is in Spotlight, a password dialog, or another app,
         // let the key pass through so it acts on that UI instead.
         if targetPid != 0 {
-            let focus = Self.keyboardFocusSnapshot(targetPid: targetPid)
+            let focus = keyboardFocusSnapshotProvider(targetPid)
             if !focus.isInTargetApp {
                 HotkeyDiagnostics.record(
                     "key_interceptor_key_passed_focus_mismatch",
@@ -241,7 +252,7 @@ final class KeyInterceptor: KeyIntercepting {
     /// Checks whether keyboard focus is currently in the specified app.
     /// Uses the system-wide AX focused element to detect focus, catching
     /// system overlays that steal focus without changing the frontmost app.
-    private struct KeyboardFocusSnapshot {
+    struct KeyboardFocusSnapshot: Sendable {
         let isInTargetApp: Bool
         let focusedPid: pid_t?
         let frontmostPid: pid_t?
@@ -337,10 +348,10 @@ extension KeyInterceptor {
     }
 
     // swiftlint:disable:next identifier_name
-    @MainActor func _testArmEnterCaptureForTests(active: Bool = true) {
+    @MainActor func _testArmEnterCaptureForTests(active: Bool = true, targetPid: pid_t = 0) {
         state.withLockUnchecked {
             $0.isActive = active
-            $0.targetPid = 0
+            $0.targetPid = targetPid
             $0.enterCaptureArmed = true
         }
     }
