@@ -807,29 +807,24 @@ struct MistralCloseCleanupTests {
 }
 
 @Suite("MistralStreamingSession — transcript log privacy")
-struct MistralTranscriptPrivacySourceTests {
+struct MistralTranscriptPrivacyTests {
     @Test
-    func transcriptLogsAreNotPublic() throws {
-        let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let repoRoot = testsDir.deletingLastPathComponent()
-        let sourceURL = repoRoot.appendingPathComponent("Sources/SpeakFlowCore/Providers/MistralProvider.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    func deltaAndSegmentTranscriptLogsArePrivate() async {
+        let logger = SpyProviderLogger()
+        let session = MistralStreamingSession(apiKey: "test-key", config: .default, logger: logger)
+        let deltaSentinel = "mistral-delta-private-sentinel"
+        let segmentSentinel = "mistral-segment-private-sentinel"
 
-        #expect(!source.contains("logger.debug(\"delta: \\(text, privacy: .public)"))
-        #expect(!source.contains("\\(segmentText, privacy: .public)"))
-    }
-}
+        await session.parseMessage(#"{"type":"transcription.text.delta","text":"\#(deltaSentinel)"}"#)
+        await session.parseMessage(#"{"type":"transcription.segment","text":"\#(segmentSentinel)","start":0,"end":1}"#)
 
-@Suite("MistralBatchProvider — transcript log privacy")
-struct MistralBatchTranscriptPrivacySourceTests {
-    @Test
-    func transcriptLogsAreNotPublic() throws {
-        let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let repoRoot = testsDir.deletingLastPathComponent()
-        let sourceURL = repoRoot.appendingPathComponent("Sources/SpeakFlowCore/Providers/MistralBatchProvider.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-
-        #expect(!source.contains("\\(result.text.prefix(80), privacy: .public)"))
-        #expect(!source.contains("\\(bodyText, privacy: .public)"))
+        let transcriptEntries = logger.capturedEntries().filter {
+            $0.message.contains(deltaSentinel) || $0.message.contains(segmentSentinel)
+        }
+        #expect(transcriptEntries.count == 2, "Delta and segment parsing must both log their transcript")
+        #expect(transcriptEntries.allSatisfy { $0.visibility == .privateHash })
+        #expect(!transcriptEntries.contains { $0.visibility == .public })
+        #expect(transcriptEntries.contains { $0.level == .debug && $0.message.contains(deltaSentinel) })
+        #expect(transcriptEntries.contains { $0.level == .info && $0.message.contains(segmentSentinel) })
     }
 }
