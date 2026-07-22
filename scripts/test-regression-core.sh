@@ -21,6 +21,7 @@ mkdir -p "$OBS_DIR"
 SKIP_BUILD="${SPEAKFLOW_REGRESSION_SKIP_BUILD:-0}"
 STRESS_RUNS="${SPEAKFLOW_REGRESSION_STRESS_RUNS:-3}"
 SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-}"
+VAD_INTEGRATION_EXPECTED=1
 
 REGRESSION_SUITES=(
   "DictationReadinessTests"
@@ -71,6 +72,63 @@ if [[ -n "$SCRATCH_PATH" ]]; then
   mkdir -p "$SCRATCH_PATH"
 fi
 
+vad_platform_is_available() {
+  [[ "$(uname -m)" == "arm64" ]]
+}
+
+run_vad_model_prefetch() {
+  if ! vad_platform_is_available; then
+    VAD_INTEGRATION_EXPECTED=0
+    echo "VAD model........ skipped (VAD requires arm64; current architecture: $(uname -m))"
+    echo "VAD integration.. will be skipped (VAD is unavailable on this platform)"
+    return 0
+  fi
+
+  local prefetch_log
+  prefetch_log="$(mktemp /tmp/speakflow-vad-prefetch-XXXXXX)"
+  local prefetch_cmd
+  prefetch_cmd=(
+    env
+    SPEAKFLOW_MUTE_SOUNDS=1
+    SPEAKFLOW_ISOLATE_TEST_AUDIO=1
+    SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE"
+    SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
+    SPEAKFLOW_PREFETCH_VAD_MODEL=1
+    SPEAKFLOW_VAD_MODEL_CACHE_ROOT=""
+    swift
+    test
+    --filter
+    VADModelPrefetchTests
+  )
+  if [[ "$SKIP_BUILD" == "1" ]]; then
+    prefetch_cmd+=(--skip-build)
+  fi
+  if [[ -n "$SCRATCH_PATH" ]]; then
+    prefetch_cmd+=(--scratch-path "$SCRATCH_PATH")
+  fi
+
+  echo "VAD model........ prefetch Silero dependency"
+  if ! "${prefetch_cmd[@]}" >"$prefetch_log" 2>&1; then
+    cat "$prefetch_log" >>"$LOG_FILE"
+    echo "FAILED: could not provision the Silero model required by VADIntegrationTests"
+    echo "See log: $LOG_FILE"
+    cat "$prefetch_log"
+    return 1
+  fi
+
+  cat "$prefetch_log" >>"$LOG_FILE"
+  if grep -Eq 'Suite "VAD model prefetch" skipped\.' "$prefetch_log"; then
+    VAD_INTEGRATION_EXPECTED=0
+    echo "VAD model........ skipped (VAD is unavailable on this platform)"
+    return 0
+  fi
+  if ! grep -Eq 'Test .* started\.' "$prefetch_log"; then
+    echo "FAILED: VADModelPrefetchTests did not execute"
+    echo "See log: $LOG_FILE"
+    return 1
+  fi
+}
+
 if [[ "$SKIP_BUILD" != "1" ]]; then
   echo "Build.............. swift build --build-tests"
   build_cmd=(swift build --build-tests)
@@ -79,6 +137,8 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   fi
   "${build_cmd[@]}" >>"$LOG_FILE" 2>&1
 fi
+
+run_vad_model_prefetch
 
 run_suite() {
   local suite="$1"
@@ -121,6 +181,21 @@ run_suite() {
     echo "FAILED: $suite matched 0 tests"
     echo "See log: $LOG_FILE"
     return 1
+  fi
+
+  if [[ "$suite" == "VADIntegrationTests" ]]; then
+    if [[ "$VAD_INTEGRATION_EXPECTED" == "0" ]]; then
+      if ! grep -Eq 'Suite "VAD Integration .* skipped\.' "$suite_log"; then
+        echo "FAILED: VADIntegrationTests should skip when VAD is unavailable"
+        echo "See log: $LOG_FILE"
+        return 1
+      fi
+      echo "VAD integration.. skipped (VAD is unavailable on this platform)"
+    elif ! grep -Eq 'Test test.* started\.' "$suite_log"; then
+      echo "FAILED: VADIntegrationTests did not execute after Silero prefetch"
+      echo "See log: $LOG_FILE"
+      return 1
+    fi
   fi
 }
 
