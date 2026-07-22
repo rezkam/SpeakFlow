@@ -1489,20 +1489,20 @@ struct SilenceAutoEndTests {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
         col.wire(c, simulateActive: true)
-        c.autoEndSilenceDuration = 0.2  // 200ms
+        c.autoEndSilenceDuration = 2.0
 
         // Speech → utterance end
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.interim(TranscriptionResult(transcript: "Hello", confidence: 0.9, words: [])))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Hello.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Wait most of the way through the original window, then speech resumes.
-        try await Task.sleep(for: .milliseconds(150))
+        // Resume with one second of scheduling margin before the original deadline.
+        try await Task.sleep(for: .seconds(1))
         c.handleEvent(.speechStarted(timestamp: 0))
-        c.handleEvent(.interim(TranscriptionResult(transcript: "World", confidence: 0.9, words: [])))
 
-        // Inside the restarted 200ms window: timer must not yet have fired.
-        try await Task.sleep(for: .milliseconds(100))
+        // Assert 500ms after the cancelled timer's original deadline. No new
+        // text event is sent, so this isolates speechStarted cancellation.
+        try await Task.sleep(for: .milliseconds(1_500))
         #expect(col.autoEndCount == 0, "Auto-end cancelled because speech resumed")
     }
 
