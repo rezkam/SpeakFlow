@@ -12,6 +12,7 @@ import Testing
 enum VADModelTestSupport {
     static let cacheRootOverrideEnvironmentKey = "SPEAKFLOW_VAD_MODEL_CACHE_ROOT"
     static let prefetchEnvironmentKey = "SPEAKFLOW_PREFETCH_VAD_MODEL"
+    static let modelTestEnvironmentKey = "SPEAKFLOW_RUN_VAD_MODEL_TESTS"
 
     static func defaultCacheRoot(
         fileManager: FileManager = .default
@@ -57,10 +58,16 @@ enum VADModelTestSupport {
     static func integrationTestsEnabled(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default,
-        isVADAvailable: Bool = VADProcessor.isAvailable
+        isVADAvailable: Bool = VADProcessor.isAvailable,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Bool {
-        platformSupportsVAD(isAvailable: isVADAvailable) && hasLocalModel(
-            cacheRoot: configuredCacheRoot(environment: environment, fileManager: fileManager)
+        guard environment[modelTestEnvironmentKey] == "1",
+              platformSupportsVAD(isAvailable: isVADAvailable) else {
+            return false
+        }
+        return hasLocalModel(
+            cacheRoot: configuredCacheRoot(environment: environment, fileManager: fileManager),
+            fileExists: fileExists
         )
     }
 
@@ -68,8 +75,7 @@ enum VADModelTestSupport {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         isVADAvailable: Bool = VADProcessor.isAvailable
     ) -> Bool {
-        guard let value = environment[prefetchEnvironmentKey], !value.isEmpty else { return false }
-        return platformSupportsVAD(isAvailable: isVADAvailable)
+        environment[prefetchEnvironmentKey] == "1" && platformSupportsVAD(isAvailable: isVADAvailable)
     }
 }
 
@@ -99,21 +105,71 @@ struct VADModelCacheLocationTests {
         #expect(configured.path == override)
     }
 
-    @Test func platformGateCanRepresentUnsupportedArchitectures() {
+    @Test func modelTestsRequireExplicitOptInEvenWhenCacheIsPresent() {
+        let root = URL(fileURLWithPath: "/cache-root", isDirectory: true)
+        let modelPath = VADModelTestSupport.modelURL(cacheRoot: root).path
+        let cacheEnvironment = [VADModelTestSupport.cacheRootOverrideEnvironmentKey: root.path]
+
+        #expect(!VADModelTestSupport.integrationTestsEnabled(
+            environment: cacheEnvironment,
+            isVADAvailable: true,
+            fileExists: { $0 == modelPath }
+        ))
+        #expect(VADModelTestSupport.integrationTestsEnabled(
+            environment: cacheEnvironment.merging(
+                [VADModelTestSupport.modelTestEnvironmentKey: "1"],
+                uniquingKeysWith: { _, new in new }
+            ),
+            isVADAvailable: true,
+            fileExists: { $0 == modelPath }
+        ))
+    }
+
+    @Test func falseLikeModelTestOptInsRemainDisabled() {
+        let root = URL(fileURLWithPath: "/cache-root", isDirectory: true)
+        let modelPath = VADModelTestSupport.modelURL(cacheRoot: root).path
+        for value in ["0", "false"] {
+            #expect(!VADModelTestSupport.integrationTestsEnabled(
+                environment: [
+                    VADModelTestSupport.cacheRootOverrideEnvironmentKey: root.path,
+                    VADModelTestSupport.modelTestEnvironmentKey: value
+                ],
+                isVADAvailable: true,
+                fileExists: { $0 == modelPath }
+            ))
+        }
+    }
+
+    @Test func unsupportedPlatformsDisableModelAndPrefetchTests() {
+        let root = URL(fileURLWithPath: "/cache-root", isDirectory: true)
+        let modelPath = VADModelTestSupport.modelURL(cacheRoot: root).path
         #expect(VADModelTestSupport.platformSupportsVAD(isAvailable: true))
         #expect(!VADModelTestSupport.platformSupportsVAD(isAvailable: false))
-        #expect(VADModelTestSupport.prefetchTestsEnabled(
-            environment: [VADModelTestSupport.prefetchEnvironmentKey: "1"],
-            isVADAvailable: true
+        #expect(!VADModelTestSupport.integrationTestsEnabled(
+            environment: [
+                VADModelTestSupport.cacheRootOverrideEnvironmentKey: root.path,
+                VADModelTestSupport.modelTestEnvironmentKey: "1"
+            ],
+            isVADAvailable: false,
+            fileExists: { $0 == modelPath }
         ))
         #expect(!VADModelTestSupport.prefetchTestsEnabled(
             environment: [VADModelTestSupport.prefetchEnvironmentKey: "1"],
             isVADAvailable: false
         ))
-        #expect(!VADModelTestSupport.integrationTestsEnabled(
-            environment: [VADModelTestSupport.cacheRootOverrideEnvironmentKey: "/cache-root"],
-            isVADAvailable: false
+    }
+
+    @Test func prefetchRequiresExactOptInValue() {
+        #expect(VADModelTestSupport.prefetchTestsEnabled(
+            environment: [VADModelTestSupport.prefetchEnvironmentKey: "1"],
+            isVADAvailable: true
         ))
+        for value in ["", "0", "false"] {
+            #expect(!VADModelTestSupport.prefetchTestsEnabled(
+                environment: [VADModelTestSupport.prefetchEnvironmentKey: value],
+                isVADAvailable: true
+            ))
+        }
     }
 }
 

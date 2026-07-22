@@ -43,6 +43,7 @@ REGRESSION_SUITES=(
   "ThinkingPauseDetectorTests"
   "VADStateMachineTests"
   "VADIntegrationTests"
+  "VADModelCacheTests"
   "VADTests"
   "LiveStreamingKeepAliveTests"
   "WebSocketSessionContractTests"
@@ -151,6 +152,11 @@ run_suite() {
     SPEAKFLOW_ISOLATE_TEST_AUDIO=1
     SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE"
     SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
+  )
+  if [[ "$suite" == "VADIntegrationTests" || "$suite" == "VADModelCacheTests" ]]; then
+    test_cmd+=(SPEAKFLOW_RUN_VAD_MODEL_TESTS=1)
+  fi
+  test_cmd+=(
     swift
     test
     --filter
@@ -193,6 +199,21 @@ run_suite() {
       echo "VAD integration.. skipped (VAD is unavailable on this platform)"
     elif ! grep -Eq 'Test test.* started\.' "$suite_log"; then
       echo "FAILED: VADIntegrationTests did not execute after Silero prefetch"
+      echo "See log: $LOG_FILE"
+      return 1
+    fi
+  fi
+
+  if [[ "$suite" == "VADModelCacheTests" ]]; then
+    if [[ "$VAD_INTEGRATION_EXPECTED" == "0" ]]; then
+      if ! grep -Eq 'Test testWarmUpIsIdempotent\(\) skipped\.' "$suite_log"; then
+        echo "FAILED: VADModelCacheTests model-dependent tests should skip when VAD is unavailable"
+        echo "See log: $LOG_FILE"
+        return 1
+      fi
+      echo "VAD model cache... model-dependent tests skipped (VAD is unavailable on this platform)"
+    elif ! grep -Eq 'Test testWarmUpIsIdempotent\(\) started\.' "$suite_log"; then
+      echo "FAILED: VADModelCacheTests model-dependent tests did not execute after Silero prefetch"
       echo "See log: $LOG_FILE"
       return 1
     fi
