@@ -183,6 +183,21 @@ run_suite() {
   cat "$suite_log" >>"$LOG_FILE"
   local count
   count="$(grep -Eo 'Test run with [0-9]+ tests?' "$suite_log" | tail -n1 | awk '{print $4}')"
+
+  # An unavailable VAD platform intentionally disables this entire suite, so
+  # Swift Testing reports a verified suite skip with zero executed tests. Handle
+  # that explicit contract before the generic guard that rejects accidental
+  # zero-test filters.
+  if [[ "$suite" == "VADIntegrationTests" && "$VAD_INTEGRATION_EXPECTED" == "0" ]]; then
+    if ! grep -Eq 'Suite "VAD Integration .* skipped\.' "$suite_log"; then
+      echo "FAILED: VADIntegrationTests should skip when VAD is unavailable"
+      echo "See log: $LOG_FILE"
+      return 1
+    fi
+    echo "VAD integration.. skipped (VAD is unavailable on this platform)"
+    return 0
+  fi
+
   if [[ -z "$count" || "$count" == "0" ]]; then
     echo "FAILED: $suite matched 0 tests"
     echo "See log: $LOG_FILE"
@@ -190,14 +205,7 @@ run_suite() {
   fi
 
   if [[ "$suite" == "VADIntegrationTests" ]]; then
-    if [[ "$VAD_INTEGRATION_EXPECTED" == "0" ]]; then
-      if ! grep -Eq 'Suite "VAD Integration .* skipped\.' "$suite_log"; then
-        echo "FAILED: VADIntegrationTests should skip when VAD is unavailable"
-        echo "See log: $LOG_FILE"
-        return 1
-      fi
-      echo "VAD integration.. skipped (VAD is unavailable on this platform)"
-    elif ! grep -Eq 'Test test.* started\.' "$suite_log"; then
+    if ! grep -Eq 'Test test.* started\.' "$suite_log"; then
       echo "FAILED: VADIntegrationTests did not execute after Silero prefetch"
       echo "See log: $LOG_FILE"
       return 1
