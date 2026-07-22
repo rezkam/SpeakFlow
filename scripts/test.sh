@@ -52,7 +52,7 @@ run_step "Swift tests......" env \
     SPEAKFLOW_ISOLATE_TEST_AUDIO=1 \
     SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE" \
     SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR" \
-    swift test
+    swift test --no-parallel
 
 if [ "${SPEAKFLOW_TEST_PRINT_HEADER:-1}" = "1" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

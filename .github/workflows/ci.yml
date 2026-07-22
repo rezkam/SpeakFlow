@@ -60,11 +60,13 @@ jobs:
           SPEAKFLOW_ISOLATE_TEST_AUDIO: '1'
         run: SPEAKFLOW_REGRESSION_SKIP_BUILD=1 ./scripts/test-regression-core.sh
 
+      # Full-suite tests share process-wide runtime resources, so serialize them to match
+      # the strict local check. Focused and regression filters still provide isolated coverage.
       - name: Test
         env:
           SPEAKFLOW_MUTE_SOUNDS: '1'
           SPEAKFLOW_ISOLATE_TEST_AUDIO: '1'
-        run: swift test --skip-build
+        run: swift test --skip-build --no-parallel
 
       - name: Build release
         run: swift build -c release --product SpeakFlow
