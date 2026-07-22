@@ -13,6 +13,10 @@
 
 * **Added OAuth denial and regression-script contracts** - Tests verify prompt handling of matching-state provider errors, continued acceptance after a wrong-state callback, and both accepted and rejected zero-test VAD outcomes.
 
+### Release Tooling
+
+* **Added a local production-build command** - `make local` builds, signs, validates, and installs the current production version without notarizing or publishing it.
+
 ## 0.8.0 — macOS 26, Usage Dashboard & Dictation Reliability
 
 ### Breaking Changes

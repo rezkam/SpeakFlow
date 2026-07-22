@@ -1,4 +1,4 @@
-.PHONY: build test test-regression-core test-tsan check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise test-live-e2e-all test-live-mistral coverage coverage-html clean rc release release-yes help
+.PHONY: build test test-regression-core test-tsan check lint test-live-e2e test-live-e2e-autoend test-live-e2e-chunks test-live-e2e-accuracy test-live-e2e-noise test-live-e2e-all test-live-mistral coverage coverage-html clean rc local release release-yes help
 
 # Strict check: build + tests, concise output, full log saved
 check:
@@ -78,6 +78,10 @@ lint:
 rc:
 	@./scripts/build-release.sh rc
 
+# Local production build: compile, sign, validate, and install without publishing
+local:
+	@./scripts/build-release.sh local
+
 # Production release: compile, sign, notarize, publish to GitHub
 release:
 	@./scripts/build-release.sh release
@@ -105,5 +109,6 @@ help:
 	@echo "  make lint                - Run SwiftLint"
 	@echo "  make clean               - Clean build artifacts"
 	@echo "  make rc                  - Build + sign + install locally (RC, nothing uploaded)"
+	@echo "  make local               - Build + sign + install production version locally (no publishing)"
 	@echo "  make release             - Build + sign + notarize + publish to GitHub"
 	@echo "  make release-yes         - Same as release, skip all confirmations"
