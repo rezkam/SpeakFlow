@@ -8,7 +8,8 @@ import Testing
 @Suite("VADModelCache — warm-up and caching", .serialized)
 struct VADModelCacheTests {
 
-    @Test func testWarmUpIsIdempotent() async {
+    @Test(.enabled(if: VADModelTestSupport.integrationTestsEnabled()))
+    func testWarmUpIsIdempotent() async {
         // Calling warmUp multiple times must not crash or create duplicate tasks.
         // We can't observe private state, but we verify no throwing/crash.
         await VADModelCache.shared.warmUp()
@@ -17,9 +18,9 @@ struct VADModelCacheTests {
         // If we reach here without crash, idempotency holds.
     }
 
-    @Test func testGetManagerSucceedsOnAppleSilicon() async throws {
+    @Test(.enabled(if: VADModelTestSupport.integrationTestsEnabled()))
+    func testGetManagerSucceedsOnAppleSilicon() async throws {
         // Verify that getManager can actually create/return a manager on supported platforms
-        guard VADProcessor.isAvailable else { return }
 
         // This should succeed without throwing
         let manager: VadManager
@@ -36,11 +37,11 @@ struct VADModelCacheTests {
         #expect(type(of: manager) == VadManager.self, "getManager must return a VadManager instance")
     }
 
-    @Test func testGetManagerReturnsSameInstance() async throws {
+    @Test(.enabled(if: VADModelTestSupport.integrationTestsEnabled()))
+    func testGetManagerReturnsSameInstance() async throws {
         // Two sequential calls with the same threshold must return the identical
         // cached instance. Uses a private cache to avoid interference from other
         // suites that touch VADModelCache.shared with different thresholds.
-        guard VADProcessor.isAvailable else { return }
         let cache = VADModelCache()
         let m1: VadManager
         let m2: VadManager

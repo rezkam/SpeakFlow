@@ -12,9 +12,10 @@ import Testing
 //   - Feature 2: Exponential volume smoothing
 //   - Feature 3: Volume gate suppresses low-volume speechStart events
 //
-// **Requires Apple Silicon** — Silero runs on CoreML, which requires Apple
-// Neural Engine. Tests guard with `VADProcessor.isAvailable` (which checks
-// `PlatformSupport.isAppleSilicon`) and skip gracefully on Intel.
+// **Requires Apple Silicon and a local Silero model** — Silero runs on CoreML,
+// which requires Apple Neural Engine. The suite is disabled with Swift Testing's
+// `.enabled(if:)` trait unless VAD is available and the FluidAudio cache contains
+// Silero, so ordinary offline runs skip rather than trigger a download.
 //
 // **Why use synthetic audio (not real recordings)?**
 // Real recordings depend on microphone hardware, background environment, and
@@ -54,7 +55,7 @@ private func sineChunk(frequency: Float = 300.0, amplitude: Float = 0.1, samples
 
 // MARK: - Integration Test Suite
 
-@Suite("VAD Integration — Volume Gate + Smoothing + State Reset", .serialized)
+@Suite("VAD Integration — Volume Gate + Smoothing + State Reset", .serialized, .enabled(if: VADModelTestSupport.integrationTestsEnabled()))
 struct VADIntegrationTests {
 
     // MARK: Feature 1: Periodic State Reset
@@ -70,8 +71,6 @@ struct VADIntegrationTests {
     /// FluidAudio handles chunking internally. 50ms batches match what
     /// StreamingRecorder's processing timer produces (withTimeInterval: 0.05).
     @Test func testPeriodicStateResetDoesNotCrash() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -111,8 +110,6 @@ struct VADIntegrationTests {
     /// state reset, the volume gate would incorrectly block speech at the
     /// start of each 5-second window.
     @Test func testPeriodicStateResetPreservesSmoothedVolume() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -150,8 +147,6 @@ struct VADIntegrationTests {
     ///
     /// This verifies that the smoothing correctly attenuates silence to near-zero.
     @Test func testSmoothedVolumeNearZeroOnSilence() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -184,8 +179,6 @@ struct VADIntegrationTests {
     /// This verifies that sustained speech (not just transients) can move
     /// the smoothed volume above the gate threshold.
     @Test func testSmoothedVolumeConvergesOnLoudInput() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -218,8 +211,6 @@ struct VADIntegrationTests {
     /// This ensures the diagnostic field is populated so callers can log it
     /// or use it in future metrics without calling a separate accessor.
     @Test func testVADResultIncludesSmoothedVolume() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -267,8 +258,6 @@ struct VADIntegrationTests {
     /// amplitude=0.002, uniform distribution → RMS ≈ amplitude / sqrt(3) ≈ 0.0012
     /// This is below minVolumeForSpeech=0.008 and will stay below after smoothing.
     @Test func testVolumeGateSuppressesVeryQuietNoise() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -304,8 +293,6 @@ struct VADIntegrationTests {
     /// fire (Silero is nondeterministic on pure noise), but we assert that
     /// the system doesn't crash and still produces valid results.
     @Test func testDisabledVolumeGateDoesNotCrash() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -341,8 +328,6 @@ struct VADIntegrationTests {
     /// We interpret this as: the gate determines whether to ENTER speaking state,
     /// not whether to EXIT it. Once speaking, we trust Silero's `speechEnd`.
     @Test func testVolumeGateDoesNotSuppressSpeechEnd() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         // Use a very high minVolumeForSpeech so that our test audio cannot pass it.
         // If the gate incorrectly fired on speechEnd, it would suppress the end event.
         // We test by checking the actor's `isSpeaking` state directly rather than
@@ -395,8 +380,6 @@ struct VADIntegrationTests {
     /// This is the most important integration test — it ensures the combined
     /// system (state reset + smoothing + gate) doesn't regress or crash.
     @Test func testAllFeaturesEnabledWithSilence() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -429,8 +412,6 @@ struct VADIntegrationTests {
     /// Smoke test: all three features enabled with realistic quiet background noise.
     /// Must NOT produce speech events.
     @Test func testAllFeaturesEnabledWithQuietNoise() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let config = VADConfiguration(
             threshold: 0.15,
             minSilenceAfterSpeech: 3.0,
@@ -462,8 +443,6 @@ struct VADIntegrationTests {
 
     /// `resetSession()` must reset smoothedVolume to 0 so each session starts clean.
     @Test func testResetSessionClearsSmoothedVolume() async throws {
-        guard VADProcessor.isAvailable else { return }
-
         let vad = VADProcessor(config: .default)
         try await vad.initialize()
 
