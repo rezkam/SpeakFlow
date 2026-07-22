@@ -1510,20 +1510,21 @@ struct SilenceAutoEndTests {
         let c = LiveStreamingController()
         let col = TextUpdateCollector()
         col.wire(c, simulateActive: true)
-        c.autoEndSilenceDuration = 0.2
+        c.autoEndSilenceDuration = 2.0
 
         c.handleEvent(.speechStarted(timestamp: 0))
         c.handleEvent(.interim(TranscriptionResult(transcript: "Test", confidence: 0.9, words: [])))
         c.handleEvent(.finalResult(TranscriptionResult(transcript: "Test.", confidence: 0.99, words: [], speechFinal: true)))
 
-        // Late-arriving interim must restart the countdown from full duration.
-        try await Task.sleep(for: .milliseconds(150))
+        // Leave one second of scheduling margin before the original deadline.
+        try await Task.sleep(for: .seconds(1))
         c.handleEvent(.interim(TranscriptionResult(transcript: "More", confidence: 0.9, words: [])))
 
-        // 100ms after the restart — well inside the 200ms window — timer must not yet have fired.
-        try await Task.sleep(for: .milliseconds(100))
+        // This is 2.5s after the original timer began, but only 1.5s after the
+        // interim. It is past the old deadline with 500ms to spare before the new one.
+        try await Task.sleep(for: .milliseconds(1_500))
         #expect(col.autoEndCount == 0,
-                "Interim must restart the silence countdown so the original 200ms deadline is overridden")
+                "Interim must restart the silence countdown so the original two-second deadline is overridden")
     }
 
     /// Spec: the configured `autoEndSilenceDuration` is the *total* wait between
