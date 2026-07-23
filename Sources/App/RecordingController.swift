@@ -373,203 +373,6 @@ final class RecordingController {
         }
     }
 
-    // MARK: - Streaming Recording
-
-    func startStreamingRecording(provider: any StreamingTranscriptionProvider) {
-        let config = provider.buildSessionConfig()
-        observabilityEvent(
-            "streaming_recording_starting",
-            metadata: [
-                "providerId": provider.id,
-                "sampleRate": String(config.sampleRate),
-                "encoding": config.encoding.rawValue
-            ]
-        )
-
-        // Unit tests set testMode = .live to skip permission checks while still
-        // exercising the real code paths. Passing skipAudioEngineForTesting = true
-        // ensures start() never touches the real microphone, installs audio taps,
-        // or consumes mic permissions — no host-OS side-effects from tests.
-        let controller = LiveStreamingController(skipAudioEngineForTesting: testMode == .live)
-        self.liveStreamingController = controller
-        controller.sessionId = currentMetricsSessionId
-        self.streamingSegmentStart = ContinuousClock.now
-        controller.onAudioCaptureStarted = { [weak self, weak controller] in
-            guard let self,
-                  self.isRecording,
-                  self.liveStreamingController === controller else { return }
-            self.signalStreamingCaptureStarted(provider: provider)
-        }
-
-        controller.onTextUpdate = { [weak self] textToType, replacingChars, isFinal, fullText in
-            // Accept text updates while recording AND while processing final.
-            // The processing-final window is when the streaming server delivers
-            // trailing finals after the stop-finalize signal — these must be typed.
-            guard let self, self.isRecording || self.isProcessingFinal else { return }
-
-            let textForInsertion: String
-            if !textToType.isEmpty {
-                textForInsertion = isFinal ? textToType + " " : textToType
-            } else if isFinal && !fullText.isEmpty {
-                textForInsertion = " "
-            } else {
-                textForInsertion = ""
-            }
-            self.textInserter.replaceTail(replacingChars: replacingChars, with: textForInsertion)
-            self.observabilityEvent(
-                "streaming_text_update",
-                level: .debug,
-                metadata: [
-                    "isFinal": isFinal ? "true" : "false",
-                    "replacingChars": String(replacingChars),
-                    "fullTextChars": String(fullText.count),
-                    "typedTextFingerprint": ObservabilityFingerprint.sha256(textForInsertion)
-                ].merging(
-                    self.settings.observabilityCaptureTextPayloads
-                        ? ["typedText": textForInsertion, "fullText": fullText]
-                        : [:],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-
-            if isFinal && !fullText.isEmpty {
-                if !self.fullTranscript.isEmpty { self.fullTranscript += " " }
-                self.fullTranscript += fullText
-                self.recordMetricsWords(fullText)
-                let segmentSeconds = self.consumeStreamingSegmentSeconds()
-                Statistics.shared.recordTranscription(
-                    text: fullText,
-                    audioDurationSeconds: segmentSeconds,
-                    providerId: provider.id,
-                    language: self.languageForStats(providerId: provider.id)
-                )
-            }
-        }
-
-        // Auto-end for streaming mode (user-configurable, enabled by default).
-        if settings.streamingAutoEndEnabled {
-            controller.autoEndSilenceDuration = settings.autoEndSilenceDuration
-        } else {
-            controller.autoEndSilenceDuration = 0
-        }
-        controller.keepAliveEnabled = settings.streamingKeepAliveEnabled
-        controller.keepAliveInterval = settings.streamingKeepAliveInterval
-        controller.reconnectEnabled = settings.streamingReconnectEnabled
-        controller.minimumFinalWordCount = settings.streamingMinimumFinalWordCount
-        controller.onAutoEnd = { [weak self] in
-            self?.observabilityEvent("streaming_auto_end_triggered")
-            Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
-        }
-        controller.onUtteranceEnd = { [weak self] in
-            Logger.audio.info("Streaming: utterance end")
-            self?.observabilityEvent("streaming_utterance_end", level: .debug)
-        }
-        controller.onSpeechStarted = { [weak self] in
-            Logger.audio.info("Streaming: speech started")
-            self?.observabilityEvent("streaming_speech_started", level: .debug)
-        }
-        controller.onKeepAliveSent = { [weak self] in
-            guard let self, let sessionId = self.currentMetricsSessionId else { return }
-            Task {
-                await SessionMetricsStore.shared.incrementKeepAlive(sessionId: sessionId)
-            }
-            self.observabilityEvent("streaming_keep_alive_sent", level: .debug, sessionId: sessionId)
-        }
-        controller.onReconnected = { [weak self] in
-            guard let self, let sessionId = self.currentMetricsSessionId else { return }
-            Task {
-                await SessionMetricsStore.shared.incrementReconnection(sessionId: sessionId)
-            }
-            self.observabilityEvent("streaming_reconnected", level: .warning, sessionId: sessionId)
-        }
-        controller.onError = { [weak self] error in
-            Logger.audio.error("Streaming error: \(error.localizedDescription)")
-            guard let self else { return }
-            self.latestStreamingError = error
-            self.observabilityEvent(
-                "streaming_error",
-                level: .error,
-                metadata: ["error": error.localizedDescription]
-            )
-            self.presentRecordingError(error, providerId: provider.id)
-            Task { @MainActor [weak self] in self?.stopRecording(reason: .autoEnd) }
-        }
-        controller.onSessionClosed = { [weak self] in
-            Task { @MainActor in
-                guard let self, self.isRecording else { return }
-                self.observabilityEvent("streaming_session_closed")
-                let hadText = !self.fullTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                if hadText {
-                    self.stopRecording(reason: .autoEnd)
-                } else {
-                    // Early session close with no transcript (observed with Mistral realtime
-                    // in some environments) should not silently behave like successful auto-end.
-                    // Stop recording and surface explicit guidance.
-                    self.stopRecording(reason: .autoEnd)
-                    self.presentRecordingError(
-                        message: "\(provider.displayName) session ended before audio was transcribed. "
-                            + "Please try again or switch provider."
-                    )
-                    self.observabilityEvent(
-                        "streaming_session_closed_without_text",
-                        level: .warning
-                    )
-                }
-            }
-        }
-
-        Task { @MainActor in
-            let started = await controller.start(provider: provider, config: config)
-
-            // Stop/cancel can detach this controller while the initial provider
-            // handshake is still in flight. Its late result must not surface an
-            // error, alter UI state, or count usage for a finished recording.
-            guard self.liveStreamingController === controller, self.isRecording else { return }
-
-            if !started {
-                if let error = self.latestStreamingError {
-                    self.presentRecordingError(error, providerId: provider.id)
-                } else {
-                    self.presentRecordingError(
-                        message: "Transcription failed, \(provider.displayName) streaming could not start. Check your connection and Providers settings."
-                    )
-                }
-                self.latestStreamingError = nil
-                isRecording = false; isProcessingFinal = false
-                liveStreamingController = nil
-                self.lifecycleCoordinator.cancel()
-                self.playSoundEffect(.error)
-                self.observabilityEvent("streaming_recording_start_failed", level: .error)
-                self.endMetricsSession(reason: "START_FAILED")
-            } else {
-                // Provider readiness follows the local capture cue. Startup audio was
-                // buffered while the WebSocket connected, so the user can speak as
-                // soon as capture starts without losing the first words.
-                self.observabilityEvent(
-                    "recording_started",
-                    metadata: [
-                        "providerId": provider.id,
-                        "providerMode": provider.mode.rawValue,
-                        "targetPid": String(self.textInserter.targetPid)
-                    ]
-                )
-
-                // Streaming opens exactly one provider WebSocket per recording,
-                // so the API-call count grows by one and the recording count
-                // by one.
-                Statistics.shared.recordApiCall()
-                Statistics.shared.recordRecording(
-                    providerId: provider.id,
-                    language: self.languageForStats(providerId: provider.id)
-                )
-                self.observabilityEvent(
-                    "streaming_recording_started",
-                    metadata: ["providerId": provider.id]
-                )
-            }
-        }
-    }
-
     // MARK: - Stop / Cancel
 
     enum StopReason: String {
@@ -978,6 +781,205 @@ final class RecordingController {
             targetPidProvider: { [weak self] in self?.textInserter.targetPid ?? 0 }
         )
         lifecycleCoordinator.setComponents([keyComponent])
+    }
+}
+
+// MARK: - Streaming Recording
+
+extension RecordingController {
+    func startStreamingRecording(provider: any StreamingTranscriptionProvider) {
+        let config = provider.buildSessionConfig()
+        observabilityEvent(
+            "streaming_recording_starting",
+            metadata: [
+                "providerId": provider.id,
+                "sampleRate": String(config.sampleRate),
+                "encoding": config.encoding.rawValue
+            ]
+        )
+
+        // Unit tests set testMode = .live to skip permission checks while still
+        // exercising the real code paths. Passing skipAudioEngineForTesting = true
+        // ensures start() never touches the real microphone, installs audio taps,
+        // or consumes mic permissions — no host-OS side-effects from tests.
+        let controller = LiveStreamingController(skipAudioEngineForTesting: testMode == .live)
+        self.liveStreamingController = controller
+        controller.sessionId = currentMetricsSessionId
+        self.streamingSegmentStart = ContinuousClock.now
+        controller.onAudioCaptureStarted = { [weak self, weak controller] in
+            guard let self,
+                  self.isRecording,
+                  self.liveStreamingController === controller else { return }
+            self.signalStreamingCaptureStarted(provider: provider)
+        }
+
+        controller.onTextUpdate = { [weak self] textToType, replacingChars, isFinal, fullText in
+            // Accept text updates while recording AND while processing final.
+            // The processing-final window is when the streaming server delivers
+            // trailing finals after the stop-finalize signal — these must be typed.
+            guard let self, self.isRecording || self.isProcessingFinal else { return }
+
+            let textForInsertion: String
+            if !textToType.isEmpty {
+                textForInsertion = isFinal ? textToType + " " : textToType
+            } else if isFinal && !fullText.isEmpty {
+                textForInsertion = " "
+            } else {
+                textForInsertion = ""
+            }
+            self.textInserter.replaceTail(replacingChars: replacingChars, with: textForInsertion)
+            self.observabilityEvent(
+                "streaming_text_update",
+                level: .debug,
+                metadata: [
+                    "isFinal": isFinal ? "true" : "false",
+                    "replacingChars": String(replacingChars),
+                    "fullTextChars": String(fullText.count),
+                    "typedTextFingerprint": ObservabilityFingerprint.sha256(textForInsertion)
+                ].merging(
+                    self.settings.observabilityCaptureTextPayloads
+                        ? ["typedText": textForInsertion, "fullText": fullText]
+                        : [:],
+                    uniquingKeysWith: { _, new in new }
+                )
+            )
+
+            if isFinal && !fullText.isEmpty {
+                if !self.fullTranscript.isEmpty { self.fullTranscript += " " }
+                self.fullTranscript += fullText
+                self.recordMetricsWords(fullText)
+                let segmentSeconds = self.consumeStreamingSegmentSeconds()
+                Statistics.shared.recordTranscription(
+                    text: fullText,
+                    audioDurationSeconds: segmentSeconds,
+                    providerId: provider.id,
+                    language: self.languageForStats(providerId: provider.id)
+                )
+            }
+        }
+
+        // Auto-end for streaming mode (user-configurable, enabled by default).
+        if settings.streamingAutoEndEnabled {
+            controller.autoEndSilenceDuration = settings.autoEndSilenceDuration
+        } else {
+            controller.autoEndSilenceDuration = 0
+        }
+        controller.keepAliveEnabled = settings.streamingKeepAliveEnabled
+        controller.keepAliveInterval = settings.streamingKeepAliveInterval
+        controller.reconnectEnabled = settings.streamingReconnectEnabled
+        controller.minimumFinalWordCount = settings.streamingMinimumFinalWordCount
+        controller.onAutoEnd = { [weak self] in
+            self?.observabilityEvent("streaming_auto_end_triggered")
+            Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
+        }
+        controller.onUtteranceEnd = { [weak self] in
+            Logger.audio.info("Streaming: utterance end")
+            self?.observabilityEvent("streaming_utterance_end", level: .debug)
+        }
+        controller.onSpeechStarted = { [weak self] in
+            Logger.audio.info("Streaming: speech started")
+            self?.observabilityEvent("streaming_speech_started", level: .debug)
+        }
+        controller.onKeepAliveSent = { [weak self] in
+            guard let self, let sessionId = self.currentMetricsSessionId else { return }
+            Task {
+                await SessionMetricsStore.shared.incrementKeepAlive(sessionId: sessionId)
+            }
+            self.observabilityEvent("streaming_keep_alive_sent", level: .debug, sessionId: sessionId)
+        }
+        controller.onReconnected = { [weak self] in
+            guard let self, let sessionId = self.currentMetricsSessionId else { return }
+            Task {
+                await SessionMetricsStore.shared.incrementReconnection(sessionId: sessionId)
+            }
+            self.observabilityEvent("streaming_reconnected", level: .warning, sessionId: sessionId)
+        }
+        controller.onError = { [weak self] error in
+            Logger.audio.error("Streaming error: \(error.localizedDescription)")
+            guard let self else { return }
+            self.latestStreamingError = error
+            self.observabilityEvent(
+                "streaming_error",
+                level: .error,
+                metadata: ["error": error.localizedDescription]
+            )
+            self.presentRecordingError(error, providerId: provider.id)
+            Task { @MainActor [weak self] in self?.stopRecording(reason: .autoEnd) }
+        }
+        controller.onSessionClosed = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                self.observabilityEvent("streaming_session_closed")
+                let hadText = !self.fullTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if hadText {
+                    self.stopRecording(reason: .autoEnd)
+                } else {
+                    // Early session close with no transcript (observed with Mistral realtime
+                    // in some environments) should not silently behave like successful auto-end.
+                    // Stop recording and surface explicit guidance.
+                    self.stopRecording(reason: .autoEnd)
+                    self.presentRecordingError(
+                        message: "\(provider.displayName) session ended before audio was transcribed. "
+                            + "Please try again or switch provider."
+                    )
+                    self.observabilityEvent(
+                        "streaming_session_closed_without_text",
+                        level: .warning
+                    )
+                }
+            }
+        }
+
+        Task { @MainActor in
+            let started = await controller.start(provider: provider, config: config)
+
+            // Stop/cancel can detach this controller while the initial provider
+            // handshake is still in flight. Its late result must not surface an
+            // error, alter UI state, or count usage for a finished recording.
+            guard self.liveStreamingController === controller, self.isRecording else { return }
+
+            if !started {
+                if let error = self.latestStreamingError {
+                    self.presentRecordingError(error, providerId: provider.id)
+                } else {
+                    self.presentRecordingError(
+                        message: "Transcription failed, \(provider.displayName) streaming could not start. Check your connection and Providers settings."
+                    )
+                }
+                self.latestStreamingError = nil
+                isRecording = false; isProcessingFinal = false
+                liveStreamingController = nil
+                self.lifecycleCoordinator.cancel()
+                self.playSoundEffect(.error)
+                self.observabilityEvent("streaming_recording_start_failed", level: .error)
+                self.endMetricsSession(reason: "START_FAILED")
+            } else {
+                // Provider readiness follows the local capture cue. Startup audio was
+                // buffered while the WebSocket connected, so the user can speak as
+                // soon as capture starts without losing the first words.
+                self.observabilityEvent(
+                    "recording_started",
+                    metadata: [
+                        "providerId": provider.id,
+                        "providerMode": provider.mode.rawValue,
+                        "targetPid": String(self.textInserter.targetPid)
+                    ]
+                )
+
+                // Streaming opens exactly one provider WebSocket per recording,
+                // so the API-call count grows by one and the recording count
+                // by one.
+                Statistics.shared.recordApiCall()
+                Statistics.shared.recordRecording(
+                    providerId: provider.id,
+                    language: self.languageForStats(providerId: provider.id)
+                )
+                self.observabilityEvent(
+                    "streaming_recording_started",
+                    metadata: ["providerId": provider.id]
+                )
+            }
+        }
     }
 }
 
