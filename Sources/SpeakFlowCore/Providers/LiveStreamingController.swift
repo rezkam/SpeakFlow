@@ -42,20 +42,174 @@ import OSLog
 // - `keepAliveInterval: TimeInterval` — how often to send KeepAlive (default 8s)
 // - `reconnectEnabled: Bool` — whether to attempt reconnection on unexpected close
 
-/// Manages a live audio streaming session: captures mic audio and streams it
-/// directly to a streaming transcription provider (e.g. Deepgram).
-///
-/// **No local VAD, no silence detection, no chunking.**
-/// All speech detection and endpointing is handled server-side by the provider.
-///
-/// ## Reliability features
-///
-/// - **keepAlive timer:** Sends periodic KeepAlive messages to prevent Deepgram's
-///   server-side idle timeout (~10-12s) from closing the WebSocket during user pauses.
-///   Controlled by `keepAliveEnabled` and `keepAliveInterval`.
-///
-/// - **Automatic reconnection:** On unexpected WebSocket drop, attempts to reopen the
-///   session once before surfacing the error. Controlled by `reconnectEnabled`.
+/// Thread-safe handoff between the real-time audio callback and an active
+/// streaming session. It buffers startup and reconnect audio until a session
+/// is ready, without accessing `@MainActor` controller state from the callback.
+private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
+    private struct State {
+        var session: StreamingSession?
+        var active: Bool = false
+        var pendingAudio: ArraySlice<Data> = []
+        var pendingBytes = 0
+        var droppedChunks = 0
+        var isShutdown = false
+    }
+
+    private static let maxBufferedAudioBytes = 1_000_000
+    private let logger = Logger(subsystem: "SpeakFlow", category: "LiveStreamingAudio")
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let sendSignalContinuation: AsyncStream<Void>.Continuation
+    private let sendSignalStream: AsyncStream<Void>
+    private var senderTask: Task<Void, Never>?
+#if DEBUG
+    private var deinitHandler: (@Sendable () -> Void)?
+#endif
+
+    init() {
+        var continuation: AsyncStream<Void>.Continuation!
+        self.sendSignalStream = AsyncStream<Void> { c in
+            continuation = c
+        }
+        self.sendSignalContinuation = continuation
+        self.senderTask = Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.runSenderLoop()
+        }
+    }
+
+    deinit {
+        shutdown()
+#if DEBUG
+        deinitHandler?()
+#endif
+    }
+
+#if DEBUG
+    func setDeinitHandler(_ handler: @escaping @Sendable () -> Void) {
+        deinitHandler = handler
+    }
+#endif
+
+    var isActive: Bool {
+        state.withLock { $0.active }
+    }
+
+    var pendingChunkCount: Int {
+        state.withLock { $0.pendingAudio.count }
+    }
+
+    var droppedChunkCount: Int {
+        state.withLock { $0.droppedChunks }
+    }
+
+    var isShutdown: Bool {
+        state.withLock { $0.isShutdown }
+    }
+
+    func set(session: StreamingSession?, active: Bool) {
+        let shouldSignal = state.withLock { state in
+            guard !state.isShutdown else { return false }
+            state.session = session
+            state.active = active
+            return active && session != nil && !state.pendingAudio.isEmpty
+        }
+        if shouldSignal {
+            sendSignalContinuation.yield(())
+        }
+    }
+
+    func enqueueAudio(_ data: Data) {
+        guard !data.isEmpty else { return }
+        let shouldSignal = state.withLock { state in
+            guard !state.isShutdown else { return false }
+            if data.count > Self.maxBufferedAudioBytes {
+                state.droppedChunks &+= 1
+                return false
+            }
+
+            while state.pendingBytes + data.count > Self.maxBufferedAudioBytes,
+                  !state.pendingAudio.isEmpty {
+                let dropped = state.pendingAudio.removeFirst()
+                state.pendingBytes -= dropped.count
+                state.droppedChunks &+= 1
+            }
+
+            state.pendingAudio.append(data)
+            state.pendingBytes += data.count
+            return state.active && state.session != nil
+        }
+        if shouldSignal {
+            sendSignalContinuation.yield(())
+        }
+    }
+
+    func deactivatePreservingBuffer() {
+        state.withLock {
+            guard !$0.isShutdown else { return }
+            $0.session = nil
+            $0.active = false
+        }
+    }
+
+    func clear() {
+        state.withLock {
+            $0.session = nil
+            $0.active = false
+            $0.pendingAudio.removeAll()
+            $0.pendingBytes = 0
+        }
+    }
+
+    /// Terminates the sender task and permanently invalidates this reference.
+    /// Reconnect uses `deactivatePreservingBuffer()` instead so the sender stays reusable.
+    func shutdown() {
+        let shouldFinish = state.withLock { state in
+            guard !state.isShutdown else { return false }
+            state.isShutdown = true
+            state.session = nil
+            state.active = false
+            state.pendingAudio.removeAll()
+            state.pendingBytes = 0
+            return true
+        }
+        guard shouldFinish else { return }
+        senderTask?.cancel()
+        senderTask = nil
+        sendSignalContinuation.finish()
+    }
+
+    private func runSenderLoop() async {
+        for await _ in sendSignalStream {
+            while let (session, frame) = dequeueFrameIfActive() {
+                do {
+                    try await session.sendAudio(frame)
+                } catch {
+                    logger.warning("Audio send failed: \(error.localizedDescription, privacy: .public)")
+                    state.withLock { $0.active = false }
+                    break
+                }
+            }
+
+            if Task.isCancelled {
+                break
+            }
+        }
+    }
+
+    private func dequeueFrameIfActive() -> (StreamingSession, Data)? {
+        state.withLock { state in
+            guard state.active,
+                  let session = state.session,
+                  !state.pendingAudio.isEmpty else { return nil }
+            let frame = state.pendingAudio.removeFirst()
+            state.pendingBytes -= frame.count
+            return (session, frame)
+        }
+    }
+}
+
+/// Manages a live audio streaming session: captures microphone audio and sends
+/// it to a streaming transcription provider. Server-side speech detection and
+/// endpointing are complemented by keep-alive and reconnection handling.
 @MainActor
 public final class LiveStreamingController {
     private let logger = Logger(subsystem: "SpeakFlow", category: "LiveStreaming")
@@ -71,7 +225,7 @@ public final class LiveStreamingController {
     private var startupGeneration: UInt64 = 0
 
     // Thread-safe reference for audio callback (runs off MainActor)
-    private let audioSessionRef = AudioSessionRef()
+    private let audioSessionRef = LiveStreamingAudioSessionRef()
 
     // Interim text tracking for replacement
     private var lastInterimText = ""
@@ -209,170 +363,6 @@ public final class LiveStreamingController {
                 sessionId: sessionId,
                 metadata: payload
             )
-        }
-    }
-
-    /// Thread-safe wrapper so the audio callback (which runs on the audio thread)
-    /// can check if streaming is active and send audio without touching @MainActor state.
-    private final class AudioSessionRef: @unchecked Sendable {
-        private struct State {
-            var session: StreamingSession?
-            var active: Bool = false
-            var pendingAudio: ArraySlice<Data> = []
-            var pendingBytes = 0
-            var droppedChunks = 0
-            var isShutdown = false
-        }
-
-        private static let maxBufferedAudioBytes = 1_000_000
-        private let logger = Logger(subsystem: "SpeakFlow", category: "LiveStreamingAudio")
-        private let state = OSAllocatedUnfairLock(initialState: State())
-        private let sendSignalContinuation: AsyncStream<Void>.Continuation
-        private let sendSignalStream: AsyncStream<Void>
-        private var senderTask: Task<Void, Never>?
-#if DEBUG
-        private var deinitHandler: (@Sendable () -> Void)?
-#endif
-
-        init() {
-            var continuation: AsyncStream<Void>.Continuation!
-            self.sendSignalStream = AsyncStream<Void> { c in
-                continuation = c
-            }
-            self.sendSignalContinuation = continuation
-            self.senderTask = Task.detached(priority: .userInitiated) { [weak self] in
-                await self?.runSenderLoop()
-            }
-        }
-
-        deinit {
-            shutdown()
-#if DEBUG
-            deinitHandler?()
-#endif
-        }
-
-#if DEBUG
-        func setDeinitHandler(_ handler: @escaping @Sendable () -> Void) {
-            deinitHandler = handler
-        }
-#endif
-
-        var isActive: Bool {
-            state.withLock { $0.active }
-        }
-
-        var pendingChunkCount: Int {
-            state.withLock { $0.pendingAudio.count }
-        }
-
-        var droppedChunkCount: Int {
-            state.withLock { $0.droppedChunks }
-        }
-
-        var isShutdown: Bool {
-            state.withLock { $0.isShutdown }
-        }
-
-        func set(session: StreamingSession?, active: Bool) {
-            let shouldSignal = state.withLock { state in
-                guard !state.isShutdown else { return false }
-                state.session = session
-                state.active = active
-                return active && session != nil && !state.pendingAudio.isEmpty
-            }
-            if shouldSignal {
-                sendSignalContinuation.yield(())
-            }
-        }
-
-        func enqueueAudio(_ data: Data) {
-            guard !data.isEmpty else { return }
-            let shouldSignal = state.withLock { state in
-                guard !state.isShutdown else { return false }
-                if data.count > Self.maxBufferedAudioBytes {
-                    state.droppedChunks &+= 1
-                    return false
-                }
-
-                while state.pendingBytes + data.count > Self.maxBufferedAudioBytes,
-                      !state.pendingAudio.isEmpty {
-                    let dropped = state.pendingAudio.removeFirst()
-                    state.pendingBytes -= dropped.count
-                    state.droppedChunks &+= 1
-                }
-
-                state.pendingAudio.append(data)
-                state.pendingBytes += data.count
-                return state.active && state.session != nil
-            }
-            if shouldSignal {
-                sendSignalContinuation.yield(())
-            }
-        }
-
-        func deactivatePreservingBuffer() {
-            state.withLock {
-                guard !$0.isShutdown else { return }
-                $0.session = nil
-                $0.active = false
-            }
-        }
-
-        func clear() {
-            state.withLock {
-                $0.session = nil
-                $0.active = false
-                $0.pendingAudio.removeAll()
-                $0.pendingBytes = 0
-            }
-        }
-
-        /// Terminates the sender task and permanently invalidates this reference.
-        /// Reconnect uses `deactivatePreservingBuffer()` instead so the sender stays reusable.
-        func shutdown() {
-            let shouldFinish = state.withLock { state in
-                guard !state.isShutdown else { return false }
-                state.isShutdown = true
-                state.session = nil
-                state.active = false
-                state.pendingAudio.removeAll()
-                state.pendingBytes = 0
-                return true
-            }
-            guard shouldFinish else { return }
-            senderTask?.cancel()
-            senderTask = nil
-            sendSignalContinuation.finish()
-        }
-
-        private func runSenderLoop() async {
-            for await _ in sendSignalStream {
-                while let (session, frame) = dequeueFrameIfActive() {
-                    do {
-                        try await session.sendAudio(frame)
-                    } catch {
-                        logger.warning("Audio send failed: \(error.localizedDescription, privacy: .public)")
-                        state.withLock { $0.active = false }
-                        break
-                    }
-                }
-
-                if Task.isCancelled {
-                    break
-                }
-            }
-        }
-
-        private func dequeueFrameIfActive() -> (StreamingSession, Data)? {
-            state.withLock { state in
-                guard state.active,
-                      let session = state.session,
-                      !state.pendingAudio.isEmpty else { return nil }
-                let frame = state.pendingAudio.removeFirst()
-                state.pendingBytes -= frame.count
-                return (session, frame)
-            }
         }
     }
 
