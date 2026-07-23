@@ -158,7 +158,8 @@ struct StreamingStopContractTests {
     /// configured timeout instead of closing after a fixed short grace window.
     @MainActor @Test
     func stopHonorsConfiguredTimeoutWhenNoTrailingEventsArrive() async throws {
-        let (controller, _, _, _) = makeStreamingContext(trailingFinalTimeout: 0.6)
+        let (controller, lsc, _, _) = makeStreamingContext(trailingFinalTimeout: 0.6)
+        try await waitUntil { lsc.recording }
         let startedAt = ContinuousClock.now
 
         controller.stopRecording(reason: .hotkey)

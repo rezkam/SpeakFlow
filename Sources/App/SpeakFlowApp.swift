@@ -24,9 +24,12 @@ struct SpeakFlowApp: App {
         }
         .defaultSize(width: 750, height: 650)
         .windowResizability(.contentMinSize)
+        .commands {
+            ControlPanelCommands(appDelegate: appDelegate)
+        }
 
         MenuBarExtra {
-            MenuBarView()
+            MenuBarView(appDelegate: appDelegate)
         } label: {
             // Use the custom app icon from the bundle for the menu bar
             if let icon = Self.menuBarIcon {
@@ -51,6 +54,7 @@ struct SpeakFlowApp: App {
 
 private struct MainWindowOpenBridge: ViewModifier {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     let appDelegate: AppDelegate
 
     func body(content: Content) -> some View {
@@ -60,15 +64,32 @@ private struct MainWindowOpenBridge: ViewModifier {
                 openWindow(id: "main")
                 NSApp.activate(ignoringOtherApps: true)
             }
+            appDelegate.registerMainWindowCloser { [dismissWindow] in
+                dismissWindow(id: "main")
+            }
         }
     }
 }
 
-/// Minimal menu bar menu: open settings, toggle dictation, quit.
+private struct ControlPanelCommands: Commands {
+    let appDelegate: AppDelegate
+
+    var body: some Commands {
+        CommandGroup(replacing: .appTermination) {
+            Button("Close Control Panel") {
+                appDelegate.closeControlPanel()
+            }
+            .keyboardShortcut("q", modifiers: .command)
+        }
+    }
+}
+
+/// Minimal menu bar menu: open settings, toggle dictation, close the control panel.
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.appState) private var state
     @Environment(\.recordingController) private var recordingController
+    let appDelegate: AppDelegate
 
     var body: some View {
         // Read refreshVersion so SwiftUI re-evaluates when provider config changes
@@ -103,8 +124,8 @@ struct MenuBarView: View {
 
         Divider()
 
-        Button("Quit SpeakFlow") {
-            NSApp.terminate(nil)
+        Button("Close Control Panel") {
+            appDelegate.closeControlPanel()
         }
     }
 

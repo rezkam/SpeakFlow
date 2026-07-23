@@ -6,6 +6,8 @@
 
 ### Fixed
 
+* **Closing the control panel keeps SpeakFlow resident** - The window close button, Command-Q, Dock Quit, and the control-panel menu action now close only the settings panel. The menu-bar app remains active, while shutdown, restart, logout, and system-wide Quit All still terminate normally.
+* **Streaming dictation signals capture without network delay** - The start cue now plays when local microphone capture begins, while startup audio buffers during the provider handshake. A rejected connection still ends with an actionable error cue and banner, and a late connection after stop or cancel is closed without reviving capture.
 * **Cancelled ChatGPT sign-ins fail promptly** - A matching-state OAuth callback without an authorization code, such as a provider denial, now ends the login attempt immediately instead of waiting for the full callback timeout. Stray connections and wrong-state callbacks continue to be ignored while the real callback is awaited.
 * **Regression-core supports intentional VAD skips** - On platforms where VAD is unavailable, the regression gate now accepts only the explicitly reported VAD integration-suite skip. Unexpected zero-test filters still fail the gate.
 

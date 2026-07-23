@@ -27,6 +27,7 @@ REGRESSION_SUITES=(
   "DictationReadinessTests"
   "ProviderReadinessTests"
   "AppStateTests"
+  "AppLifecycleTests"
   "HotkeyListenerTests"
   "HotkeyTests"
   "PermissionControllerDITests"
