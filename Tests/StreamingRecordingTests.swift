@@ -66,6 +66,49 @@ actor SuspendingCloseStreamingSession: StreamingSession {
     }
 }
 
+/// Suspends observability configuration to exercise the second asynchronous
+/// startup boundary after the provider handshake has returned a session.
+actor SuspendingObservabilityStreamingSession: StreamingSession {
+    private let eventContinuation: AsyncStream<TranscriptionEvent>.Continuation
+    nonisolated let events: AsyncStream<TranscriptionEvent>
+    private var enteredContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var hasEnteredConfiguration = false
+    private(set) var closeCallCount = 0
+
+    init() {
+        var continuation: AsyncStream<TranscriptionEvent>.Continuation!
+        events = AsyncStream { continuation = $0 }
+        eventContinuation = continuation
+    }
+
+    func sendAudio(_ data: Data) async throws {}
+    func finalize() async throws {}
+    func keepAlive() async throws {}
+
+    func close() async throws {
+        closeCallCount += 1
+        eventContinuation.finish()
+    }
+
+    func setObservabilitySessionId(_ sessionId: UUID?) async {
+        hasEnteredConfiguration = true
+        enteredContinuation?.resume()
+        enteredContinuation = nil
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilObservabilityConfigurationStarts() async {
+        guard !hasEnteredConfiguration else { return }
+        await withCheckedContinuation { enteredContinuation = $0 }
+    }
+
+    func releaseObservabilityConfiguration() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 @Suite("RecordingController — Streaming Recording Lifecycle")
 struct StreamingRecordingTests {
 
@@ -74,14 +117,16 @@ struct StreamingRecordingTests {
     @MainActor
     private func makeController(
         providerConfigured: Bool = true,
-        providerShouldFail: Bool = false
+        providerShouldFail: Bool = false,
+        trailingFinalTimeout: Double = 0
     ) -> StreamingTestContext {
         let providerSettings = SpyProviderSettings()
         let providerRegistry = SpyProviderRegistry()
         let settings = SpySettings()
 
-        // Zero trailing-final timeout so stop tasks complete without a real wait.
-        settings.streamingTrailingFinalTimeout = 0.0
+        // Most tests avoid a real trailing-final wait; specific startup-stop
+        // regressions override this to prove an inactive session does not wait.
+        settings.streamingTrailingFinalTimeout = trailingFinalTimeout
 
         let mockSession = MockStreamingSession()
         let mockProvider = MockStreamingProvider()
@@ -148,7 +193,24 @@ struct StreamingRecordingTests {
                 "Streaming provider should create a LiveStreamingController")
         #expect(ctx.controller.isRecording, "Should be in recording state")
         #expect(ctx.soundPlayer.count(.start) == 1,
-                "Start cue must play once after the provider is ready")
+                "Start cue must play once when local capture begins")
+    }
+
+    /// The microphone capture cue is local, not a proxy for remote provider
+    /// readiness. A slow WebSocket handshake must not make the hotkey feel
+    /// unresponsive or delay the user until it is safe to begin speaking.
+    @MainActor @Test
+    func startStreamingRecording_signalsCaptureBeforeProviderHandshakeCompletes() async throws {
+        let ctx = makeController()
+        ctx.provider.startDelay = 1.0
+
+        ctx.controller.startRecording()
+        try await waitUntil { ctx.provider.startSessionCallCount == 1 }
+
+        #expect(ctx.soundPlayer.count(.start) == 1,
+                "Capture cue must play before the slow provider handshake completes")
+        #expect(ctx.controller.liveStreamingController?.recording == false,
+                "Provider session should still be unready at the capture cue")
     }
 
     @MainActor @Test
@@ -280,6 +342,126 @@ struct StreamingRecordingTests {
 
     // MARK: - Stop / Cancel
 
+    /// Stop before provider readiness has no trailing server audio to flush.
+    /// It must finish promptly even when the configured trailing-final timeout
+    /// is nonzero, rather than blocking the next recording attempt.
+    @MainActor @Test
+    func streamingRecording_stopDuringInitialHandshakeSkipsTrailingFinalWait() async throws {
+        let ctx = makeController(trailingFinalTimeout: 1.0)
+        ctx.provider.startDelay = 0.4
+
+        ctx.controller.startRecording()
+        try await waitUntil { ctx.provider.startSessionCallCount == 1 }
+
+        let stopStart = Date()
+        ctx.controller.stopRecording(reason: .hotkey)
+        try await waitUntil(timeout: .seconds(0.5)) { !ctx.controller.isProcessingFinal }
+        let elapsed = Date().timeIntervalSince(stopStart)
+
+        #expect(elapsed < 0.5,
+                "Stopping before provider readiness must skip the trailing-final wait, took \(elapsed)s")
+        try await waitUntilAsync(timeout: .seconds(2)) { await ctx.session.closeCalled }
+    }
+
+    /// A slow initial provider handshake must not reactivate capture after the
+    /// user cancels. The returned session must be closed instead of becoming an
+    /// orphaned live connection that can still send audio or count a recording.
+    @MainActor @Test
+    func streamingRecording_cancelDuringInitialHandshakeDoesNotActivateLateSession() async throws {
+        let ctx = makeController()
+        ctx.provider.startDelay = 0.4
+
+        ctx.controller.startRecording()
+        try await waitUntil { ctx.provider.startSessionCallCount == 1 }
+        guard let startingController = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created")
+            return
+        }
+
+        ctx.controller.cancelRecording()
+
+        try await waitUntilAsync(timeout: .seconds(2)) { await ctx.session.closeCalled }
+        #expect(!startingController.recording,
+                "A cancelled initial handshake must not activate its late session")
+        #expect(ctx.controller.liveStreamingController == nil)
+        #expect(!ctx.controller.isRecording)
+    }
+
+    /// Stop has the same invalidation requirement as cancel, but it retains a
+    /// processing-final state while teardown runs. A late initial session must
+    /// still be closed rather than activated.
+    @MainActor @Test
+    func streamingRecording_stopDuringInitialHandshakeDoesNotActivateLateSession() async throws {
+        let ctx = makeController()
+        ctx.provider.startDelay = 0.4
+
+        ctx.controller.startRecording()
+        try await waitUntil { ctx.provider.startSessionCallCount == 1 }
+        guard let startingController = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created")
+            return
+        }
+
+        ctx.controller.stopRecording(reason: .hotkey)
+
+        try await waitUntilAsync(timeout: .seconds(2)) { await ctx.session.closeCalled }
+        #expect(!startingController.recording,
+                "A stopped initial handshake must not activate its late session")
+        #expect(ctx.controller.liveStreamingController == nil)
+        #expect(!ctx.controller.isRecording)
+    }
+
+    /// The post-handshake observability setup is also asynchronous. Cancelling
+    /// in that window must close the returned session before it can activate.
+    @MainActor @Test
+    func streamingRecording_cancelDuringSessionConfigurationDoesNotActivateLateSession() async throws {
+        let ctx = makeController()
+        let delayedSession = SuspendingObservabilityStreamingSession()
+        ctx.provider.mockSession = delayedSession
+
+        ctx.controller.startRecording()
+        try await waitUntil { ctx.provider.startSessionCallCount == 1 }
+        guard let startingController = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created")
+            return
+        }
+        await delayedSession.waitUntilObservabilityConfigurationStarts()
+
+        ctx.controller.cancelRecording()
+        await delayedSession.releaseObservabilityConfiguration()
+
+        try await waitUntilAsync(timeout: .seconds(2)) { await delayedSession.closeCallCount == 1 }
+        #expect(!startingController.recording,
+                "Cancellation during session configuration must not activate the late session")
+        #expect(ctx.controller.liveStreamingController == nil)
+        #expect(!ctx.controller.isRecording)
+    }
+
+    /// Stop must invalidate the post-handshake configuration boundary too.
+    @MainActor @Test
+    func streamingRecording_stopDuringSessionConfigurationDoesNotActivateLateSession() async throws {
+        let ctx = makeController()
+        let delayedSession = SuspendingObservabilityStreamingSession()
+        ctx.provider.mockSession = delayedSession
+
+        ctx.controller.startRecording()
+        try await waitUntil { ctx.provider.startSessionCallCount == 1 }
+        guard let startingController = ctx.controller.liveStreamingController else {
+            Issue.record("LiveStreamingController not created")
+            return
+        }
+        await delayedSession.waitUntilObservabilityConfigurationStarts()
+
+        ctx.controller.stopRecording(reason: .hotkey)
+        await delayedSession.releaseObservabilityConfiguration()
+
+        try await waitUntilAsync(timeout: .seconds(2)) { await delayedSession.closeCallCount == 1 }
+        #expect(!startingController.recording,
+                "Stop during session configuration must not activate the late session")
+        #expect(ctx.controller.liveStreamingController == nil)
+        #expect(!ctx.controller.isRecording)
+    }
+
     @MainActor @Test
     func streamingRecording_stop_setsProcessingFinal() {
         let ctx = makeController()
@@ -400,10 +582,10 @@ struct StreamingRecordingTests {
         }))
         #expect(ctx.banner.bannerMessages.count == 1,
                 "The onError and start-failure paths must not double-present the banner")
-        #expect(ctx.soundPlayer.count(.start) == 0,
-                "A rejected handshake must not play the successful start cue")
+        #expect(ctx.soundPlayer.count(.start) == 1,
+                "A rejected handshake may follow an honest local capture cue")
         #expect(ctx.soundPlayer.count(.error) == 1,
-                "A rejected handshake must play one error cue")
+                "A rejected handshake must play one error cue after capture begins")
     }
 
     @MainActor @Test

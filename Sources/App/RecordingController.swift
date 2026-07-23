@@ -311,6 +311,18 @@ final class RecordingController {
         )
     }
 
+    private func signalStreamingCaptureStarted(provider: any StreamingTranscriptionProvider) {
+        playSoundEffect(.start)
+        observabilityEvent(
+            "streaming_audio_capture_started",
+            metadata: [
+                "providerId": provider.id,
+                "providerMode": provider.mode.rawValue,
+                "targetPid": String(textInserter.targetPid)
+            ]
+        )
+    }
+
     // MARK: - Batch Recording
 
     private func startBatchRecording(provider: any BatchTranscriptionProvider) {
@@ -382,6 +394,12 @@ final class RecordingController {
         self.liveStreamingController = controller
         controller.sessionId = currentMetricsSessionId
         self.streamingSegmentStart = ContinuousClock.now
+        controller.onAudioCaptureStarted = { [weak self, weak controller] in
+            guard let self,
+                  self.isRecording,
+                  self.liveStreamingController === controller else { return }
+            self.signalStreamingCaptureStarted(provider: provider)
+        }
 
         controller.onTextUpdate = { [weak self] textToType, replacingChars, isFinal, fullText in
             // Accept text updates while recording AND while processing final.
@@ -502,6 +520,12 @@ final class RecordingController {
 
         Task { @MainActor in
             let started = await controller.start(provider: provider, config: config)
+
+            // Stop/cancel can detach this controller while the initial provider
+            // handshake is still in flight. Its late result must not surface an
+            // error, alter UI state, or count usage for a finished recording.
+            guard self.liveStreamingController === controller, self.isRecording else { return }
+
             if !started {
                 if let error = self.latestStreamingError {
                     self.presentRecordingError(error, providerId: provider.id)
@@ -518,9 +542,17 @@ final class RecordingController {
                 self.observabilityEvent("streaming_recording_start_failed", level: .error)
                 self.endMetricsSession(reason: "START_FAILED")
             } else {
-                // The start cue confirms both microphone activation and provider readiness.
-                // Failed handshakes use the error cue and banner without a misleading start cue.
-                self.signalRecordingStarted(provider: provider)
+                // Provider readiness follows the local capture cue. Startup audio was
+                // buffered while the WebSocket connected, so the user can speak as
+                // soon as capture starts without losing the first words.
+                self.observabilityEvent(
+                    "recording_started",
+                    metadata: [
+                        "providerId": provider.id,
+                        "providerMode": provider.mode.rawValue,
+                        "targetPid": String(self.textInserter.targetPid)
+                    ]
+                )
 
                 // Streaming opens exactly one provider WebSocket per recording,
                 // so the API-call count grows by one and the recording count

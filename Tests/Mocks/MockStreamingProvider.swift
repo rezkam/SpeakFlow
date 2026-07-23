@@ -15,7 +15,7 @@ final class MockStreamingProvider: StreamingTranscriptionProvider, @unchecked Se
     var authRequirement: ProviderAuthRequirement { .apiKey(providerId: id) }
 
     /// The session that `startSession()` will return. Set before use.
-    var mockSession: MockStreamingSession?
+    var mockSession: (any StreamingSession)?
 
     /// Whether `startSession()` should throw.
     var shouldFailOnStart = false
@@ -23,11 +23,18 @@ final class MockStreamingProvider: StreamingTranscriptionProvider, @unchecked Se
     /// Specific error to throw from `startSession()`, when set.
     var startError: Error?
 
+    /// Optional delay before returning from `startSession()`.
+    /// Used to prove local capture does not wait for provider readiness.
+    var startDelay: TimeInterval = 0
+
     /// How many times `startSession()` was called.
     var startSessionCallCount = 0
 
     func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
         startSessionCallCount += 1
+        if startDelay > 0 {
+            try await Task.sleep(for: .seconds(startDelay))
+        }
         if let startError {
             throw startError
         }

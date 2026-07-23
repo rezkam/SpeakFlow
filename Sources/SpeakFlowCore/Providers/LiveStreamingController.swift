@@ -65,6 +65,10 @@ public final class LiveStreamingController {
     private var session: StreamingSession?
     private var eventTask: Task<Void, Never>?
     internal var isActive = false
+    /// Increments whenever an initial startup is superseded or explicitly stopped.
+    /// A provider handshake may complete after stop/cancel, so its captured
+    /// generation must still match before it can activate a returned session.
+    private var startupGeneration: UInt64 = 0
 
     // Thread-safe reference for audio callback (runs off MainActor)
     private let audioSessionRef = AudioSessionRef()
@@ -135,6 +139,10 @@ public final class LiveStreamingController {
     internal var suppressSessionClosedCallback = false
 
     // Callbacks
+    /// Called after local microphone capture starts, before provider readiness.
+    /// Startup audio remains buffered until a streaming session is available.
+    public var onAudioCaptureStarted: (() -> Void)?
+
     /// Called when new text should be inserted.
     /// - `textToType`: the characters to type (may be just a suffix if smart-diff applies)
     /// - `replacingChars`: how many chars to backspace before typing
@@ -391,6 +399,8 @@ public final class LiveStreamingController {
 
         // New session lifecycle begins; unexpected close callbacks are allowed again.
         suppressSessionClosedCallback = false
+        startupGeneration &+= 1
+        let generation = startupGeneration
 
         // Store for reconnection 
         reconnectProvider = provider
@@ -487,13 +497,40 @@ public final class LiveStreamingController {
 
             try engine.start()
             self.audioEngine = engine
+            onAudioCaptureStarted?()
+            observabilityEvent("audio_capture_started", metadata: ["providerId": provider.id])
+            } else {
+                // Test mode has no physical engine, but it models a successful local
+                // capture start so controller-level lifecycle tests cover this boundary.
+                onAudioCaptureStarted?()
             } // end if !skipAudioEngineForTesting
 
             // NOW connect to provider (async WebSocket) — audio engine is already running
             // and buffered via sessionRef.isActive being false until we set it below.
             logger.info("Connecting to \(provider.displayName, privacy: .public)...")
             let streamSession = try await provider.startSession(config: config)
+
+            // Provider connection is asynchronous. If the user stopped or
+            // cancelled while it was in flight, do not revive capture with this
+            // late session. Closing it prevents an orphan WebSocket.
+            guard generation == startupGeneration, !Task.isCancelled else {
+                logger.info("Initial streaming start invalidated before provider session became ready")
+                observabilityEvent("start_invalidated_after_handshake", level: .debug)
+                try? await streamSession.close()
+                return false
+            }
+
             await streamSession.setObservabilitySessionId(sessionId)
+
+            // Setting transport observability can suspend too. Recheck the same
+            // lifecycle generation before storing or activating the session.
+            guard generation == startupGeneration, !Task.isCancelled else {
+                logger.info("Initial streaming start invalidated while configuring provider session")
+                observabilityEvent("start_invalidated_during_session_configuration", level: .debug)
+                try? await streamSession.close()
+                return false
+            }
+
             self.session = streamSession
 
             // Start listening to events
@@ -511,6 +548,10 @@ public final class LiveStreamingController {
             return true
 
         } catch {
+            guard generation == startupGeneration, !Task.isCancelled else {
+                logger.info("Initial streaming start ended after invalidation")
+                return false
+            }
             logger.error("Failed to start streaming: \(error.localizedDescription)")
             observabilityEvent(
                 "start_failed",
@@ -531,6 +572,7 @@ public final class LiveStreamingController {
         )
         // Explicit user action: suppress onSessionClosed for this shutdown path.
         suppressSessionClosedCallback = true
+        startupGeneration &+= 1
 
         // Cancel any in-flight reconnection attempt so it doesn't resume after we stop.
         reconnectTask?.cancel()
@@ -554,17 +596,21 @@ public final class LiveStreamingController {
 
         logger.info("Stopping live streaming...")
 
-        // Flush any pending audio on the server
-        do { try await session?.finalize() }
-        catch { logger.debug("Session finalize failed: \(error.localizedDescription)") }
+        // A start that is still connecting has no session and therefore no
+        // server-side finals to flush. Do not hold the UI in processing-final
+        // for the normal trailing timeout in that case.
+        if let activeSession = session {
+            do { try await activeSession.finalize() }
+            catch { logger.debug("Session finalize failed: \(error.localizedDescription)") }
 
-        // Wait briefly for post-finalize trailing finals, but close early once
-        // transcription events have gone quiet.
-        await waitForTrailingFinals(maxWait: trailingFinalTimeout)
+            // Wait briefly for post-finalize trailing finals, but close early once
+            // transcription events have gone quiet.
+            await waitForTrailingFinals(maxWait: trailingFinalTimeout)
 
-        // Close the WebSocket
-        do { try await session?.close() }
-        catch { logger.debug("Session close failed: \(error.localizedDescription)") }
+            // Close the WebSocket
+            do { try await activeSession.close() }
+            catch { logger.debug("Session close failed: \(error.localizedDescription)") }
+        }
         session = nil
 
         eventTask?.cancel()
@@ -586,6 +632,7 @@ public final class LiveStreamingController {
         observabilityEvent("cancel_requested", level: .warning)
         // Explicit user action: suppress onSessionClosed for this shutdown path.
         suppressSessionClosedCallback = true
+        startupGeneration &+= 1
 
         // Cancel any in-flight reconnection attempt so it doesn't resume after we cancel.
         reconnectTask?.cancel()

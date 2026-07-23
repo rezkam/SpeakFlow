@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreServices
 import OSLog
 import SpeakFlowCore
 
@@ -13,10 +14,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var uiTestHarness: UITestHarnessController?
     private var windowCloseObserver: Any?
     private var openMainWindowHandler: (() -> Void)?
+    private var closeMainWindowHandler: (() -> Void)?
+    private let terminationReasonProvider: @MainActor () -> OSType?
     private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
     private let useMockRecordingInUITests = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MOCK_RECORDING"] != "0"
     private let resetUITestState = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_RESET_STATE"] == "1"
     private let uiTestHotkeyCycle: [HotkeyType] = [.controlOptionD, .controlOptionSpace, .commandShiftD]
+
+    override init() {
+        terminationReasonProvider = AppDelegate.currentTerminationReason
+        super.init()
+    }
+
+    init(terminationReasonProvider: @escaping @MainActor () -> OSType?) {
+        self.terminationReasonProvider = terminationReasonProvider
+        super.init()
+    }
 
     /// Switch to regular activation policy BEFORE SwiftUI creates scenes.
     /// This ensures the Window scene actually shows (LSUIElement apps suppress windows).
@@ -102,6 +115,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    /// Treat ordinary Quit requests, including Dock Quit, as control-panel close requests.
+    /// Shutdown, restart, logout, and system-wide Quit All must still terminate normally.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let reason = terminationReasonProvider(), Self.systemTerminationReasons.contains(reason) {
+            return .terminateNow
+        }
+
+        closeControlPanel()
+        return .terminateCancel
+    }
+
     /// Handle Finder reopen events (including when users replace/update the app while it is
     /// already running as a menu bar app). Without this, reopening can look like a no-op.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -140,7 +164,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openMainWindowHandler = handler
     }
 
+    func registerMainWindowCloser(_ handler: @escaping () -> Void) {
+        closeMainWindowHandler = handler
+    }
+
+    /// Close only the control panel. SpeakFlow remains available from the menu bar.
+    func closeControlPanel() {
+        closeMainWindowHandler?()
+    }
+
     // MARK: - Window Lifecycle
+
+    private static let systemTerminationReasons: Set<OSType> = [
+        OSType(kAEQuitAll),
+        OSType(kAEShutDown),
+        OSType(kAERestart),
+        OSType(kAEReallyLogOut)
+    ]
+
+    private static func currentTerminationReason() -> OSType? {
+        NSAppleEventManager.shared().currentAppleEvent?
+            .paramDescriptor(forKeyword: AEKeyword(kAEQuitReason))?
+            .typeCodeValue
+    }
 
     /// Track window open/close to toggle activation policy (Dock icon visibility).
     private func setupWindowLifecycleObservers() {
