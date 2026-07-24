@@ -7,8 +7,8 @@ let package = Package(
         .macOS("26.0")
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.1"),
-        .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.3.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.5"),
+        .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.4.1"),
     ],
     targets: [
         // Core library with testable business logic
