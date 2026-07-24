@@ -14,7 +14,7 @@ on:
 jobs:
   validate-release-artifact:
     if: github.event_name != 'release' || github.event.release.prerelease != true
-    runs-on: macos-15
+    runs-on: macos-26
     outputs:
       valid: ${{ steps.validate_tag.outputs.valid }}
       tag: ${{ steps.version.outputs.tag }}
