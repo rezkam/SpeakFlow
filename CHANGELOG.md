@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.8.2 — Dependency Refresh & macOS 26 CI
+
+### Dependencies
+
+* **Updated FluidAudio to 0.15.5** - SpeakFlow now uses the latest FluidAudio release for local VAD and audio processing.
+* **Updated swift-concurrency-extras to 1.4.1** - Concurrency test support and isolation utilities now use the latest upstream release.
+
+### CI / Tooling
+
+* **CI now validates on macOS 26 only** - The macOS 15 matrix job and release-artifact validation runner have been retired.
+
 ## 0.8.1 — OAuth & Regression-Gate Reliability
 
 ### Fixed
