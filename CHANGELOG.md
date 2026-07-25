@@ -15,7 +15,7 @@
 
 ### CI / Tooling
 
-* **CI now validates on macOS 26 only** - The macOS 15 matrix job and release-artifact validation runner have been retired.
+* **CI now validates on macOS 26 only** - The previous runner matrix and release-artifact validation runner have been retired.
 
 ## 0.8.1 — OAuth & Regression-Gate Reliability
 
@@ -284,8 +284,7 @@ timing-dependent failures on macOS 26 (Xcode 26.0).
 
 ### Test Reliability
 
-Five categories of flaky tests eliminated across two CI runners
-(macOS 15 / Xcode 16.4 and macOS 26 / Xcode 26.0):
+Five categories of flaky tests eliminated across the prior and current CI runners:
 
 - **RateLimiter cancellation** — replaced elapsed-time assertion with a
   deterministic pre-cancel pattern; 60s interval ensures the task cannot
@@ -467,7 +466,7 @@ Architecture hardening release driven by a deep code review. Fixes thread-safety
 
 ## 0.1.0 — Initial Release
 
-- Menu bar dictation app for macOS 15+, Apple Silicon.
+- Menu bar dictation app for Apple Silicon.
 - ChatGPT (GPT-4o) batch transcription.
 - Deepgram Nova-3 streaming transcription with real-time interim results.
 - On-device Voice Activity Detection via Apple Neural Engine (FluidAudio / Silero).
