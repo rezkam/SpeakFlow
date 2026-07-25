@@ -4,6 +4,10 @@
 
 ## 0.8.2 — Dependency Refresh & macOS 26 CI
 
+### Fixed
+
+* **The menu bar now offers a full exit action** - `Quit SpeakFlow` terminates the app only when selected explicitly. Window close, Command-Q, Dock Quit, and the existing Close Control Panel action continue to keep the menu-bar app resident.
+
 ### Dependencies
 
 * **Updated FluidAudio to 0.15.5** - SpeakFlow now uses the latest FluidAudio release for local VAD and audio processing.

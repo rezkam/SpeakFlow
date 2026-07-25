@@ -33,6 +33,25 @@ struct AppLifecycleTests {
         #expect(closeRequests == 1)
     }
 
+    @MainActor @Test
+    func explicitMenuQuitTerminatesApp() {
+        var terminationRequests = 0
+        let delegate = AppDelegate(
+            terminationReasonProvider: { nil },
+            terminationRequester: { terminationRequests += 1 }
+        )
+        var closeRequests = 0
+        delegate.registerMainWindowCloser {
+            closeRequests += 1
+        }
+
+        delegate.quitSpeakFlow()
+
+        #expect(terminationRequests == 1)
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateNow)
+        #expect(closeRequests == 0)
+    }
+
     @MainActor @Test(arguments: [
         OSType(kAEQuitAll),
         OSType(kAEShutDown),
