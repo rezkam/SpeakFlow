@@ -9,6 +9,7 @@
 DerivedData/
 *.dmg
 .claude/
+.agents/learning/
 AppIcon.iconset/
 .deep-dive/
 docs/
