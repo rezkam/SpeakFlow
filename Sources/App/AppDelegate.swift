@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openMainWindowHandler: (() -> Void)?
     private var closeMainWindowHandler: (() -> Void)?
     private let terminationReasonProvider: @MainActor () -> OSType?
+    private let terminationRequester: @MainActor () -> Void
+    private var explicitTerminationRequested = false
     private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
     private let useMockRecordingInUITests = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MOCK_RECORDING"] != "0"
     private let resetUITestState = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_RESET_STATE"] == "1"
@@ -23,11 +25,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     override init() {
         terminationReasonProvider = AppDelegate.currentTerminationReason
+        terminationRequester = { NSApp.terminate(nil) }
         super.init()
     }
 
-    init(terminationReasonProvider: @escaping @MainActor () -> OSType?) {
+    init(
+        terminationReasonProvider: @escaping @MainActor () -> OSType?,
+        terminationRequester: @escaping @MainActor () -> Void = { NSApp.terminate(nil) }
+    ) {
         self.terminationReasonProvider = terminationReasonProvider
+        self.terminationRequester = terminationRequester
         super.init()
     }
 
@@ -116,8 +123,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Treat ordinary Quit requests, including Dock Quit, as control-panel close requests.
-    /// Shutdown, restart, logout, and system-wide Quit All must still terminate normally.
+    /// Shutdown, restart, logout, system-wide Quit All, and the explicit menu action terminate normally.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if explicitTerminationRequested {
+            return .terminateNow
+        }
+
         if let reason = terminationReasonProvider(), Self.systemTerminationReasons.contains(reason) {
             return .terminateNow
         }
@@ -171,6 +182,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Close only the control panel. SpeakFlow remains available from the menu bar.
     func closeControlPanel() {
         closeMainWindowHandler?()
+    }
+
+    /// Fully quit after an explicit user selection. Command-Q and Dock Quit remain
+    /// control-panel-close actions so a menu-bar-resident session stays available.
+    func quitSpeakFlow() {
+        explicitTerminationRequested = true
+        terminationRequester()
     }
 
     // MARK: - Window Lifecycle

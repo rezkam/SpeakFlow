@@ -80,11 +80,15 @@ private struct ControlPanelCommands: Commands {
                 appDelegate.closeControlPanel()
             }
             .keyboardShortcut("q", modifiers: .command)
+
+            Button("Quit SpeakFlow") {
+                appDelegate.quitSpeakFlow()
+            }
         }
     }
 }
 
-/// Minimal menu bar menu: open settings, toggle dictation, close the control panel.
+/// Minimal menu bar menu: open settings, toggle dictation, close the control panel, or quit.
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.appState) private var state
@@ -126,6 +130,10 @@ struct MenuBarView: View {
 
         Button("Close Control Panel") {
             appDelegate.closeControlPanel()
+        }
+
+        Button("Quit SpeakFlow") {
+            appDelegate.quitSpeakFlow()
         }
     }
 
