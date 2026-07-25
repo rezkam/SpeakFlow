@@ -113,16 +113,18 @@ Permissions are never requested automatically on launch — you choose when to g
 
 ### Troubleshooting Accessibility
 
-SpeakFlow is self-signed (ad-hoc), so macOS ties the accessibility trust to the exact binary. If you rebuild the app or install a new version and accessibility stops working:
+Released SpeakFlow builds are signed with a Developer ID certificate and notarized. Accessibility permission normally survives a standard release upgrade. If macOS stops recognizing Accessibility after replacing the app with a manual or locally built copy:
 
 1. Open **System Settings → Privacy & Security → Accessibility**
-2. Remove the old SpeakFlow entry (select it and click the minus button)
-3. Re-add `SpeakFlow.app` from `/Applications` (click the plus button)
+2. Turn SpeakFlow off, then on again
+3. If that does not help, remove the old SpeakFlow entry and re-add `SpeakFlow.app` from `/Applications`
 4. Restart SpeakFlow
 
-This is required because macOS revokes accessibility trust when the binary changes for apps without an Apple Developer ID signature.
-
 ## Usage
+
+### Menu Bar
+
+Use **Close Control Panel** to hide the settings window while keeping SpeakFlow available in the menu bar. Select **Quit SpeakFlow** when you want to fully exit the app. Command-Q and Dock Quit close only the control panel so they do not interrupt the menu-bar service.
 
 ### Hotkeys
 
