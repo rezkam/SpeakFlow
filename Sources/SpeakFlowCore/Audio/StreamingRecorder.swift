@@ -219,6 +219,11 @@ public final class StreamingRecorder {
     /// Flag to suppress final chunk emission on cancel
     private var isCancelled = false
 
+    /// Set when cancellation begins and cleared on the next start. While set,
+    /// no chunk is emitted from any path, including speech-end early emission
+    /// triggered by VAD processing still in flight.
+    private var isDiscardingAudio = false
+
     /// In-flight async stop pipeline task (drain queue, emit final chunk, teardown).
     /// Exposed via `waitForStopCompletion()` so callers can await final flush completion.
     private var stopTask: Task<Void, Never>?
@@ -307,6 +312,7 @@ public final class StreamingRecorder {
     /// Cancel recording without emitting final chunk
     public func cancel() {
         isCancelled = true
+        isDiscardingAudio = true
         stop()
     }
 
@@ -324,6 +330,7 @@ public final class StreamingRecorder {
     @discardableResult
     public func start() async -> Bool {
         sessionStartDate = Date()
+        isDiscardingAudio = false
         observabilityEvent(
             "start_requested",
             metadata: [
@@ -760,7 +767,7 @@ public final class StreamingRecorder {
     ///   intentionally uses a much lower floor — see that constant's doc comment.
     @discardableResult
     private func sendChunkIfReady(reason: String, minimumDuration: Double? = nil) async -> Bool {
-        guard let buffer = audioBuffer else { return false }
+        guard !isDiscardingAudio, let buffer = audioBuffer else { return false }
         // Capture all Settings values BEFORE any await suspension points
         // to prevent concurrent @MainActor tasks from changing them mid-execution.
         let minDuration = minimumDuration ?? settings.minChunkDuration
@@ -831,6 +838,8 @@ public final class StreamingRecorder {
         let wavData = createWav(from: samples)
         let chunk = AudioChunk(wavData: wavData, durationSeconds: duration, speechProbability: speechProbability)
 
+        // Cancellation can begin while this path is suspended above.
+        guard !isDiscardingAudio else { return false }
         onChunkReady?(chunk)
         state.updateLastSoundTime()
         return true
@@ -864,6 +873,25 @@ public final class StreamingRecorder {
             defer { self.state.setVADActive(false) }
             guard let buffer = self.audioBuffer else { return }
 
+            // Cancelled audio is discarded before anything that can emit: VAD
+            // processing of queued samples can raise a speech-end early emission.
+            guard !wasCancelled else {
+                let droppedBatches = self.sampleQueue.dequeueAll().count
+                let discarded = await buffer.takeAll()
+                await self.vadProcessor?.resetSession()
+                let duration = Double(discarded.count) / self.sampleRate
+                Logger.audio.info("Recording cancelled, discarding \(String(format: "%.1f", duration))s of audio")
+                self.observabilityEvent(
+                    "stop_cancelled_discard",
+                    level: .warning,
+                    metadata: [
+                        "durationSeconds": String(format: "%.3f", duration),
+                        "droppedPendingBatches": String(droppedBatches)
+                    ]
+                )
+                return
+            }
+
             // Drain pending callback samples so short sessions don't lose trailing audio.
             let pendingSamples = self.sampleQueue.dequeueAll()
             if !pendingSamples.isEmpty {
@@ -882,16 +910,6 @@ public final class StreamingRecorder {
 
             let finalSamples = await buffer.takeAll()
             let duration = Double(finalSamples.count) / self.sampleRate
-
-            guard !wasCancelled else {
-                Logger.audio.info("Recording cancelled, discarding \(String(format: "%.1f", duration))s of audio")
-                self.observabilityEvent(
-                    "stop_cancelled_discard",
-                    level: .warning,
-                    metadata: ["durationSeconds": String(format: "%.3f", duration)]
-                )
-                return
-            }
 
             let minDurationMs = Double(Config.minRecordingDurationMs) / 1000.0
             let minDuration = self.settings.chunkDuration.isFullRecording ? minDurationMs : 1.0
