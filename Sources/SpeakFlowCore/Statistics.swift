@@ -239,19 +239,16 @@ public final class Statistics {
     private static let sttLatencySampleCapacity = 100
 
     private static let storageURL: URL = {
-        let base: URL
-        // Detect test runner: main bundle path contains .xctest, or xctest is in args
-        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
-            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
-        if isTestRun {
-            base = FileManager.default.temporaryDirectory
-                .appendingPathComponent("speakflow-test-\(ProcessInfo.processInfo.processIdentifier)")
-        } else {
-            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".speakflow")
-        }
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base.appendingPathComponent("statistics.json")
+        let url = storageURL(for: RuntimeIsolation.current)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        return url
     }()
+
+    nonisolated static func storageURL(for isolation: RuntimeIsolation.Decision) -> URL {
+        isolation.dataDirectory.appendingPathComponent("statistics.json")
+    }
 
     private init() {
         if let fileData = try? Foundation.Data(contentsOf: Self.storageURL),

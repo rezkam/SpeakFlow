@@ -119,9 +119,7 @@ public actor ObservabilityStore {
 
     private enum RuntimePaths {
         static func isTestRun() -> Bool {
-            Bundle.main.bundlePath.contains(".xctest")
-                || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
-                || ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
+            RuntimeIsolation.current.isIsolated
         }
 
         static var profileName: String {

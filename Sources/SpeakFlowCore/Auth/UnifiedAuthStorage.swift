@@ -18,16 +18,11 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
 
     private let lock = OSAllocatedUnfairLock(initialState: ())
 
-    private static let speakflowDir: URL = {
-        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
-            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
-        if isTestRun {
-            return FileManager.default.temporaryDirectory
-                .appendingPathComponent("speakflow-test-\(ProcessInfo.processInfo.processIdentifier)")
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".speakflow")
-    }()
+    private static let speakflowDir: URL = directory(for: RuntimeIsolation.current)
+
+    static func directory(for isolation: RuntimeIsolation.Decision) -> URL {
+        isolation.dataDirectory
+    }
 
     static var fileURL: URL {
         let dir = speakflowDir
