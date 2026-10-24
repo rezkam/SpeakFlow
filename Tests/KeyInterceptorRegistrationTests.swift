@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import os
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
@@ -53,5 +54,31 @@ struct KeyInterceptorRegistrationTests {
 
         #expect(!CFMachPortIsValid(tap),
                 "stop() must invalidate the tap; a disabled-but-valid tap stays registered in the WindowServer")
+    }
+
+    @MainActor @Test
+    func startWhileStillRegisteredRearmsForTheNewRecording() {
+        let fake = FakeEventTapDriver()
+        let focusedTargets = OSAllocatedUnfairLock(initialState: [pid_t]())
+        let interceptor = KeyInterceptor(
+            eventTapDriver: fake.driver,
+            keyboardFocusSnapshotProvider: { targetPid in
+                focusedTargets.withLock { $0.append(targetPid) }
+                return .init(isInTargetApp: true, focusedPid: targetPid, frontmostPid: targetPid, source: "test")
+            },
+            isSecureInputEnabled: { false }
+        )
+        defer { interceptor.stop() }
+
+        interceptor.start(targetPid: 41)
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36), "First recording captures its Enter")
+
+        // A new recording starts before the previous registration was torn down.
+        interceptor.start(targetPid: 42)
+
+        #expect(fake.createdTaps.count == 1, "Re-arming must reuse the registered tap, not stack a second one")
+        #expect(interceptor._testIsEnterCaptureArmed, "The new recording must get a fresh one-shot Enter token")
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36), "The new recording's first Enter must be captured")
+        #expect(focusedTargets.withLock { $0.last } == 42, "Focus checks must target the new recording's app")
     }
 }
