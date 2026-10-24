@@ -211,12 +211,22 @@ func test09_BadApiKey() async -> Bool {
 
     // Temporarily set bad key
     let originalKey = ProviderSettings.shared.apiKey(for: ProviderId.deepgram)
-    try? ProviderSettings.shared.setApiKey("invalid_key_12345", for: ProviderId.deepgram)
+    do {
+        try ProviderSettings.shared.setApiKey("invalid_key_12345", for: ProviderId.deepgram)
+    } catch {
+        print("    Could not set the bad key in isolated storage: \(error.localizedDescription)")
+        return false
+    }
 
     let started = await controller.start(provider: provider)
 
     // Restore key
-    try? ProviderSettings.shared.setApiKey(originalKey, for: ProviderId.deepgram)
+    do {
+        try ProviderSettings.shared.setApiKey(originalKey, for: ProviderId.deepgram)
+    } catch {
+        print("    Could not restore the test key in isolated storage: \(error.localizedDescription)")
+        return false
+    }
 
     return !started
         && cb.errors.contains(where: { $0.contains("HTTP 401") })
@@ -289,7 +299,12 @@ func runAllTests() async {
         }
     }
 
-    try? ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
+    do {
+        try ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
+    } catch {
+        print("❌ Could not store the test key in isolated storage: \(error.localizedDescription)")
+        exit(1)
+    }
 
     print("═══════════════════════════════════════════════════")
     print("  DeepgramTest — Real Mic + Deepgram E2E Tests")
@@ -331,6 +346,10 @@ func runAllTests() async {
 @main
 enum DeepgramTestEntry {
     static func main() {
+        // A test executable must never write the user's credentials or settings:
+        // isolate every store before any singleton is touched.
+        RuntimeIsolation.isolateThisProcess()
+        print("Isolated storage: \(RuntimeIsolation.current.dataDirectory.path)")
         // Schedule async work, then pump main dispatch queue for MainActor + URLSession
         Task { @MainActor in
             await runAllTests()

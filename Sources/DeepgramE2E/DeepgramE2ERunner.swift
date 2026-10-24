@@ -293,7 +293,12 @@ func looseMatch(expected: String, actual: String) -> Bool {
         print("   Usage: DEEPGRAM_API_KEY=your_key swift run DeepgramE2E")
         exit(1)
     }
-    try? ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
+    do {
+        try ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
+    } catch {
+        print("❌ Could not store the test key in isolated storage: \(error.localizedDescription)")
+        exit(1)
+    }
 
     var passed = 0
     var failed = 0
@@ -1333,6 +1338,10 @@ func looseMatch(expected: String, actual: String) -> Bool {
 @main
 enum DeepgramE2EEntry {
     static func main() {
+        // A test executable must never write the user's credentials or settings:
+        // isolate every store before any singleton is touched.
+        RuntimeIsolation.isolateThisProcess()
+        print("Isolated storage: \(RuntimeIsolation.current.dataDirectory.path)")
         Task { @MainActor in
             await DeepgramE2ERunner.run()
         }
