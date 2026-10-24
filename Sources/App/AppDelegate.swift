@@ -45,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // Accessibility is usually granted in System Settings, then the user
+        // comes back; pick up a grant the permission poll may have missed.
+        guard !isUITestMode else { return }
+        PermissionController.shared.reconcileAccessibility()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Set the Dock icon from the bundled colorful icon
         if let icon = AppResources.pngImage(named: "DockIcon") {

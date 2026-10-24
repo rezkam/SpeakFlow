@@ -122,3 +122,65 @@ struct PermissionControllerDITests {
         #expect(spyBanner.bannerMessages.contains(where: { $0.1 == .info }))
     }
 }
+
+/// A grant that arrives after the bounded permission poll gave up must still
+/// re-register the hotkey once SpeakFlow observes it.
+@Suite("PermissionController — Late Accessibility Grant")
+struct PermissionControllerLateGrantTests {
+    @MainActor
+    private func make(trusted: @escaping () -> Bool, setups: @escaping () -> Void) -> PermissionController {
+        PermissionController(
+            appState: SpyBannerPresenter(),
+            hotkeySettings: SpyHotkeySettings(),
+            setupHotkeyAction: setups,
+            isAccessibilityTrusted: trusted
+        )
+    }
+
+    @Test @MainActor
+    func explicitCheckAfterALateGrantReRegistersTheHotkey() {
+        var trusted = false
+        var setups = 0
+        let controller = make(trusted: { trusted }, setups: { setups += 1 })
+
+        trusted = true
+        controller.checkAccessibility()
+        controller.checkAccessibility()
+
+        #expect(setups == 1, "The first check that sees the grant re-registers the hotkey, once")
+    }
+
+    @Test @MainActor
+    func recordingReadinessCheckAfterALateGrantReRegistersTheHotkey() {
+        var trusted = false
+        var setups = 0
+        let controller = make(trusted: { trusted }, setups: { setups += 1 })
+
+        trusted = true
+        #expect(controller.isAccessibilityReady())
+        #expect(setups == 1)
+    }
+
+    @Test @MainActor
+    func appActivationAfterALateGrantReRegistersTheHotkey() {
+        var trusted = false
+        var setups = 0
+        let controller = make(trusted: { trusted }, setups: { setups += 1 })
+
+        trusted = true
+        controller.reconcileAccessibility()
+
+        #expect(setups == 1)
+    }
+
+    @Test @MainActor
+    func alreadyTrustedAtLaunchDoesNotReRegisterAgain() {
+        var setups = 0
+        let controller = make(trusted: { true }, setups: { setups += 1 })
+
+        controller.checkAccessibility()
+        controller.reconcileAccessibility()
+
+        #expect(setups == 0, "Launch registers the hotkey already; no transition, no extra setup")
+    }
+}
