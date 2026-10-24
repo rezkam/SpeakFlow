@@ -96,13 +96,14 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func startWhileStillRegisteredRearmsForTheNewRecording() {
         let fake = FakeEventTapDriver()
-        let focusedTargets = OSAllocatedUnfairLock(initialState: [pid_t]())
+        let focusedPid = OSAllocatedUnfairLock<pid_t>(initialState: 41)
         let interceptor = KeyInterceptor(
             eventTapDriver: fake.driver,
-            keyboardFocusSnapshotProvider: { targetPid in
-                focusedTargets.withLock { $0.append(targetPid) }
-                return .init(isInTargetApp: true, focusedPid: targetPid, frontmostPid: targetPid, source: "test")
+            focusQuery: {
+                let pid = focusedPid.withLock { $0 }
+                return .init(focusedPid: pid, focusedAppPid: pid, source: "test")
             },
+            bundleIdentifierLookup: { _ in nil },
             isSecureInputEnabled: { false }
         )
         defer { interceptor.stop() }
@@ -110,13 +111,15 @@ struct KeyInterceptorRegistrationTests {
         interceptor.start(targetPid: 41)
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 36), "First recording captures its Enter")
 
-        // A new recording starts before the previous registration was torn down.
+        // A new recording in another app starts before the previous
+        // registration was torn down.
+        focusedPid.withLock { $0 = 42 }
         interceptor.start(targetPid: 42)
 
         #expect(fake.createdTaps.count == 1, "Re-arming must reuse the registered tap, not stack a second one")
         #expect(interceptor._testIsEnterCaptureArmed, "The new recording must get a fresh one-shot Enter token")
-        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36), "The new recording's first Enter must be captured")
-        #expect(focusedTargets.withLock { $0.last } == 42, "Focus checks must target the new recording's app")
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "The new recording's first Enter must be captured in the new target app")
     }
 
     @MainActor @Test
@@ -200,5 +203,62 @@ struct KeyInterceptorRegistrationTests {
 
         #expect(serviced, "The tap must be serviced while the main thread is blocked")
         #expect(fake.callouts.ranOnMainThread == false, "The tap must run on its own thread")
+    }
+
+    @MainActor
+    private func makeFocusInterceptor(
+        focusedPid: pid_t,
+        bundles: [pid_t: String]
+    ) -> (KeyInterceptor, FakeEventTapDriver) {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(
+            eventTapDriver: fake.driver,
+            focusQuery: { .init(focusedPid: focusedPid, focusedAppPid: focusedPid, source: "test") },
+            bundleIdentifierLookup: { bundles[$0] },
+            isSecureInputEnabled: { false }
+        )
+        return (interceptor, fake)
+    }
+
+    @MainActor @Test
+    func focusInAHelperProcessOfTheTargetAppIsTheTarget() {
+        // Same rule TextInserter uses to keep typing: a helper process of the
+        // target app is still the target app.
+        let (interceptor, _) = makeFocusInterceptor(
+            focusedPid: 99,
+            bundles: [42: "com.vendor.Editor", 99: "com.vendor.Editor.helper"]
+        )
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 42)
+
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Enter must be captured when focus is in the target app's helper process")
+    }
+
+    @MainActor @Test
+    func focusInARelaunchedTargetAppIsTheTarget() {
+        let (interceptor, _) = makeFocusInterceptor(
+            focusedPid: 77,
+            bundles: [42: "com.vendor.Editor", 77: "com.vendor.Editor"]
+        )
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 42)
+
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53),
+                "Escape must be captured when the target app relaunched under a new PID")
+    }
+
+    @MainActor @Test
+    func focusInAnUnrelatedAppPassesKeysThrough() {
+        let (interceptor, _) = makeFocusInterceptor(
+            focusedPid: 99,
+            bundles: [42: "com.vendor.Editor", 99: "com.other.Chat"]
+        )
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 42)
+
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36), "Enter in another app must pass through")
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53), "Escape in another app must pass through")
+        #expect(interceptor._testIsEnterCaptureArmed, "A passed-through Enter must not consume the token")
     }
 }
