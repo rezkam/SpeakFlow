@@ -211,12 +211,12 @@ func test09_BadApiKey() async -> Bool {
 
     // Temporarily set bad key
     let originalKey = ProviderSettings.shared.apiKey(for: ProviderId.deepgram)
-    ProviderSettings.shared.setApiKey("invalid_key_12345", for: ProviderId.deepgram)
+    try? ProviderSettings.shared.setApiKey("invalid_key_12345", for: ProviderId.deepgram)
 
     let started = await controller.start(provider: provider)
 
     // Restore key
-    ProviderSettings.shared.setApiKey(originalKey, for: ProviderId.deepgram)
+    try? ProviderSettings.shared.setApiKey(originalKey, for: ProviderId.deepgram)
 
     return !started
         && cb.errors.contains(where: { $0.contains("HTTP 401") })
@@ -289,7 +289,7 @@ func runAllTests() async {
         }
     }
 
-    ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
+    try? ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
 
     print("═══════════════════════════════════════════════════")
     print("  DeepgramTest — Real Mic + Deepgram E2E Tests")

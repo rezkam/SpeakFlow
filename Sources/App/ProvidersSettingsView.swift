@@ -100,20 +100,25 @@ struct ProvidersSettingsView: View {
         }
     }
 
-    private func handle(_ action: ProviderCard.AuthAction, for account: ProviderAccount) {
+    private func handle(_ action: ProviderCard.AuthAction, for account: ProviderAccount) -> String? {
         switch (account.id, action) {
         case (ProviderId.chatGPT, .login):
             auth.startLoginFlow()
         case (ProviderId.chatGPT, .logout):
             auth.handleLogout()
         case (_, .saveKey(let key)):
-            ProviderSettings.shared.setApiKey(key, for: account.id)
+            do {
+                try ProviderSettings.shared.setApiKey(key, for: account.id)
+            } catch {
+                return "Could not save the key: \(error.localizedDescription)"
+            }
             state.refresh()
         case (_, .removeKey):
             auth.handleRemoveApiKey(for: account.id)
         default:
             break
         }
+        return nil
     }
 
     private func isConfigured(_ account: ProviderAccount) -> Bool {
@@ -188,7 +193,8 @@ struct ProviderCard: View {
     let activeModelId: String
     let onToggle: () -> Void
     let onActivate: (ModelDescriptor) -> Void
-    let onAuthAction: (AuthAction) -> Void
+    /// Returns an error message when the action could not be completed.
+    let onAuthAction: (AuthAction) -> String?
 
     @State private var keyDraft = ""
     @State private var keyError: String?
@@ -227,7 +233,7 @@ struct ProviderCard: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
         .alert("Remove \(account.name) API Key?", isPresented: $showRemoveConfirm) {
-            Button("Remove", role: .destructive) { onAuthAction(.removeKey) }
+            Button("Remove", role: .destructive) { _ = onAuthAction(.removeKey) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will remove the stored API key. You will need to enter it again to use \(account.name).")
@@ -299,7 +305,7 @@ struct ProviderCard: View {
                             .font(.system(size: 12.5))
                             .foregroundStyle(Theme.text2)
                         Spacer()
-                        Button("Log In...") { onAuthAction(.login) }
+                        Button("Log In...") { _ = onAuthAction(.login) }
                             .controlSize(.small)
                     }
                 } else {
@@ -321,7 +327,7 @@ struct ProviderCard: View {
                     .foregroundStyle(Theme.text2)
                 Spacer()
                 if account.authStyle == .oauth {
-                    Button("Log Out") { onAuthAction(.logout) }
+                    Button("Log Out") { _ = onAuthAction(.logout) }
                         .buttonStyle(.borderless)
                         .controlSize(.small)
                 } else {
@@ -434,7 +440,11 @@ struct ProviderCard: View {
                 return
             }
 
-            onAuthAction(.saveKey(key))
+            // Keep the entry until the key is actually stored.
+            if let saveError = onAuthAction(.saveKey(key)) {
+                keyError = saveError
+                return
+            }
             keyDraft = ""
             keyError = nil
             isEditingKey = false

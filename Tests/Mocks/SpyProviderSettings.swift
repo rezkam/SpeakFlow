@@ -7,12 +7,15 @@ final class SpyProviderSettings: ProviderSettingsProviding {
     var activeProviderId: String = "chatgpt"
     var storedKeys: [String: String] = [:]
     var removedKeys: [String] = []
+    /// When set, key mutations throw it, simulating an unwritable credential store.
+    var mutationError: (any Error)?
 
     func apiKey(for providerId: String) -> String? {
         storedKeys[providerId]
     }
 
-    func setApiKey(_ apiKey: String?, for providerId: String) {
+    func setApiKey(_ apiKey: String?, for providerId: String) throws {
+        if let mutationError { throw mutationError }
         if let apiKey {
             storedKeys[providerId] = apiKey
         } else {
@@ -24,7 +27,8 @@ final class SpyProviderSettings: ProviderSettingsProviding {
         storedKeys[providerId] != nil
     }
 
-    func removeApiKey(for providerId: String) {
+    func removeApiKey(for providerId: String) throws {
+        if let mutationError { throw mutationError }
         storedKeys.removeValue(forKey: providerId)
         removedKeys.append(providerId)
     }

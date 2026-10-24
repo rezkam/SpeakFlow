@@ -521,9 +521,9 @@ private final class SpyMistralProviderSettings: ProviderSettingsProviding {
     var storedKeys: [String: String] = [:]
 
     func apiKey(for providerId: String) -> String? { storedKeys[providerId] }
-    func setApiKey(_ apiKey: String?, for providerId: String) {
+    func setApiKey(_ apiKey: String?, for providerId: String) throws {
         if let apiKey { storedKeys[providerId] = apiKey } else { storedKeys.removeValue(forKey: providerId) }
     }
     func hasApiKey(for providerId: String) -> Bool { storedKeys[providerId] != nil }
-    func removeApiKey(for providerId: String) { storedKeys.removeValue(forKey: providerId) }
+    func removeApiKey(for providerId: String) throws { storedKeys.removeValue(forKey: providerId) }
 }

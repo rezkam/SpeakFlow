@@ -309,8 +309,8 @@ public final class ProviderSettings {
     }
 
     /// Save the API key for a provider to unified auth storage.
-    public func setApiKey(_ apiKey: String?, for providerId: String) {
-        storage.setApiKey(apiKey, for: providerId)
+    public func setApiKey(_ apiKey: String?, for providerId: String) throws {
+        try storage.setApiKey(apiKey, for: providerId)
     }
 
     /// Check if a provider has an API key configured (file or env).
@@ -319,8 +319,8 @@ public final class ProviderSettings {
     }
 
     /// Remove the stored API key for a provider.
-    public func removeApiKey(for providerId: String) {
-        storage.removeApiKey(for: providerId)
+    public func removeApiKey(for providerId: String) throws {
+        try storage.removeApiKey(for: providerId)
     }
 
 }
