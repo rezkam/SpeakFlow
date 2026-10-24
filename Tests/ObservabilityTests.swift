@@ -339,3 +339,25 @@ struct ObservabilitySettingsPropagationTests {
         #expect(await !store.isEnabled(), "The last change must win")
     }
 }
+
+/// One builder describes the recording-relevant settings for diagnostics, so
+/// launch and recording-start snapshots cannot drift apart.
+@Suite("Observability — Settings Snapshot")
+struct ObservabilitySettingsSnapshotTests {
+    @MainActor @Test
+    func snapshotDescribesEveryRecordingRelevantSetting() {
+        let settings = SpySettings()
+        settings.autoEndMinSessionDuration = 0
+        settings.vadVolumeGateEnabled = false
+        settings.streamingTrailingFinalTimeout = 1.5
+
+        let snapshot = SettingsSnapshot.values(settings)
+
+        #expect(snapshot["autoEnd.minSessionDuration"] == "0.0")
+        #expect(snapshot["vad.volumeGateEnabled"] == "false")
+        #expect(snapshot["streaming.trailingFinalTimeout"] == "1.5")
+        #expect(snapshot["behavior.hotkeyRestartsRecording"] == "true")
+        #expect(snapshot["observability.captureTextPayloads"] != nil)
+        #expect(snapshot.count == 21)
+    }
+}
