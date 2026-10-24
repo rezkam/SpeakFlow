@@ -99,4 +99,21 @@ struct TextInserterCancellationTests {
         #expect(recorder.keyDowns.count == 1)
         #expect(recorder.keyUps == 1, "A key-down already posted must always be released")
     }
+
+    @MainActor @Test
+    func nothingIsTypedWithoutACapturedTarget() async throws {
+        let recorder = PostRecorder()
+        let inserter = TextInserter._testMakeIsolatedInstance()
+        inserter._testSetFlagsProvider { [] }
+        inserter._testSetEventPoster { recorder.record($0) }
+
+        inserter.insertText("hello")
+        inserter.deleteChars(1)
+        inserter.pressEnterKey()
+        await inserter.waitForPendingInsertions()
+
+        #expect(recorder.keyDowns.isEmpty, "Without a destination, synthetic input must fail closed")
+        #expect(await inserter.ensureTargetFocused() == false)
+        #expect(!inserter.isTargetAppFrontmost())
+    }
 }

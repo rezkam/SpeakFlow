@@ -419,7 +419,15 @@ final class KeyInterceptor: KeyIntercepting {
     /// If the user is in Spotlight, a password dialog, or another app,
     /// the key passes through so it acts on that UI instead.
     private nonisolated func isFocusInTarget(keyCode: Int64, targetPid: pid_t, targetBundle: String?) -> Bool {
-        guard targetPid != 0 else { return true }
+        // No target app: there is no recording field to protect, so the key
+        // belongs to whatever has focus.
+        guard targetPid != 0 else {
+            HotkeyDiagnostics.record(
+                "key_interceptor_key_passed_no_target",
+                metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
+            )
+            return false
+        }
         let focus = keyboardFocusSnapshotProvider(targetPid, targetBundle)
         guard !focus.isInTargetApp else { return true }
         HotkeyDiagnostics.record(

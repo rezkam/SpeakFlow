@@ -182,9 +182,11 @@ final class TextInserter: TextInserting {
     /// `ensureTargetFocused()` checks that the same app is still frontmost
     /// and waits (up to `focusWaitTimeout`) if the user has switched away.
     ///
-    /// If no element has focus or accessibility permissions are denied, sets
-    /// `targetElement` to `nil` (focus checks will be skipped).
-    func captureTarget() {
+    /// If no element has focus or accessibility permissions are denied, clears
+    /// the target and returns false. Without a target every synthetic action
+    /// fails closed, so callers must not start a recording.
+    @discardableResult
+    func captureTarget() -> Bool {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedElement: CFTypeRef?
 
@@ -204,21 +206,20 @@ final class TextInserter: TextInserting {
 
             // Store the PID for reliable app-level focus comparison
             var pid: pid_t = 0
-            if AXUIElementGetPid(axElement, &pid) == .success {
+            if AXUIElementGetPid(axElement, &pid) == .success, pid != 0 {
                 targetPid = pid
                 targetBundleIdentifier = NSRunningApplication(
                     processIdentifier: pid
                 )?.bundleIdentifier
-            } else {
-                targetPid = 0
-                targetBundleIdentifier = nil
+                return true
             }
-        } else {
-            // No focus or accessibility denied — focus checks will be skipped
-            targetElement = nil
-            targetPid = 0
-            targetBundleIdentifier = nil
         }
+        // No focused element, no owning process, or accessibility denied.
+        targetElement = nil
+        targetPid = 0
+        targetBundleIdentifier = nil
+        observabilityEvent("target_capture_failed", level: .warning)
+        return false
     }
 
     // MARK: - Text Operations
@@ -569,7 +570,7 @@ final class TextInserter: TextInserting {
     /// and wait for the user to switch back voluntarily.
     ///
     /// Flow:
-    /// 1. No target captured → return true (proceed without focus management)
+    /// 1. No target captured → return false (fail closed)
     /// 2. Target app is frontmost → return true (fast path)
     /// 3. Different app is frontmost → poll every 200ms until focus returns or timeout
     /// 4. Timeout expires (`focusWaitTimeout`) → return false (discard pending text)
@@ -584,7 +585,11 @@ final class TextInserter: TextInserting {
     /// that asked has been retired by cancellation or reset.
     private func ensureTargetFocused(generation: UInt64) async -> Bool {
         guard isCurrent(generation) else { return false }
-        guard targetElement != nil, targetPid != 0 else { return true }
+        // No captured destination: refuse rather than type wherever focus is.
+        guard targetElement != nil, targetPid != 0 else {
+            observabilityEvent("insertion_refused_no_target", level: .warning)
+            return false
+        }
 
         guard recoverTargetPidIfNeeded() else { return false }
 
@@ -649,7 +654,7 @@ final class TextInserter: TextInserting {
     /// keyboard focus without changing the frontmost application.
     /// Falls back to `NSWorkspace.frontmostApplication` if the AX query fails.
     func isTargetAppFrontmost() -> Bool {
-        guard targetPid != 0 else { return true }
+        guard targetPid != 0 else { return false }
 
         // Test hook: allows unit tests to inject a deterministic result without
         // depending on live NSWorkspace / AX state (which can be non-deterministic

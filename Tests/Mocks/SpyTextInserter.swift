@@ -31,9 +31,14 @@ final class SpyTextInserter: TextInserting {
         observabilitySessionId = sessionId
     }
 
-    func captureTarget() {
+    /// Result `captureTarget()` reports; set false to simulate an AX failure.
+    var captureSucceeds = true
+
+    @discardableResult
+    func captureTarget() -> Bool {
         captureTargetCalled = true
         operations.append(.captureTarget)
+        return captureSucceeds
     }
 
     func insertText(_ text: String) {

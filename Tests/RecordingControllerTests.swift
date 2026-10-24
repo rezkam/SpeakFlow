@@ -343,3 +343,38 @@ private final class MockBatchProvider: BatchTranscriptionProvider, @unchecked Se
     func transcribe(audio: Data) async throws -> String { "" }
     func validateAPIKey(_ key: String) async -> String? { nil }
 }
+
+@Suite("RecordingController — Target Capture Fails Closed")
+struct RecordingControllerTargetCaptureTests {
+    /// Regression guard: a transient Accessibility failure at start used to
+    /// leave no destination, which disabled every focus protection for the
+    /// session and let dictation follow whichever app was focused later.
+    @MainActor @Test
+    func recordingDoesNotStartWithoutACapturedTarget() {
+        let providerSettings = SpyProviderSettings()
+        let providerRegistry = SpyProviderRegistry()
+        let provider = MockStreamingProvider()
+        provider.isConfigured = true
+        provider.mockSession = MockStreamingSession()
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        providerRegistry.register(provider)
+        let sounds = SpySoundEffectPlayer()
+        let (controller, keyInterceptor, textInserter, banner) = makeTestRecordingController(
+            providerSettings: providerSettings,
+            providerRegistry: providerRegistry,
+            playSoundEffect: { sounds.play($0) }
+        )
+        textInserter.captureSucceeds = false
+
+        controller.startRecording()
+
+        #expect(!controller.isRecording, "Recording must not start without a safe destination")
+        #expect(controller.liveStreamingController == nil, "No audio capture or provider session may start")
+        #expect(keyInterceptor.startCallCount == 0, "Enter/Escape must not be intercepted for a recording that never started")
+        #expect(sounds.count(.error) == 1)
+        #expect(sounds.count(.start) == 0)
+        #expect(banner.bannerMessages.contains { $0.0.contains("text field") },
+                "The user must be told why dictation did not start")
+    }
+}

@@ -8,7 +8,11 @@ protocol TextInserting: AnyObject {
     /// PID of the app that owned the target element when `captureTarget()` was called.
     var targetPid: pid_t { get }
     func setObservabilitySessionId(_ sessionId: UUID?)
-    func captureTarget()
+    /// Captures the focused field as the only destination for this recording.
+    /// Returns false when no safe destination could be identified; callers must
+    /// not start a recording that would type without one.
+    @discardableResult
+    func captureTarget() -> Bool
     /// Atomically replaces a tail segment by deleting `replacingChars` from the end
     /// and then typing `text`. Implementations should preserve ordering as one unit.
     func replaceTail(replacingChars: Int, with text: String)

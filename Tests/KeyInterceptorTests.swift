@@ -38,11 +38,10 @@ struct KeyInterceptorEnterCaptureTests {
 
     @MainActor @Test
     func keypadEnterUsesTheSameOneShotCaptureContract() {
-        let interceptor = KeyInterceptor.shared
-        interceptor.stop()
+        let interceptor = KeyInterceptor.focusedForTests(FakeEventTapDriver().driver)
         defer { interceptor.stop() }
 
-        interceptor._testArmEnterCaptureForTests(active: true)
+        interceptor._testArmEnterCaptureForTests(active: true, targetPid: KeyInterceptor.testTargetPid)
 
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 76),
                 "Keypad Enter should be captured and suppressed")
@@ -121,8 +120,7 @@ struct KeyInterceptorEnterCaptureTests {
 
     @MainActor @Test
     func enterCaptureRecordsDiagnostics() {
-        let interceptor = KeyInterceptor.shared
-        interceptor.stop()
+        let interceptor = KeyInterceptor.focusedForTests(FakeEventTapDriver().driver)
         var events: [HotkeyDiagnosticEvent] = []
         HotkeyDiagnostics._testEventHook = { events.append($0) }
         defer {
@@ -130,7 +128,7 @@ struct KeyInterceptorEnterCaptureTests {
             interceptor.stop()
         }
 
-        interceptor._testArmEnterCaptureForTests(active: true)
+        interceptor._testArmEnterCaptureForTests(active: true, targetPid: KeyInterceptor.testTargetPid)
 
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 36),
                 "Armed Enter should be captured and suppressed")
