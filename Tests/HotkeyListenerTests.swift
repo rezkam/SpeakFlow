@@ -218,3 +218,68 @@ struct HotkeyListenerKeyRepeatTests {
         #expect(activations == 1, "Only the fresh press toggles dictation; repeats while held must not")
     }
 }
+
+/// Double-tap Control must mean two isolated Control taps, not two shortcuts.
+@Suite("HotkeyListener — Double-Tap Excludes Shortcuts", .serialized)
+struct HotkeyListenerDoubleTapShortcutTests {
+    private func flags(_ flags: CGEventFlags) -> CGEvent {
+        let event = CGEvent(source: nil)!
+        event.type = .flagsChanged
+        event.flags = flags
+        return event
+    }
+
+    private func keyDown(_ keyCode: CGKeyCode, flags: CGEventFlags) -> CGEvent {
+        let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)!
+        event.flags = flags
+        return event
+    }
+
+    @MainActor
+    private func detections(_ steps: (HotkeyListener) -> Void) -> Int {
+        let listener = HotkeyListener()
+        var count = 0
+        listener._testDoubleTapDetected = { count += 1 }
+        steps(listener)
+        return count
+    }
+
+    @MainActor @Test
+    func twoControlShortcutsInQuickSuccessionDoNotToggle() {
+        let count = detections { listener in
+            for key: CGKeyCode in [8, 9] { // Control+C, then Control+V
+                listener.handleFlagsChanged(event: flags([.maskControl]))
+                listener.handleTapKeyDown(event: keyDown(key, flags: [.maskControl]))
+                listener.handleFlagsChanged(event: flags([]))
+            }
+        }
+        #expect(count == 0, "Control used for shortcuts is not a tap")
+    }
+
+    @MainActor @Test
+    func controlCommandChordReleasedCommandFirstDoesNotCount() {
+        let count = detections { listener in
+            for _ in 0..<2 {
+                listener.handleFlagsChanged(event: flags([.maskControl]))
+                listener.handleFlagsChanged(event: flags([.maskControl, .maskCommand]))
+                listener.handleFlagsChanged(event: flags([.maskControl]))
+                listener.handleFlagsChanged(event: flags([]))
+            }
+        }
+        #expect(count == 0, "A Control press that took part in a chord is not a tap")
+    }
+
+    @MainActor @Test
+    func shortcutThenTapThenTapStillToggles() {
+        let count = detections { listener in
+            listener.handleFlagsChanged(event: flags([.maskControl]))
+            listener.handleTapKeyDown(event: keyDown(8, flags: [.maskControl]))
+            listener.handleFlagsChanged(event: flags([]))
+            for _ in 0..<2 {
+                listener.handleFlagsChanged(event: flags([.maskControl]))
+                listener.handleFlagsChanged(event: flags([]))
+            }
+        }
+        #expect(count == 1, "Two isolated taps after a shortcut still toggle once")
+    }
+}
