@@ -237,12 +237,15 @@ public final class Transcription {
         activeBatchProvider = provider
     }
 
-    private static func isCancellation(_ error: Error) -> Bool {
+    nonisolated static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError {
             return true
         }
         if let transcriptionError = error as? TranscriptionError,
            case .cancelled = transcriptionError {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
             return true
         }
         return false

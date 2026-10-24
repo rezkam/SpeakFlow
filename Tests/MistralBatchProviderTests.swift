@@ -527,3 +527,70 @@ private final class SpyMistralProviderSettings: ProviderSettingsProviding {
     func hasApiKey(for providerId: String) -> Bool { storedKeys[providerId] != nil }
     func removeApiKey(for providerId: String) throws { storedKeys.removeValue(forKey: providerId) }
 }
+
+/// HTTP provider that fails with a fixed error.
+private final class ThrowingHTTPProvider: HTTPDataProvider, @unchecked Sendable {
+    let error: any Error
+    init(_ error: any Error) { self.error = error }
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) { throw error }
+}
+
+/// Cancelling an upload is cancellation, not a network failure: no failure
+/// metrics, error cue, or network-error banner.
+@Suite("MistralBatchProvider — cancellation")
+struct MistralBatchCancellationTests {
+    @MainActor
+    private func makeProvider(
+        logger: any ProviderLogging,
+        httpDataProvider: any HTTPDataProvider
+    ) -> MistralBatchProvider {
+        let providerSettings = SpyMistralProviderSettings()
+        providerSettings.storedKeys[ProviderId.mistral] = "test-key"
+        return MistralBatchProvider(
+            providerSettings: providerSettings,
+            settings: SpyMistralSettings(),
+            hasAPIKey: { _ in true },
+            logger: logger,
+            httpDataProvider: httpDataProvider
+        )
+    }
+
+    @Test @MainActor
+    func taskCancellationStaysCancellation() async {
+        let provider = makeProvider(logger: SpyProviderLogger(), httpDataProvider: ThrowingHTTPProvider(CancellationError()))
+        await #expect(throws: CancellationError.self) { _ = try await provider.transcribe(audio: Data("audio".utf8)) }
+    }
+
+    @Test @MainActor
+    func cancelledURLRequestBecomesCancellation() async {
+        let provider = makeProvider(logger: SpyProviderLogger(), httpDataProvider: ThrowingHTTPProvider(URLError(.cancelled)))
+        await #expect(throws: CancellationError.self) { _ = try await provider.transcribe(audio: Data("audio".utf8)) }
+    }
+
+    @Test @MainActor
+    func otherTransportFailuresAreStillNetworkErrors() async {
+        let provider = makeProvider(logger: SpyProviderLogger(), httpDataProvider: ThrowingHTTPProvider(URLError(.timedOut)))
+        do {
+            _ = try await provider.transcribe(audio: Data("audio".utf8))
+            Issue.record("Expected a network error")
+        } catch let error as MistralBatchError {
+            guard case .networkError = error else {
+                Issue.record("Expected networkError, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected MistralBatchError, got \(error)")
+        }
+    }
+}
+
+@Suite("Transcription — cancellation recognition")
+struct TranscriptionCancellationRecognitionTests {
+    @Test
+    func cancelledRequestsAreCancellationNotFailures() {
+        #expect(Transcription.isCancellation(CancellationError()))
+        #expect(Transcription.isCancellation(URLError(.cancelled)),
+                "A cancelled URL request must not count as a failed chunk")
+        #expect(!Transcription.isCancellation(URLError(.timedOut)))
+    }
+}
