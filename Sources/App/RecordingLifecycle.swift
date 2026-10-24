@@ -86,6 +86,6 @@ final class KeyInterceptorRecordingComponent: RecordingComponent {
     }
 
     func recordingWasCancelled() {
-        interceptor.stop()
+        interceptor.cancel()
     }
 }

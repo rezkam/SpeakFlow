@@ -32,6 +32,17 @@ final class KeyInterceptor: KeyIntercepting {
         /// One-shot Enter capture token. Armed at recording start, consumed by the
         /// first intercepted Enter so subsequent Enters pass through normally.
         var enterCaptureArmed: Bool = false
+        /// Keys the tap already swallowed whose handler has not run yet. Set in the
+        /// same critical section that decides to swallow, so a swallowed key is
+        /// always either delivered (async hop or `stop()`) or deliberately
+        /// discarded (`cancel()`), never silently lost.
+        var pendingKeys = PendingKeys()
+    }
+
+    struct PendingKeys: Equatable {
+        var escape = false
+        var enter = false
+        var isEmpty: Bool { !escape && !enter }
     }
 
     /// Creates and toggles the system event tap. Injected so tests can observe
@@ -168,11 +179,29 @@ final class KeyInterceptor: KeyIntercepting {
     }
 
     func stop() {
-        let (tap, source, targetPid) = state.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, pid_t) in
-            let result = (s.recordingEventTap, s.recordingRunLoopSource, s.targetPid)
+        let pending = tearDown(phase: "stop")
+        deliver(pending, phase: "stop")
+    }
+
+    func cancel() {
+        let pending = tearDown(phase: "cancel")
+        if !pending.isEmpty {
+            HotkeyDiagnostics.record(
+                "key_interceptor_pending_keys_discarded",
+                metadata: ["escape": String(pending.escape), "enter": String(pending.enter)]
+            )
+        }
+    }
+
+    /// Removes the tap and returns keys that were swallowed but not yet delivered.
+    private func tearDown(phase: String) -> PendingKeys {
+        let (tap, source, targetPid, pending) = state.withLockUnchecked {
+            s -> (CFMachPort?, CFRunLoopSource?, pid_t, PendingKeys) in
+            let result = (s.recordingEventTap, s.recordingRunLoopSource, s.targetPid, s.pendingKeys)
             s.isActive = false
             s.targetPid = 0
             s.enterCaptureArmed = false
+            s.pendingKeys = PendingKeys()
             s.recordingEventTap = nil
             s.recordingRunLoopSource = nil
             return result
@@ -186,6 +215,7 @@ final class KeyInterceptor: KeyIntercepting {
         if let tap { CFMachPortInvalidate(tap) }
         let metadata = [
             "targetPid": String(targetPid),
+            "phase": phase,
             "hadEventTap": tap == nil ? "false" : "true",
             "hadRunLoopSource": source == nil ? "false" : "true"
         ]
@@ -193,6 +223,29 @@ final class KeyInterceptor: KeyIntercepting {
             HotkeyDiagnostics.record("key_interceptor_registration_stopped", metadata: metadata)
         } else {
             HotkeyDiagnostics.record("key_interceptor_registration_stop_noop", level: .debug, metadata: metadata)
+        }
+        return pending
+    }
+
+    /// Runs on the main actor after the tap swallowed a key. Takes whatever is
+    /// still pending; if `stop()` or `cancel()` already took it, this is a no-op.
+    private func deliverPendingKeys() {
+        let pending = state.withLockUnchecked { s -> PendingKeys in
+            let pending = s.pendingKeys
+            s.pendingKeys = PendingKeys()
+            return pending
+        }
+        deliver(pending, phase: "handler")
+    }
+
+    private func deliver(_ pending: PendingKeys, phase: String) {
+        if pending.escape {
+            HotkeyDiagnostics.record("key_interceptor_escape_handler_invoked", metadata: ["phase": phase])
+            onEscapePressed?()
+        }
+        if pending.enter {
+            HotkeyDiagnostics.record("key_interceptor_enter_handler_invoked", metadata: ["phase": phase])
+            onEnterPressed?()
         }
     }
 
@@ -269,6 +322,7 @@ final class KeyInterceptor: KeyIntercepting {
             $0.isActive = false
             $0.targetPid = 0
             $0.enterCaptureArmed = false
+            $0.pendingKeys = PendingKeys()
             $0.recordingEventTap = nil
             $0.recordingRunLoopSource = nil
         }
@@ -307,12 +361,18 @@ final class KeyInterceptor: KeyIntercepting {
 
         switch keyCode {
         case 53:
-            let metadata = Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
-            HotkeyDiagnostics.record("key_interceptor_escape_captured", metadata: metadata)
-            Task { @MainActor [weak self] in
-                HotkeyDiagnostics.record("key_interceptor_escape_handler_invoked", metadata: metadata)
-                self?.onEscapePressed?()
+            let captured = state.withLockUnchecked { s -> Bool in
+                // Interception may have stopped while focus was being checked.
+                guard s.isActive else { return false }
+                s.pendingKeys.escape = true
+                return true
             }
+            guard captured else { return Unmanaged.passRetained(event) }
+            HotkeyDiagnostics.record(
+                "key_interceptor_escape_captured",
+                metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
+            )
+            scheduleDelivery()
             return nil
         case 36, 76:
             guard consumeEnterCaptureToken() else {
@@ -324,22 +384,28 @@ final class KeyInterceptor: KeyIntercepting {
                 )
                 return Unmanaged.passRetained(event)
             }
-            let metadata = Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
-            HotkeyDiagnostics.record("key_interceptor_enter_captured", metadata: metadata)
-            Task { @MainActor [weak self] in
-                HotkeyDiagnostics.record("key_interceptor_enter_handler_invoked", metadata: metadata)
-                self?.onEnterPressed?()
-            }
+            HotkeyDiagnostics.record(
+                "key_interceptor_enter_captured",
+                metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
+            )
+            scheduleDelivery()
             return nil
         default:
             return Unmanaged.passRetained(event)
         }
     }
 
+    private nonisolated func scheduleDelivery() {
+        Task { @MainActor [weak self] in self?.deliverPendingKeys() }
+    }
+
+    /// Consumes the one-shot Enter token and marks the Enter pending delivery
+    /// in one critical section.
     private nonisolated func consumeEnterCaptureToken() -> Bool {
         state.withLockUnchecked { state in
             guard state.isActive, state.enterCaptureArmed else { return false }
             state.enterCaptureArmed = false
+            state.pendingKeys.enter = true
             return true
         }
     }
@@ -451,8 +517,11 @@ final class KeyInterceptor: KeyIntercepting {
 #if DEBUG
 extension KeyInterceptor {
     // swiftlint:disable:next identifier_name
+    /// Consumes only the token; the Enter is not left pending for delivery.
     nonisolated func _testConsumeEnterCaptureToken() -> Bool {
-        consumeEnterCaptureToken()
+        let consumed = consumeEnterCaptureToken()
+        state.withLockUnchecked { $0.pendingKeys.enter = false }
+        return consumed
     }
 
     // swiftlint:disable:next identifier_name

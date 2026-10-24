@@ -427,9 +427,13 @@ final class RecordingController {
                 await self.textInserter.waitForPendingInsertions()
                 self.endMetricsSession(reason: reason.rawValue)
                 guard self.isProcessingFinal, !self.isRecording else { return }
+                // Stopping interception delivers any Enter or Escape the tap already
+                // swallowed, so read the submit request only after it returns.
+                self.lifecycleCoordinator.stop()
+                // A delivered Escape cancels the recording; nothing is left to finish.
+                guard self.isProcessingFinal, !self.isRecording else { return }
                 let enterRequested = self.shouldPressEnterOnComplete
                 self.shouldPressEnterOnComplete = false
-                self.lifecycleCoordinator.stop()
                 self.isProcessingFinal = false
                 self.hasCapturedSubmitEnter = false
                 if enterRequested {
@@ -558,7 +562,10 @@ final class RecordingController {
         // Re-check: another task may have completed finalization during the sleeps.
         guard isProcessingFinal, !isRecording else { return }
 
+        // Stopping interception delivers any Enter or Escape the tap already
+        // swallowed. A delivered Escape cancels the recording.
         lifecycleCoordinator.stop()
+        guard isProcessingFinal, !isRecording else { return }
         isProcessingFinal = false
         hasCapturedSubmitEnter = false
         transcription.setActiveBatchProvider(nil)

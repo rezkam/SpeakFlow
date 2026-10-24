@@ -483,7 +483,7 @@ struct StreamingRecordingTests {
         #expect(!ctx.controller.isProcessingFinal, "Should not be processing final")
         #expect(ctx.controller.fullTranscript.isEmpty, "Transcript should be cleared")
         #expect(ctx.textInserter.cancelCalled, "Text inserter should be cancelled")
-        #expect(ctx.keyInterceptor.stopCallCount >= 1, "Key interceptor should be stopped")
+        #expect(ctx.keyInterceptor.cancelCallCount >= 1, "Key interception should be cancelled")
     }
 
     /// Regression guard:
