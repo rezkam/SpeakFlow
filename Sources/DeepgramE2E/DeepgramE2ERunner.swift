@@ -293,7 +293,7 @@ func looseMatch(expected: String, actual: String) -> Bool {
         print("   Usage: DEEPGRAM_API_KEY=your_key swift run DeepgramE2E")
         exit(1)
     }
-    ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
+    try? ProviderSettings.shared.setApiKey(apiKey, for: ProviderId.deepgram)
 
     var passed = 0
     var failed = 0

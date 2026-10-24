@@ -26,6 +26,7 @@ final class AuthController {
     private let callbackServerFactory: (String) -> any OAuthCallbackServing
     private let openAuthorizationURL: (URL) -> Void
     private let exchangeAuthorizationCode: (String, OpenAICodexAuth.AuthorizationFlow) async throws -> Void
+    private let deleteChatGPTCredentials: () throws -> Void
 
     init(
         appState: any BannerPresenting = SpeakFlow.AppState.shared,
@@ -40,7 +41,8 @@ final class AuthController {
             OpenAICodexAuth.AuthorizationFlow
         ) async throws -> Void = { code, flow in
             _ = try await OpenAICodexAuth.exchangeCodeForTokens(code: code, flow: flow)
-        }
+        },
+        deleteChatGPTCredentials: @escaping () throws -> Void = { try OpenAICodexAuth.deleteCredentials() }
     ) {
         self.appState = appState
         self.providerSettings = providerSettings
@@ -48,6 +50,7 @@ final class AuthController {
         self.callbackServerFactory = callbackServerFactory
         self.openAuthorizationURL = openAuthorizationURL
         self.exchangeAuthorizationCode = exchangeAuthorizationCode
+        self.deleteChatGPTCredentials = deleteChatGPTCredentials
     }
 
     // MARK: - ChatGPT
@@ -61,7 +64,17 @@ final class AuthController {
     }
 
     func handleLogout() {
-        OpenAICodexAuth.deleteCredentials()
+        do {
+            try deleteChatGPTCredentials()
+        } catch {
+            Logger.auth.error("Logout failed: \(error.localizedDescription, privacy: .public)")
+            appState.refresh()
+            appState.showBanner(
+                "Logout failed — your ChatGPT credentials could not be removed. \(error.localizedDescription)",
+                style: .error, duration: 8
+            )
+            return
+        }
         appState.refresh()
         appState.showBanner("Logged out from ChatGPT", style: .success)
     }
@@ -109,7 +122,16 @@ final class AuthController {
     // MARK: - API Key Management
 
     func handleRemoveApiKey(for providerId: String) {
-        providerSettings.removeApiKey(for: providerId)
+        do {
+            try providerSettings.removeApiKey(for: providerId)
+        } catch {
+            Logger.auth.error("Removing API key failed: \(error.localizedDescription, privacy: .public)")
+            appState.showBanner(
+                "Could not remove the API key. \(error.localizedDescription)",
+                style: .error, duration: 8
+            )
+            return
+        }
         let activeId = providerSettings.activeProviderId
         if !(providerRegistry.provider(for: activeId)?.isConfigured ?? false) {
             // Fall back to the first remaining configured provider, or first registered

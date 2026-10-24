@@ -256,6 +256,7 @@ public final class OpenAICodexAuth {
     // MARK: - Token Exchange
     
     public static func exchangeCodeForTokens(code: String, flow: AuthorizationFlow) async throws -> OAuthCredentials {
+        let generation = storage.chatGPTCredentialGeneration()
         var request = URLRequest(url: tokenEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -306,8 +307,9 @@ public final class OpenAICodexAuth {
             lastRefresh: Date()
         )
 
-        // Save credentials in Codex format
-        try saveCredentials(credentials)
+        // Save credentials in Codex format, unless a logout or another login
+        // happened while this exchange was in flight.
+        try saveCredentials(credentials, expectedGeneration: generation)
         
         Logger.auth.info("Successfully logged in to OpenAI Codex")
         return credentials
@@ -316,6 +318,7 @@ public final class OpenAICodexAuth {
     // MARK: - Token Refresh
     
     public static func refreshTokens(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
+        let generation = storage.chatGPTCredentialGeneration()
         var request = URLRequest(url: tokenEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -364,8 +367,9 @@ public final class OpenAICodexAuth {
             lastRefresh: Date()
         )
 
-        // Save updated credentials
-        try saveCredentials(newCredentials)
+        // Save updated credentials, unless a logout or a newer login happened
+        // while this refresh was in flight.
+        try saveCredentials(newCredentials, expectedGeneration: generation)
         
         Logger.auth.info("Successfully refreshed OpenAI Codex tokens")
         return newCredentials
@@ -400,8 +404,8 @@ public final class OpenAICodexAuth {
     
     // MARK: - Credential Storage (delegated to UnifiedAuthStorage)
 
-    public static func saveCredentials(_ credentials: OAuthCredentials) throws {
-        try storage.saveChatGPTCredentials(credentials)
+    public static func saveCredentials(_ credentials: OAuthCredentials, expectedGeneration: UInt64? = nil) throws {
+        try storage.saveChatGPTCredentials(credentials, expectedGeneration: expectedGeneration)
         Logger.auth.debug("Credentials saved")
     }
 
@@ -409,8 +413,8 @@ public final class OpenAICodexAuth {
         storage.loadChatGPTCredentials()
     }
 
-    public static func deleteCredentials() {
-        storage.deleteChatGPTCredentials()
+    public static func deleteCredentials() throws {
+        try storage.deleteChatGPTCredentials()
         Logger.auth.info("Credentials deleted")
     }
     
@@ -437,7 +441,7 @@ public final class OpenAICodexAuth {
 
 // MARK: - Errors
 
-public enum AuthError: LocalizedError {
+public enum AuthError: LocalizedError, Equatable {
     case notLoggedIn
     case tokenExchangeFailed(String)
     case tokenRefreshFailed(String)
@@ -445,6 +449,9 @@ public enum AuthError: LocalizedError {
     case stateMismatch
     case missingCode
     case randomGenerationFailed
+    /// Credentials changed (logout or a newer login) while this exchange or
+    /// refresh was in flight; its result is discarded.
+    case credentialsChanged
     
     public var errorDescription: String? {
         switch self {
@@ -462,6 +469,8 @@ public enum AuthError: LocalizedError {
             return String(localized: "Missing authorization code")
         case .randomGenerationFailed:
             return String(localized: "Failed to generate secure random bytes for OAuth flow")
+        case .credentialsChanged:
+            return String(localized: "ChatGPT credentials changed while signing in; the result was discarded")
         }
     }
 }
