@@ -1,3 +1,4 @@
+import os
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
@@ -146,9 +147,23 @@ struct KeyInterceptorEnterCaptureTests {
         })
     }
 
+    @MainActor
+    private func makeSecureInputInterceptor(
+        owner: @escaping () -> pid_t?,
+        bundles: [pid_t: String] = [:],
+        pollingInterval: Duration = .seconds(1)
+    ) -> KeyInterceptor {
+        KeyInterceptor(
+            eventTapDriver: FakeEventTapDriver().driver,
+            bundleIdentifierLookup: { bundles[$0] },
+            secureInputOwner: owner,
+            secureInputPollingInterval: pollingInterval
+        )
+    }
+
     @MainActor @Test
-    func secureInputAtStartRecordsBlockedKeyDiagnostics() {
-        let interceptor = KeyInterceptor(isSecureInputEnabled: { true })
+    func secureInputHeldByTheTargetAppIsAWarning() {
+        let interceptor = makeSecureInputInterceptor(owner: { 42 })
         var events: [HotkeyDiagnosticEvent] = []
         HotkeyDiagnostics._testEventHook = { events.append($0) }
         defer {
@@ -162,17 +177,16 @@ struct KeyInterceptorEnterCaptureTests {
             event.name == "key_interceptor_secure_input_detected" &&
                 event.level == .warning &&
                 event.metadata["targetPid"] == "42" &&
-                event.metadata["enterCaptureAvailable"] == "false" &&
-                event.metadata["escapeCaptureAvailable"] == "false"
+                event.metadata["ownerPid"] == "42" &&
+                event.metadata["ownerIsTargetApp"] == "true"
         })
     }
 
     @MainActor @Test
-    func secureInputTransitionsDuringRecordingAreRecorded() async throws {
-        var secureInputEnabled = false
-        let interceptor = KeyInterceptor(
-            isSecureInputEnabled: { secureInputEnabled },
-            secureInputPollingInterval: .milliseconds(10)
+    func secureInputHeldByTheTargetAppsHelperIsAWarning() {
+        let interceptor = makeSecureInputInterceptor(
+            owner: { 99 },
+            bundles: [42: "com.vendor.Terminal", 99: "com.vendor.Terminal.helper"]
         )
         var events: [HotkeyDiagnosticEvent] = []
         HotkeyDiagnostics._testEventHook = { events.append($0) }
@@ -181,26 +195,75 @@ struct KeyInterceptorEnterCaptureTests {
             interceptor.stop()
         }
 
-        interceptor._testStartSecureInputMonitoring(targetPid: 43, initialState: false)
-        secureInputEnabled = true
-        try await waitUntil(interval: .milliseconds(10)) {
-            events.contains { $0.name == "key_interceptor_secure_input_detected" }
-        }
+        interceptor.start(targetPid: 42)
 
         #expect(events.contains { event in
             event.name == "key_interceptor_secure_input_detected" &&
-                event.metadata["targetPid"] == "43" &&
-                event.metadata["phase"] == "monitor"
+                event.level == .warning &&
+                event.metadata["ownerIsTargetApp"] == "true"
         })
+    }
 
-        secureInputEnabled = false
+    /// Regression guard: a background app holding secure input (observed with
+    /// messaging apps) did not stop capture in another app, so it must not be
+    /// reported as capture being unavailable.
+    @MainActor @Test
+    func secureInputHeldByAnotherAppIsRecordedWithoutClaimingCaptureIsBlocked() {
+        let interceptor = makeSecureInputInterceptor(
+            owner: { 7 },
+            bundles: [42: "com.vendor.Terminal", 7: "com.other.Chat"]
+        )
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer {
+            HotkeyDiagnostics._testEventHook = nil
+            interceptor.stop()
+        }
+
+        interceptor.start(targetPid: 42)
+
+        let detected = events.first { $0.name == "key_interceptor_secure_input_detected" }
+        #expect(detected?.level == .info, "Secure input held elsewhere is context, not a warning")
+        #expect(detected?.metadata["ownerPid"] == "7")
+        #expect(detected?.metadata["ownerBundleIdentifier"] == "com.other.Chat")
+        #expect(detected?.metadata["ownerIsTargetApp"] == "false")
+        #expect(detected?.metadata["enterCaptureAvailable"] == nil,
+                "Whether a background holder blocks capture is not known; do not assert it")
+    }
+
+    @MainActor @Test
+    func secureInputOwnerChangesDuringRecordingAreRecorded() async throws {
+        let owner = OSAllocatedUnfairLock<pid_t?>(initialState: nil)
+        let interceptor = makeSecureInputInterceptor(
+            owner: { owner.withLock { $0 } },
+            pollingInterval: .milliseconds(10)
+        )
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer {
+            HotkeyDiagnostics._testEventHook = nil
+            interceptor.stop()
+        }
+
+        interceptor._testStartSecureInputMonitoring(targetPid: 43, initialOwner: nil)
+        owner.withLock { $0 = 7 }
+        try await waitUntil(interval: .milliseconds(10)) {
+            events.contains { $0.name == "key_interceptor_secure_input_detected" }
+        }
+        owner.withLock { $0 = 43 }
+        try await waitUntil(interval: .milliseconds(10)) {
+            events.contains { $0.name == "key_interceptor_secure_input_detected" && $0.metadata["ownerPid"] == "43" }
+        }
+        owner.withLock { $0 = nil }
         try await waitUntil(interval: .milliseconds(10)) {
             events.contains { $0.name == "key_interceptor_secure_input_cleared" }
         }
 
-        #expect(events.contains { event in
-            event.name == "key_interceptor_secure_input_cleared" &&
-                event.metadata["targetPid"] == "43"
-        })
+        let detected = events.filter { $0.name == "key_interceptor_secure_input_detected" }
+        #expect(detected.map { $0.metadata["ownerPid"] } == ["7", "43"],
+                "A change of holder must be recorded, not only on/off")
+        #expect(detected.allSatisfy { $0.metadata["phase"] == "monitor" && $0.metadata["targetPid"] == "43" })
+        #expect(detected.last?.level == .warning, "The target app taking secure input is a warning")
+        #expect(events.contains { $0.name == "key_interceptor_secure_input_cleared" && $0.metadata["targetPid"] == "43" })
     }
 }

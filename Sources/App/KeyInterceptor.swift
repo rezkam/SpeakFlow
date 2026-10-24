@@ -1,6 +1,5 @@
 import ApplicationServices
 import AppKit
-import Carbon.HIToolbox
 import OSLog
 import SpeakFlowCore
 import os
@@ -81,10 +80,15 @@ final class KeyInterceptor: KeyIntercepting {
     private let eventTapDriver: EventTapDriver
     private let keyboardFocusSnapshotProvider: @Sendable (_ targetPid: pid_t, _ targetBundle: String?) -> KeyboardFocusSnapshot
     private let bundleIdentifierLookup: @Sendable (pid_t) -> String?
-    private let secureInputStatusProvider: () -> Bool
+    private let secureInputOwnerProvider: () -> pid_t?
     private let secureInputPollingInterval: Duration
     private var secureInputMonitorTask: Task<Void, Never>?
-    private var lastSecureInputEnabled: Bool?
+    /// Secure-input holder last observed while monitoring; nil when not monitoring.
+    private var secureInputObservation: SecureInputObservation?
+
+    private struct SecureInputObservation {
+        var owner: pid_t?
+    }
 
     init(
         eventTapDriver: EventTapDriver = .system,
@@ -92,7 +96,7 @@ final class KeyInterceptor: KeyIntercepting {
         bundleIdentifierLookup: @escaping @Sendable (pid_t) -> String? = {
             NSRunningApplication(processIdentifier: $0)?.bundleIdentifier
         },
-        isSecureInputEnabled: @escaping () -> Bool = { IsSecureEventInputEnabled() },
+        secureInputOwner: @escaping () -> pid_t? = KeyInterceptor.currentSecureInputOwner,
         secureInputPollingInterval: Duration = .seconds(1)
     ) {
         self.eventTapDriver = eventTapDriver
@@ -105,7 +109,7 @@ final class KeyInterceptor: KeyIntercepting {
                 bundleIdentifierLookup: bundleIdentifierLookup
             )
         }
-        secureInputStatusProvider = isSecureInputEnabled
+        secureInputOwnerProvider = secureInputOwner
         self.secureInputPollingInterval = secureInputPollingInterval
     }
 
@@ -116,7 +120,7 @@ final class KeyInterceptor: KeyIntercepting {
         eventTapDriver = .system
         keyboardFocusSnapshotProvider = { targetPid, _ in testKeyboardFocusSnapshotProvider(targetPid) }
         bundleIdentifierLookup = { _ in nil }
-        secureInputStatusProvider = { IsSecureEventInputEnabled() }
+        secureInputOwnerProvider = Self.currentSecureInputOwner
         secureInputPollingInterval = .seconds(1)
     }
 #endif
@@ -151,17 +155,17 @@ final class KeyInterceptor: KeyIntercepting {
             $0.targetBundleIdentifier = targetBundle
             $0.enterCaptureArmed = true
         }
-        let secureInputEnabled = secureInputStatusProvider()
+        let secureInputOwner = secureInputOwnerProvider()
         HotkeyDiagnostics.record(
             "key_interceptor_registration_started",
             metadata: [
                 "targetPid": String(targetPid),
                 "accessibilityTrusted": AXIsProcessTrusted() ? "true" : "false",
-                "secureInputEnabled": secureInputEnabled ? "true" : "false"
+                "secureInputOwnerPid": secureInputOwner.map(String.init) ?? "none"
             ]
         )
-        if secureInputEnabled {
-            recordSecureInputDetected(targetPid: targetPid, phase: "start")
+        if let secureInputOwner {
+            recordSecureInputDetected(owner: secureInputOwner, targetPid: targetPid, phase: "start")
         }
 
         let tap = eventTapDriver.createTap(Unmanaged.passUnretained(self).toOpaque())
@@ -187,7 +191,7 @@ final class KeyInterceptor: KeyIntercepting {
         }
         tapThread.start(name: "SpeakFlow.KeyInterceptor.EventTap")
         eventTapDriver.setTapEnabled(tap, true)
-        startSecureInputMonitoring(targetPid: targetPid, initialState: secureInputEnabled)
+        startSecureInputMonitoring(targetPid: targetPid, initialOwner: secureInputOwner)
         HotkeyDiagnostics.record(
             "key_interceptor_registration_succeeded",
             metadata: [
@@ -273,9 +277,9 @@ final class KeyInterceptor: KeyIntercepting {
         }
     }
 
-    private func startSecureInputMonitoring(targetPid: pid_t, initialState: Bool) {
+    private func startSecureInputMonitoring(targetPid: pid_t, initialOwner: pid_t?) {
         stopSecureInputMonitoring()
-        lastSecureInputEnabled = initialState
+        secureInputObservation = SecureInputObservation(owner: initialOwner)
         secureInputMonitorTask = Task { @MainActor [weak self] in
             guard let interval = self?.secureInputPollingInterval else { return }
             while !Task.isCancelled {
@@ -293,17 +297,17 @@ final class KeyInterceptor: KeyIntercepting {
     private func stopSecureInputMonitoring() {
         secureInputMonitorTask?.cancel()
         secureInputMonitorTask = nil
-        lastSecureInputEnabled = nil
+        secureInputObservation = nil
     }
 
     private func recordSecureInputTransitionIfNeeded(targetPid: pid_t, phase: String) {
-        guard let previousState = lastSecureInputEnabled else { return }
-        let currentState = secureInputStatusProvider()
-        guard currentState != previousState else { return }
-        lastSecureInputEnabled = currentState
+        guard let previous = secureInputObservation else { return }
+        let currentOwner = secureInputOwnerProvider()
+        guard currentOwner != previous.owner else { return }
+        secureInputObservation = SecureInputObservation(owner: currentOwner)
 
-        if currentState {
-            recordSecureInputDetected(targetPid: targetPid, phase: phase)
+        if let currentOwner {
+            recordSecureInputDetected(owner: currentOwner, targetPid: targetPid, phase: phase)
         } else {
             HotkeyDiagnostics.record(
                 "key_interceptor_secure_input_cleared",
@@ -315,14 +319,25 @@ final class KeyInterceptor: KeyIntercepting {
         }
     }
 
-    private func recordSecureInputDetected(targetPid: pid_t, phase: String) {
+    /// Records which process holds Secure Event Input. While the target app
+    /// itself holds it, the tap is expected not to see Enter or Escape. A
+    /// different holder is recorded as context only: capture was observed to
+    /// keep working in other apps while a background app held secure input.
+    private func recordSecureInputDetected(owner: pid_t, targetPid: pid_t, phase: String) {
+        let targetBundle = state.withLockUnchecked { $0.targetBundleIdentifier }
+        let ownerBundle = bundleIdentifierLookup(owner)
+        let ownerIsTargetApp = targetPid != 0 && (
+            owner == targetPid
+                || TextInserter.bundleIdentifiersLikelySameApp(target: targetBundle, candidate: ownerBundle)
+        )
         HotkeyDiagnostics.record(
             "key_interceptor_secure_input_detected",
-            level: .warning,
+            level: ownerIsTargetApp ? .warning : .info,
             metadata: [
                 "targetPid": String(targetPid),
-                "enterCaptureAvailable": "false",
-                "escapeCaptureAvailable": "false",
+                "ownerPid": String(owner),
+                "ownerBundleIdentifier": ownerBundle ?? "unknown",
+                "ownerIsTargetApp": String(ownerIsTargetApp),
                 "phase": phase
             ]
         )
@@ -548,6 +563,16 @@ final class KeyInterceptor: KeyIntercepting {
         return pid
     }
 
+    /// Process the window server reports as holding Secure Event Input, if any.
+    /// Unlike Carbon's `IsSecureEventInputEnabled()`, which is true while any
+    /// process holds it, this names the holder so it can be compared with the target.
+    nonisolated static func currentSecureInputOwner() -> pid_t? {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+              let pid = (session["kCGSSessionSecureInputPID"] as? NSNumber)?.int32Value,
+              pid > 0 else { return nil }
+        return pid
+    }
+
     private nonisolated static let commandModifiers: CGEventFlags = [
         .maskShift, .maskAlternate, .maskCommand, .maskControl
     ]
@@ -638,8 +663,8 @@ extension KeyInterceptor {
     }
 
     // swiftlint:disable:next identifier_name
-    @MainActor func _testStartSecureInputMonitoring(targetPid: pid_t, initialState: Bool) {
-        startSecureInputMonitoring(targetPid: targetPid, initialState: initialState)
+    @MainActor func _testStartSecureInputMonitoring(targetPid: pid_t, initialOwner: pid_t?) {
+        startSecureInputMonitoring(targetPid: targetPid, initialOwner: initialOwner)
     }
 }
 #endif

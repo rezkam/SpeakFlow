@@ -81,7 +81,7 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func stopInvalidatesTheEventTapSoItIsNotLeaked() throws {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
 
         interceptor.start(targetPid: 42)
         let tap = try #require(fake.createdTaps.first)
@@ -104,7 +104,7 @@ struct KeyInterceptorRegistrationTests {
                 return .init(focusedPid: pid, focusedAppPid: pid, source: "test")
             },
             bundleIdentifierLookup: { _ in nil },
-            isSecureInputEnabled: { false }
+            secureInputOwner: { nil }
         )
         defer { interceptor.stop() }
 
@@ -125,7 +125,7 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func stopDeliversACapturedEnterBeforeReturning() {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
         var enterCallbacks = 0
         interceptor.onEnterPressed = { enterCallbacks += 1 }
 
@@ -142,7 +142,7 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func stopDeliversACapturedEscapeBeforeReturning() {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
         var escapeCallbacks = 0
         interceptor.onEscapePressed = { escapeCallbacks += 1 }
 
@@ -157,7 +157,7 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func capturedKeyIsDeliveredExactlyOnce() async throws {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
         var enterCallbacks = 0
         interceptor.onEnterPressed = { enterCallbacks += 1 }
 
@@ -173,7 +173,7 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func cancelDiscardsACapturedKeyInsteadOfDeliveringIt() async throws {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
         var enterCallbacks = 0
         interceptor.onEnterPressed = { enterCallbacks += 1 }
 
@@ -189,7 +189,7 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func tapIsServicedWhileTheMainThreadIsBlocked() throws {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
         defer { interceptor.stop() }
 
         interceptor.start(targetPid: 0)
@@ -215,7 +215,7 @@ struct KeyInterceptorRegistrationTests {
             eventTapDriver: fake.driver,
             focusQuery: { .init(focusedPid: focusedPid, focusedAppPid: focusedPid, source: "test") },
             bundleIdentifierLookup: { bundles[$0] },
-            isSecureInputEnabled: { false }
+            secureInputOwner: { nil }
         )
         return (interceptor, fake)
     }
@@ -267,7 +267,7 @@ struct KeyInterceptorRegistrationTests {
     ])
     func modifiedEnterAndEscapePassThroughUntouched(modifier: CGEventFlags) {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
         defer { interceptor.stop() }
         interceptor.start(targetPid: 0)
 
@@ -283,7 +283,7 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func plainEnterIsStillCapturedWithNonCommandFlags() {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
         defer { interceptor.stop() }
         interceptor.start(targetPid: 0)
 
