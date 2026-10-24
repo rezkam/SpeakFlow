@@ -1976,3 +1976,36 @@ struct LiveStreamingStopDrainTests {
         #expect(sends.count <= 1, "Cancel discards captured audio; at most the in-flight frame completes, got \(sends)")
     }
 }
+
+/// Queued audio is processed by one ordered consumer: a processing pass must
+/// finish before the next one, or the stop-time drain, touches VAD state.
+@Suite("StreamingRecorder — Ordered Processing", .serialized)
+struct StreamingRecorderOrderedProcessingTests {
+    @Test @MainActor
+    func stopWaitsForTheInFlightProcessingPass() async {
+        let buffer = AudioBuffer(sampleRate: 16000)
+        let vad = VADProcessor()
+        let backend = MockVADBackend(repeating: .silence(), count: 10)
+        await backend.setInferenceDelay(.milliseconds(50))
+        await vad._testInjectBackend(backend)
+        let recorder = StreamingRecorder()
+        recorder._testInjectAudioBuffer(buffer)
+        recorder._testInjectVADProcessor(vad)
+        recorder._testInjectSessionController(SessionController())
+        recorder._testSetVADActive(true)
+        recorder._testSetIsRecording(true)
+        // Two VAD-sized chunks for the in-flight pass.
+        recorder._testEnqueueSamples([Float](repeating: 0.01, count: 8_192))
+
+        recorder._testScheduleProcessingPass()
+        recorder._testScheduleProcessingPass()
+        try? await Task.sleep(for: .milliseconds(10))
+        recorder.stop()
+        await recorder.waitForStopCompletion()
+
+        let calls = await backend.callCount
+        let maxConcurrent = await backend.maxConcurrentCalls
+        #expect(calls == 2, "Stop must not complete while a processing pass is still running VAD")
+        #expect(maxConcurrent == 1)
+    }
+}

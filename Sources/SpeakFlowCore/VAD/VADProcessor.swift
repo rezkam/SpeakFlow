@@ -131,6 +131,9 @@ public actor VADModelCache {
 ///   See: `VADConfiguration.volumeGateEnabled`.
 public actor VADProcessor {
     private var vadManager: VadManager?
+    /// One processChunk call runs at a time; later callers wait in order.
+    private var isProcessingChunk = false
+    private var processingWaiters: [CheckedContinuation<Void, Never>] = []
     private var streamState: VadStreamState?
     private var isInitialized = false
     private let config: VADConfiguration
@@ -240,6 +243,33 @@ public actor VADProcessor {
     /// - Returns: `VADResult` with probability, speaking state, optional event,
     ///            processing time, and the smoothed volume used in the gate check.
     public func processChunk(_ samples: [Float]) async throws -> VADResult {
+        // Actor isolation does not serialize whole async calls: this method
+        // snapshots stream state, suspends for inference, then commits the new
+        // state. Overlapping calls would start from the same snapshot and one
+        // would overwrite the other, so calls run one at a time, in order.
+        await acquireProcessingTurn()
+        defer { releaseProcessingTurn() }
+        return try await processChunkInTurn(samples)
+    }
+
+    private func acquireProcessingTurn() async {
+        guard isProcessingChunk else {
+            isProcessingChunk = true
+            return
+        }
+        await withCheckedContinuation { processingWaiters.append($0) }
+    }
+
+    /// Hands the turn to the next waiter in arrival order, keeping it held.
+    private func releaseProcessingTurn() {
+        if processingWaiters.isEmpty {
+            isProcessingChunk = false
+        } else {
+            processingWaiters.removeFirst().resume()
+        }
+    }
+
+    private func processChunkInTurn(_ samples: [Float]) async throws -> VADResult {
         // ── Mock backend fast-path (test mode only) ────────────────────────────
         //
         // When a MockVADBackend is injected, we skip FluidAudio/Silero entirely.
