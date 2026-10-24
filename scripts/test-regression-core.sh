@@ -85,6 +85,10 @@ REGRESSION_SUITES=(
   "ObservabilitySettingsPropagationTests"
   "LiveE2EContractTests"
   "HTTPDataProviderTestabilityTests"
+  "RecordingControllerKeyInterceptionLifecycleTests"
+  "SettingsStoredZeroTests"
+  "MistralBatchCancellationTests"
+  "TranscriptionCancellationRecognitionTests"
 )
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
