@@ -236,18 +236,15 @@ public actor SessionMetricsStore {
     }
 
     private static var defaultStorageURL: URL {
-        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
-            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
+        let url = storageURL(for: RuntimeIsolation.current)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        return url
+    }
 
-        let base: URL
-        if isTestRun {
-            base = FileManager.default.temporaryDirectory
-                .appendingPathComponent("speakflow-test-\(ProcessInfo.processInfo.processIdentifier)")
-        } else {
-            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".speakflow")
-        }
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base.appendingPathComponent("session_metrics.json")
+    nonisolated static func storageURL(for isolation: RuntimeIsolation.Decision) -> URL {
+        isolation.dataDirectory.appendingPathComponent("session_metrics.json")
     }
 
     private static func load(from url: URL) -> [SessionMetrics] {

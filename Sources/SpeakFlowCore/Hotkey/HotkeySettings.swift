@@ -13,15 +13,7 @@ public final class HotkeySettings {
     private let defaults: UserDefaults
 
     private init() {
-        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
-            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
-        if isTestRun {
-            let suiteName = "nu.rez.speakflow.hotkey.tests.\(ProcessInfo.processInfo.processIdentifier)"
-            defaults = UserDefaults(suiteName: suiteName) ?? .standard
-            defaults.removePersistentDomain(forName: suiteName)
-        } else {
-            defaults = .standard
-        }
+        defaults = RuntimeIsolation.current.makeDefaults(prefix: "nu.rez.speakflow.hotkey.tests")
     }
 
     public var currentHotkey: HotkeyType {

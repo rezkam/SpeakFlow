@@ -285,15 +285,7 @@ public final class ProviderSettings {
     }
 
     private init() {
-        let isTestRun = Bundle.main.bundlePath.contains(".xctest")
-            || ProcessInfo.processInfo.arguments.contains(where: { $0.contains("xctest") })
-        if isTestRun {
-            let suiteName = "nu.rez.speakflow.provider.tests.\(ProcessInfo.processInfo.processIdentifier)"
-            defaults = UserDefaults(suiteName: suiteName) ?? .standard
-            defaults.removePersistentDomain(forName: suiteName)
-        } else {
-            defaults = .standard
-        }
+        defaults = RuntimeIsolation.current.makeDefaults(prefix: "nu.rez.speakflow.provider.tests")
     }
 
     // MARK: - Active Provider
