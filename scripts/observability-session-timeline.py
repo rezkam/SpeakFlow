@@ -119,6 +119,14 @@ def main():
         return 1
 
     session_events = [event for event in events if event.get("sessionId") == session_id]
+    if not session_events:
+        # Unknown session id, or its events rotated out of this file.
+        print(
+            f"no events found for session {session_id} in {args.file} "
+            "(unknown id, or rotated into an older events file)",
+            file=sys.stderr,
+        )
+        return 2
     if args.limit > 0:
         session_events = session_events[-args.limit:]
 
