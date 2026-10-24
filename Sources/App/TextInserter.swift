@@ -265,11 +265,13 @@ final class TextInserter: TextInserting {
             guard let self else { return }
 
             if replacingChars > 0 {
-                let deleted = await self.deleteCharsAsync(replacingChars, operationId: operationId)
+                let deleted = await self.deleteCharsAsync(
+                    replacingChars, operationId: operationId, generation: generation
+                )
                 guard deleted else { return }
             }
             if !textToInsert.isEmpty {
-                await self.typeTextAsync(textToInsert, operationId: operationId)
+                await self.typeTextAsync(textToInsert, operationId: operationId, generation: generation)
             }
         }
     }
@@ -326,7 +328,7 @@ final class TextInserter: TextInserting {
                 self?.decrementQueuedInsertionCount(for: generation)
             }
             await previousTask?.value
-            await self?.typeTextAsync(textToInsert, operationId: operationId)
+            await self?.typeTextAsync(textToInsert, operationId: operationId, generation: generation)
         }
     }
 
@@ -373,7 +375,7 @@ final class TextInserter: TextInserting {
                 self?.decrementQueuedInsertionCount(for: generation)
             }
             await previousTask?.value
-            _ = await self?.deleteCharsAsync(count, operationId: operationId)
+            _ = await self?.deleteCharsAsync(count, operationId: operationId, generation: generation)
         }
     }
 
@@ -390,6 +392,7 @@ final class TextInserter: TextInserting {
     /// increment the queue count (not bounded by `maxQueuedTextInsertions`).
     func pressEnterKey() {
         let operationId = nextOperationId()
+        let generation = queueGeneration
         let previousTask = textInsertionTask
         observabilityEvent(
             "press_enter_queued",
@@ -403,7 +406,7 @@ final class TextInserter: TextInserting {
             await previousTask?.value
 
             guard let self,
-                  await self.ensureTargetFocused(),
+                  await self.ensureTargetFocused(generation: generation),
                   let keyDown = CGEvent(
                       keyboardEventSource: nil,
                       virtualKey: Self.enterKeyCode,
@@ -417,6 +420,7 @@ final class TextInserter: TextInserting {
                   await self.postGuardedKeyPair(
                       keyDown,
                       keyUp,
+                      generation: generation,
                       releaseDelayNanoseconds: Self.enterKeyDelayNanoseconds
                   ) else { return }
             self.observabilityEvent(
@@ -440,6 +444,13 @@ final class TextInserter: TextInserting {
     /// all queued text has been delivered to the target application.
     func waitForPendingInsertions() async {
         await textInsertionTask?.value
+    }
+
+    /// Whether an operation enqueued under `generation` may still act.
+    /// `cancelAndReset()` and `reset()` start a new generation, which retires
+    /// every operation queued before them, including ones already running.
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        generation == queueGeneration
     }
 
     private func decrementQueuedInsertionCount(for generation: UInt64) {
@@ -491,7 +502,7 @@ final class TextInserter: TextInserting {
         return sanitized
     }
 
-    private func deleteCharsAsync(_ count: Int, operationId: UInt64) async -> Bool {
+    private func deleteCharsAsync(_ count: Int, operationId: UInt64, generation: UInt64) async -> Bool {
         guard count > 0 else { return true }
         observabilityEvent(
             "delete_chars_started",
@@ -502,7 +513,7 @@ final class TextInserter: TextInserting {
         )
 
         // Ensure the target element has focus before deleting
-        guard await ensureTargetFocused() else { return false }
+        guard await ensureTargetFocused(generation: generation) else { return false }
 
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             return false
@@ -516,7 +527,7 @@ final class TextInserter: TextInserting {
 
             // Re-check focus between deletions — if the user switched apps
             // mid-stream, wait for return or timeout
-            guard await ensureTargetFocused() else { return false }
+            guard await ensureTargetFocused(generation: generation) else { return false }
 
             // Create key-down and key-up events for the Delete key
             guard let keyDown = CGEvent(
@@ -530,7 +541,7 @@ final class TextInserter: TextInserting {
                 keyDown: false
             ) else { continue }
 
-            guard await postGuardedKeyPair(keyDown, keyUp) else { return false }
+            guard await postGuardedKeyPair(keyDown, keyUp, generation: generation) else { return false }
 
             // Small delay to ensure the app processes the deletion
             try? await Task.sleep(
@@ -566,6 +577,13 @@ final class TextInserter: TextInserting {
     /// - Returns: `true` if the target app is frontmost, `false` if the timeout
     ///   expired, the task was cancelled, or the target app is no longer running.
     func ensureTargetFocused() async -> Bool {
+        await ensureTargetFocused(generation: queueGeneration)
+    }
+
+    /// Same as `ensureTargetFocused()`, but gives up as soon as the operation
+    /// that asked has been retired by cancellation or reset.
+    private func ensureTargetFocused(generation: UInt64) async -> Bool {
+        guard isCurrent(generation) else { return false }
         guard targetElement != nil, targetPid != 0 else { return true }
 
         guard recoverTargetPidIfNeeded() else { return false }
@@ -593,6 +611,7 @@ final class TextInserter: TextInserting {
         // Poll until focus returns, timeout expires, or the task is cancelled
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: Self.focusWaitInterval)
+            guard isCurrent(generation) else { return false }
             if isTargetAppFrontmost() {
                 Logger.audio.info("Target app regained focus — resuming text insertion")
                 observabilityEvent("focus_regained", metadata: ["targetPid": String(targetPid)])
@@ -729,7 +748,7 @@ final class TextInserter: TextInserting {
     /// 4. Yields between batches so mouse/keyboard input and event taps stay responsive
     ///
     /// - Parameter text: The sanitized text to type. Should not contain control characters.
-    private func typeTextAsync(_ text: String, operationId: UInt64) async {
+    private func typeTextAsync(_ text: String, operationId: UInt64, generation: UInt64) async {
         observabilityEvent(
             "type_text_started",
             metadata: [
@@ -742,7 +761,7 @@ final class TextInserter: TextInserting {
         }
 
         // Ensure the target element has focus (waits for user to return if switched)
-        guard await self.ensureTargetFocused() else { return }
+        guard await self.ensureTargetFocused(generation: generation) else { return }
 
         // Type in small batches, yielding between them so the WindowServer
         // event queue can drain (keeps mouse clicks responsive) and other
@@ -759,7 +778,7 @@ final class TextInserter: TextInserting {
             // Re-check focus before each character. If user switched apps,
             // pause until they return or timeout.
             if !isTargetAppFrontmost() {
-                guard await self.ensureTargetFocused() else { return }
+                guard await self.ensureTargetFocused(generation: generation) else { return }
             }
 
             // Convert character to UTF-16 code units for CGEvent's Unicode API
@@ -789,7 +808,7 @@ final class TextInserter: TextInserting {
                 unicodeString: &unichar
             )
 
-            guard await postGuardedKeyPair(keyDown, keyUp) else { return }
+            guard await postGuardedKeyPair(keyDown, keyUp, generation: generation) else { return }
 
             // Small delay to ensure the character is processed
             try? await Task.sleep(
@@ -899,10 +918,14 @@ final class TextInserter: TextInserting {
     private func postGuardedKeyPair(
         _ keyDown: CGEvent,
         _ keyUp: CGEvent,
+        generation: UInt64,
         releaseDelayNanoseconds: UInt64 = 0
     ) async -> Bool {
         while true {
             if Task.isCancelled { return false }
+            // Checked after every suspension: a retired operation must never
+            // post a key-down, even if it was already running when cancelled.
+            guard isCurrent(generation) else { return false }
 
             if Self.hasActiveModifiers(flagsProvider()) {
                 let released = await waitForModifiersReleased()
@@ -912,7 +935,7 @@ final class TextInserter: TextInserting {
                 // Focus may have changed while modifiers were held. Re-enter
                 // the loop because modifiers or cancellation can change while
                 // focus validation suspends.
-                guard await ensureTargetFocused() else { return false }
+                guard await ensureTargetFocused(generation: generation) else { return false }
                 continue
             }
 
