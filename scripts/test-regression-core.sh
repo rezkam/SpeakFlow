@@ -89,6 +89,7 @@ REGRESSION_SUITES=(
   "SettingsStoredZeroTests"
   "MistralBatchCancellationTests"
   "TranscriptionCancellationRecognitionTests"
+  "ObservabilitySettingsSnapshotTests"
 )
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -256,6 +256,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mode = ProviderRegistry.shared.provider(for: providerId)?.mode.rawValue ?? "unknown"
         let hotkey = HotkeySettings.shared.currentHotkey.rawValue
         let captureSettings = settings.observabilityCaptureSettingsSnapshot
+        let snapshot = SettingsSnapshot.values(settings).merging([
+            "provider.activeId": providerId,
+            "provider.activeMode": mode,
+            "hotkey.current": hotkey
+        ]) { _, context in context }
 
         let configurator = ObservabilityConfigurator.shared
         configurator.apply(from: settings)
@@ -275,31 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
 
             guard captureSettings else { return }
-            await ObservabilityStore.shared.recordSettingsSnapshot(
-                sessionId: nil,
-                settings: [
-                    "provider.activeId": providerId,
-                    "provider.activeMode": mode,
-                    "hotkey.current": hotkey,
-                    "streaming.autoEndEnabled": settings.streamingAutoEndEnabled ? "true" : "false",
-                    "streaming.keepAliveEnabled": settings.streamingKeepAliveEnabled ? "true" : "false",
-                    "streaming.keepAliveInterval": String(settings.streamingKeepAliveInterval),
-                    "streaming.reconnectEnabled": settings.streamingReconnectEnabled ? "true" : "false",
-                    "streaming.minimumFinalWordCount": String(settings.streamingMinimumFinalWordCount),
-                    "streaming.trailingFinalTimeout": String(settings.streamingTrailingFinalTimeout),
-                    "observability.captureTextPayloads": settings.observabilityCaptureTextPayloads ? "true" : "false",
-                    "batch.chunkDuration": String(settings.chunkDuration.rawValue),
-                    "batch.skipSilentChunks": settings.skipSilentChunks ? "true" : "false",
-                    "batch.finalizationTimeoutBase": String(settings.batchFinalizationTimeoutBase),
-                    "batch.finalizationTimeoutPerChunkSecond": String(settings.batchFinalizationTimeoutPerChunkSecond),
-                    "batch.finalizationMaxTimeout": String(settings.batchFinalizationMaxTimeout),
-                    "vad.enabled": settings.vadEnabled ? "true" : "false",
-                    "vad.threshold": String(settings.vadThreshold),
-                    "autoEnd.enabled": settings.autoEndEnabled ? "true" : "false",
-                    "autoEnd.silenceDuration": String(settings.autoEndSilenceDuration),
-                    "behavior.focusWaitTimeout": String(settings.focusWaitTimeout)
-                ]
-            )
+            await ObservabilityStore.shared.recordSettingsSnapshot(sessionId: nil, settings: snapshot)
         }
     }
 

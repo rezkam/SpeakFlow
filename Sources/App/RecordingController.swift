@@ -810,32 +810,11 @@ final class RecordingController {
         providerMode: ProviderMode
     ) {
         guard settings.observabilityCaptureSettingsSnapshot else { return }
-        let snapshot: [String: String] = [
+        let snapshot = SettingsSnapshot.values(settings).merging([
             "provider.id": providerId,
             "provider.mode": providerMode.rawValue,
-            "recording.testMode": String(describing: testMode),
-            "batch.chunkDuration": String(settings.chunkDuration.rawValue),
-            "batch.skipSilentChunks": settings.skipSilentChunks ? "true" : "false",
-            "batch.finalizationTimeoutBase": String(settings.batchFinalizationTimeoutBase),
-            "batch.finalizationTimeoutPerChunkSecond": String(settings.batchFinalizationTimeoutPerChunkSecond),
-            "batch.finalizationMaxTimeout": String(settings.batchFinalizationMaxTimeout),
-            "streaming.autoEndEnabled": settings.streamingAutoEndEnabled ? "true" : "false",
-            "streaming.keepAliveEnabled": settings.streamingKeepAliveEnabled ? "true" : "false",
-            "streaming.keepAliveInterval": String(settings.streamingKeepAliveInterval),
-            "streaming.reconnectEnabled": settings.streamingReconnectEnabled ? "true" : "false",
-            "streaming.minimumFinalWordCount": String(settings.streamingMinimumFinalWordCount),
-            "streaming.trailingFinalTimeout": String(settings.streamingTrailingFinalTimeout),
-            "vad.enabled": settings.vadEnabled ? "true" : "false",
-            "vad.threshold": String(settings.vadThreshold),
-            "vad.volumeGateEnabled": settings.vadVolumeGateEnabled ? "true" : "false",
-            "vad.minVolumeForSpeech": String(settings.vadMinVolumeForSpeech),
-            "autoEnd.enabled": settings.autoEndEnabled ? "true" : "false",
-            "autoEnd.silenceDuration": String(settings.autoEndSilenceDuration),
-            "autoEnd.minSessionDuration": String(settings.autoEndMinSessionDuration),
-            "behavior.focusWaitTimeout": String(settings.focusWaitTimeout),
-            "behavior.hotkeyRestartsRecording": settings.hotkeyRestartsRecording ? "true" : "false",
-            "observability.captureTextPayloads": settings.observabilityCaptureTextPayloads ? "true" : "false"
-        ]
+            "recording.testMode": String(describing: testMode)
+        ]) { _, context in context }
         Task {
             await ObservabilityStore.shared.recordSettingsSnapshot(sessionId: sessionId, settings: snapshot)
         }
