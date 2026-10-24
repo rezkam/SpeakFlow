@@ -311,6 +311,13 @@ public final class Settings {
         defaults = RuntimeIsolation.current.makeDefaults(prefix: "nu.rez.speakflow.tests")
     }
 
+    /// The stored value, or nil when the key was never set. Unlike
+    /// `defaults.double(forKey:)`, a stored zero stays zero.
+    private func storedDouble(_ key: String) -> Double? {
+        guard defaults.object(forKey: key) != nil else { return nil }
+        return defaults.double(forKey: key)
+    }
+
     /// Maximum chunk duration before forced send
     public var chunkDuration: ChunkDuration {
         get {
@@ -473,8 +480,7 @@ public final class Settings {
     /// Minimum session duration before auto-end is considered.
     public var autoEndMinSessionDuration: Double {
         get {
-            let value = defaults.double(forKey: Keys.autoEndMinSessionDuration)
-            return value > 0 ? value : Config.autoEndMinSessionDuration
+            storedDouble(Keys.autoEndMinSessionDuration) ?? Config.autoEndMinSessionDuration
         }
         set {
             defaults.set(max(0.0, min(30.0, newValue)), forKey: Keys.autoEndMinSessionDuration)
@@ -536,8 +542,7 @@ public final class Settings {
     /// Extra silence allowance when thinking-pause is detected.
     public var thinkingPauseExtensionSeconds: Double {
         get {
-            let value = defaults.double(forKey: Keys.thinkingPauseExtensionSeconds)
-            return value > 0 ? value : 5.0
+            storedDouble(Keys.thinkingPauseExtensionSeconds) ?? 5.0
         }
         set {
             defaults.set(max(0.0, min(30.0, newValue)), forKey: Keys.thinkingPauseExtensionSeconds)
@@ -571,8 +576,8 @@ public final class Settings {
     /// Additional silence allowance when classifier predicts incomplete turn.
     public var turnClassifierIncompleteExtensionSeconds: Double {
         get {
-            let value = defaults.double(forKey: Keys.turnClassifierIncompleteExtensionSeconds)
-            return value > 0 ? value : Config.turnClassifierIncompleteExtensionSeconds
+            storedDouble(Keys.turnClassifierIncompleteExtensionSeconds)
+                ?? Config.turnClassifierIncompleteExtensionSeconds
         }
         set {
             defaults.set(max(0.0, min(30.0, newValue)), forKey: Keys.turnClassifierIncompleteExtensionSeconds)
