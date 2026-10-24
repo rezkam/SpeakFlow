@@ -24,7 +24,7 @@ final class KeyInterceptor: KeyIntercepting {
     private struct EventTapState: @unchecked Sendable {
         var isActive: Bool = false
         var recordingEventTap: CFMachPort?
-        var recordingRunLoopSource: CFRunLoopSource?
+        var recordingTapThread: EventTapThread?
         /// PID of the target app. When non-zero, keys are only intercepted
         /// if keyboard focus is in this app (prevents swallowing Escape/Enter
         /// when the user is in Spotlight, password dialogs, etc.).
@@ -158,13 +158,16 @@ final class KeyInterceptor: KeyIntercepting {
             handleEventTapUnavailable(reason: "Could not create CGEvent tap run loop source")
             return
         }
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        eventTapDriver.setTapEnabled(tap, true)
+        let tapThread = EventTapThread(source: source)
+        // Publish the registration before the tap can deliver its first event
+        // on the tap thread.
         state.withLockUnchecked {
             $0.recordingEventTap = tap
-            $0.recordingRunLoopSource = source
+            $0.recordingTapThread = tapThread
             $0.isActive = true
         }
+        tapThread.start(name: "SpeakFlow.KeyInterceptor.EventTap")
+        eventTapDriver.setTapEnabled(tap, true)
         startSecureInputMonitoring(targetPid: targetPid, initialState: secureInputEnabled)
         HotkeyDiagnostics.record(
             "key_interceptor_registration_succeeded",
@@ -172,6 +175,7 @@ final class KeyInterceptor: KeyIntercepting {
                 "targetPid": String(targetPid),
                 "eventTap": "cgSessionEventTap",
                 "tapPlacement": "headInsertEventTap",
+                "tapRunLoop": "dedicatedThread",
                 "eventMask": "keyDown",
                 "accessibilityTrusted": AXIsProcessTrusted() ? "true" : "false"
             ]
@@ -195,21 +199,21 @@ final class KeyInterceptor: KeyIntercepting {
 
     /// Removes the tap and returns keys that were swallowed but not yet delivered.
     private func tearDown(phase: String) -> PendingKeys {
-        let (tap, source, targetPid, pending) = state.withLockUnchecked {
-            s -> (CFMachPort?, CFRunLoopSource?, pid_t, PendingKeys) in
-            let result = (s.recordingEventTap, s.recordingRunLoopSource, s.targetPid, s.pendingKeys)
+        let (tap, tapThread, targetPid, pending) = state.withLockUnchecked {
+            s -> (CFMachPort?, EventTapThread?, pid_t, PendingKeys) in
+            let result = (s.recordingEventTap, s.recordingTapThread, s.targetPid, s.pendingKeys)
             s.isActive = false
             s.targetPid = 0
             s.enterCaptureArmed = false
             s.pendingKeys = PendingKeys()
             s.recordingEventTap = nil
-            s.recordingRunLoopSource = nil
+            s.recordingTapThread = nil
             return result
         }
         recordSecureInputTransitionIfNeeded(targetPid: targetPid, phase: "stop")
         stopSecureInputMonitoring()
         if let tap { eventTapDriver.setTapEnabled(tap, false) }
-        if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
+        tapThread?.stop()
         // Disabling alone leaves the tap registered with the WindowServer for the
         // life of the process; invalidating the port removes it.
         if let tap { CFMachPortInvalidate(tap) }
@@ -217,9 +221,9 @@ final class KeyInterceptor: KeyIntercepting {
             "targetPid": String(targetPid),
             "phase": phase,
             "hadEventTap": tap == nil ? "false" : "true",
-            "hadRunLoopSource": source == nil ? "false" : "true"
+            "hadTapThread": tapThread == nil ? "false" : "true"
         ]
-        if tap != nil || source != nil {
+        if tap != nil || tapThread != nil {
             HotkeyDiagnostics.record("key_interceptor_registration_stopped", metadata: metadata)
         } else {
             HotkeyDiagnostics.record("key_interceptor_registration_stop_noop", level: .debug, metadata: metadata)
@@ -324,7 +328,7 @@ final class KeyInterceptor: KeyIntercepting {
             $0.enterCaptureArmed = false
             $0.pendingKeys = PendingKeys()
             $0.recordingEventTap = nil
-            $0.recordingRunLoopSource = nil
+            $0.recordingTapThread = nil
         }
     }
 
@@ -441,42 +445,46 @@ final class KeyInterceptor: KeyIntercepting {
         }
     }
 
+    /// Longest a focus query may block the tap thread. The default Accessibility
+    /// messaging timeout is several seconds, longer than the WindowServer waits
+    /// for an active tap before disabling it.
+    private nonisolated static let focusQueryTimeoutSeconds: Float = 0.25
+
+    /// Runs on the tap thread, so it uses Accessibility only (no AppKit).
     private nonisolated static func keyboardFocusSnapshot(targetPid: pid_t) -> KeyboardFocusSnapshot {
         let systemWide = AXUIElementCreateSystemWide()
-        var focusedElement: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
-            systemWide,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedElement
-        ) == .success,
-           let element = focusedElement,
-           CFGetTypeID(element) == AXUIElementGetTypeID() {
-            let focusedElementAX = unsafeDowncast(element, to: AXUIElement.self)
-            var focusedPid: pid_t = 0
-            if AXUIElementGetPid(focusedElementAX, &focusedPid) == .success {
-                return KeyboardFocusSnapshot(
-                    isInTargetApp: focusedPid == targetPid,
-                    focusedPid: focusedPid,
-                    frontmostPid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                    source: "accessibilityFocusedElement"
-                )
-            }
-        }
-        // Fallback: frontmost app check
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else {
+        AXUIElementSetMessagingTimeout(systemWide, focusQueryTimeoutSeconds)
+        let focusedAppPid = pid(ofAttribute: kAXFocusedApplicationAttribute, of: systemWide)
+        // The focused element catches overlays (Spotlight, password dialogs) that
+        // take keyboard focus without changing the focused application.
+        if let focusedPid = pid(ofAttribute: kAXFocusedUIElementAttribute, of: systemWide) {
             return KeyboardFocusSnapshot(
-                isInTargetApp: false,
-                focusedPid: nil,
-                frontmostPid: nil,
-                source: "none"
+                isInTargetApp: focusedPid == targetPid,
+                focusedPid: focusedPid,
+                frontmostPid: focusedAppPid,
+                source: "accessibilityFocusedElement"
             )
         }
+        // The focused app did not answer in time or exposes no focused element.
+        guard let focusedAppPid else {
+            return KeyboardFocusSnapshot(isInTargetApp: false, focusedPid: nil, frontmostPid: nil, source: "none")
+        }
         return KeyboardFocusSnapshot(
-            isInTargetApp: frontmost.processIdentifier == targetPid,
+            isInTargetApp: focusedAppPid == targetPid,
             focusedPid: nil,
-            frontmostPid: frontmost.processIdentifier,
-            source: "frontmostApplication"
+            frontmostPid: focusedAppPid,
+            source: "accessibilityFocusedApplication"
         )
+    }
+
+    private nonisolated static func pid(ofAttribute attribute: String, of element: AXUIElement) -> pid_t? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value,
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(unsafeDowncast(value, to: AXUIElement.self), &pid) == .success else { return nil }
+        return pid
     }
 
     private nonisolated static func isInterceptedKey(_ keyCode: Int64) -> Bool {

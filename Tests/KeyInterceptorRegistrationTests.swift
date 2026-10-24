@@ -9,9 +9,24 @@ import Testing
 /// installing a real system tap. Each created tap is a plain CFMachPort so
 /// invalidation is observable through `CFMachPortIsValid`.
 final class FakeEventTapDriver: @unchecked Sendable {
+    /// Signalled from the fake tap's mach-port callout, on whichever thread's
+    /// run loop services the tap.
+    final class CalloutRecorder: @unchecked Sendable {
+        let fired = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var _ranOnMainThread: Bool?
+        var ranOnMainThread: Bool? { lock.withLock { _ranOnMainThread } }
+
+        func record() {
+            lock.withLock { _ranOnMainThread = Thread.isMainThread }
+            fired.signal()
+        }
+    }
+
     private let lock = NSLock()
     private var _createdTaps: [CFMachPort] = []
     private var _enableCalls: [Bool] = []
+    let callouts = CalloutRecorder()
     var failCreation = false
 
     var createdTaps: [CFMachPort] { lock.withLock { _createdTaps } }
@@ -21,11 +36,20 @@ final class FakeEventTapDriver: @unchecked Sendable {
         KeyInterceptor.EventTapDriver(
             createTap: { [self] _ in
                 guard !failCreation else { return nil }
-                var context = CFMachPortContext()
+                var context = CFMachPortContext(
+                    version: 0,
+                    info: Unmanaged.passUnretained(callouts).toOpaque(),
+                    retain: nil,
+                    release: nil,
+                    copyDescription: nil
+                )
                 var shouldFree: DarwinBoolean = false
                 guard let port = CFMachPortCreate(
                     kCFAllocatorDefault,
-                    { _, _, _, _ in },
+                    { _, _, _, info in
+                        guard let info else { return }
+                        Unmanaged<CalloutRecorder>.fromOpaque(info).takeUnretainedValue().record()
+                    },
                     &context,
                     &shouldFree
                 ) else { return nil }
@@ -35,6 +59,19 @@ final class FakeEventTapDriver: @unchecked Sendable {
             setTapEnabled: { [self] _, enabled in
                 lock.withLock { _enableCalls.append(enabled) }
             }
+        )
+    }
+
+    /// Sends an empty mach message to `tap`, as the WindowServer does for each event.
+    static func sendMessage(to tap: CFMachPort) {
+        var header = mach_msg_header_t()
+        header.msgh_bits = UInt32(MACH_MSG_TYPE_MAKE_SEND)
+        header.msgh_size = mach_msg_size_t(MemoryLayout<mach_msg_header_t>.size)
+        header.msgh_remote_port = CFMachPortGetPort(tap)
+        header.msgh_local_port = mach_port_t(MACH_PORT_NULL)
+        _ = mach_msg(
+            &header, MACH_SEND_MSG, header.msgh_size, 0,
+            mach_port_t(MACH_PORT_NULL), MACH_MSG_TIMEOUT_NONE, mach_port_t(MACH_PORT_NULL)
         )
     }
 }
@@ -144,5 +181,24 @@ struct KeyInterceptorRegistrationTests {
 
         #expect(enterCallbacks == 0, "A cancelled recording must never turn a captured Enter into a submit")
         #expect(fake.createdTaps.allSatisfy { !CFMachPortIsValid($0) }, "cancel() must tear the tap down too")
+    }
+
+    @MainActor @Test
+    func tapIsServicedWhileTheMainThreadIsBlocked() throws {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        defer { interceptor.stop() }
+
+        interceptor.start(targetPid: 0)
+        let tap = try #require(fake.createdTaps.first)
+
+        FakeEventTapDriver.sendMessage(to: tap)
+        // Block the main thread, as per-character Accessibility calls or UI work
+        // can. A tap serviced by the main run loop cannot run until this returns,
+        // and the WindowServer disables taps that do not answer in time.
+        let serviced = fake.callouts.fired.wait(timeout: .now() + .seconds(1)) == .success
+
+        #expect(serviced, "The tap must be serviced while the main thread is blocked")
+        #expect(fake.callouts.ranOnMainThread == false, "The tap must run on its own thread")
     }
 }
