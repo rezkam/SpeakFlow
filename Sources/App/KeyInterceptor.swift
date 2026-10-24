@@ -34,7 +34,37 @@ final class KeyInterceptor: KeyIntercepting {
         var enterCaptureArmed: Bool = false
     }
 
+    /// Creates and toggles the system event tap. Injected so tests can observe
+    /// the tap lifecycle without installing a real WindowServer tap.
+    struct EventTapDriver: Sendable {
+        /// Creates a keyDown event tap whose callback receives `refcon` as user info.
+        let createTap: @Sendable (_ refcon: UnsafeMutableRawPointer) -> CFMachPort?
+        let setTapEnabled: @Sendable (_ tap: CFMachPort, _ enabled: Bool) -> Void
+
+        static let system = EventTapDriver(
+            createTap: { refcon in
+                let eventMask = (1 << CGEventType.keyDown.rawValue)
+                return CGEvent.tapCreate(
+                    tap: .cgSessionEventTap, place: .headInsertEventTap,
+                    options: .defaultTap, eventsOfInterest: CGEventMask(eventMask),
+                    callback: { (_, eventType, event, refcon) -> Unmanaged<CGEvent>? in
+                        guard let refcon else { return Unmanaged.passRetained(event) }
+                        let interceptor = Unmanaged<KeyInterceptor>.fromOpaque(refcon).takeUnretainedValue()
+                        if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
+                            interceptor.handleEventTapDisabled(eventType: eventType)
+                            return Unmanaged.passRetained(event)
+                        }
+                        return interceptor.handleKeyEvent(event: event)
+                    },
+                    userInfo: refcon
+                )
+            },
+            setTapEnabled: { tap, enabled in CGEvent.tapEnable(tap: tap, enable: enabled) }
+        )
+    }
+
     private let state = OSAllocatedUnfairLock(initialState: EventTapState())
+    private let eventTapDriver: EventTapDriver
     private let keyboardFocusSnapshotProvider: @Sendable (pid_t) -> KeyboardFocusSnapshot
     private let secureInputStatusProvider: () -> Bool
     private let secureInputPollingInterval: Duration
@@ -42,9 +72,11 @@ final class KeyInterceptor: KeyIntercepting {
     private var lastSecureInputEnabled: Bool?
 
     init(
+        eventTapDriver: EventTapDriver = .system,
         isSecureInputEnabled: @escaping () -> Bool = { IsSecureEventInputEnabled() },
         secureInputPollingInterval: Duration = .seconds(1)
     ) {
+        self.eventTapDriver = eventTapDriver
         keyboardFocusSnapshotProvider = Self.keyboardFocusSnapshot
         secureInputStatusProvider = isSecureInputEnabled
         self.secureInputPollingInterval = secureInputPollingInterval
@@ -54,6 +86,7 @@ final class KeyInterceptor: KeyIntercepting {
     /// Creates an isolated interceptor with a deterministic keyboard-focus source.
     @MainActor
     init(testKeyboardFocusSnapshotProvider: @escaping @Sendable (pid_t) -> KeyboardFocusSnapshot) {
+        eventTapDriver = .system
         keyboardFocusSnapshotProvider = testKeyboardFocusSnapshotProvider
         secureInputStatusProvider = { IsSecureEventInputEnabled() }
         secureInputPollingInterval = .seconds(1)
@@ -91,21 +124,7 @@ final class KeyInterceptor: KeyIntercepting {
             recordSecureInputDetected(targetPid: targetPid, phase: "start")
         }
 
-        let eventMask = (1 << CGEventType.keyDown.rawValue)
-        let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap, place: .headInsertEventTap,
-            options: .defaultTap, eventsOfInterest: CGEventMask(eventMask),
-            callback: { (_, eventType, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon else { return Unmanaged.passRetained(event) }
-                let interceptor = Unmanaged<KeyInterceptor>.fromOpaque(refcon).takeUnretainedValue()
-                if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
-                    interceptor.handleEventTapDisabled(eventType: eventType)
-                    return Unmanaged.passRetained(event)
-                }
-                return interceptor.handleKeyEvent(event: event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        )
+        let tap = eventTapDriver.createTap(Unmanaged.passUnretained(self).toOpaque())
 
         guard let tap else {
             handleEventTapUnavailable(reason: "Could not create CGEvent tap")
@@ -119,7 +138,7 @@ final class KeyInterceptor: KeyIntercepting {
             return
         }
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        eventTapDriver.setTapEnabled(tap, true)
         state.withLockUnchecked {
             $0.recordingEventTap = tap
             $0.recordingRunLoopSource = source
@@ -150,8 +169,11 @@ final class KeyInterceptor: KeyIntercepting {
         }
         recordSecureInputTransitionIfNeeded(targetPid: targetPid, phase: "stop")
         stopSecureInputMonitoring()
-        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let tap { eventTapDriver.setTapEnabled(tap, false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
+        // Disabling alone leaves the tap registered with the WindowServer for the
+        // life of the process; invalidating the port removes it.
+        if let tap { CFMachPortInvalidate(tap) }
         let metadata = [
             "targetPid": String(targetPid),
             "hadEventTap": tap == nil ? "false" : "true",
@@ -321,7 +343,7 @@ final class KeyInterceptor: KeyIntercepting {
         ]
         HotkeyDiagnostics.record("key_interceptor_event_tap_disabled", level: .warning, metadata: metadata)
         guard let tap else { return }
-        CGEvent.tapEnable(tap: tap, enable: true)
+        eventTapDriver.setTapEnabled(tap, true)
         HotkeyDiagnostics.record("key_interceptor_event_tap_reenabled", metadata: metadata)
     }
 
