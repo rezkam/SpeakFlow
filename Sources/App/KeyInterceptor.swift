@@ -73,11 +73,12 @@ final class KeyInterceptor: KeyIntercepting {
 
     init(
         eventTapDriver: EventTapDriver = .system,
+        keyboardFocusSnapshotProvider: @escaping @Sendable (pid_t) -> KeyboardFocusSnapshot = KeyInterceptor.keyboardFocusSnapshot,
         isSecureInputEnabled: @escaping () -> Bool = { IsSecureEventInputEnabled() },
         secureInputPollingInterval: Duration = .seconds(1)
     ) {
         self.eventTapDriver = eventTapDriver
-        keyboardFocusSnapshotProvider = Self.keyboardFocusSnapshot
+        self.keyboardFocusSnapshotProvider = keyboardFocusSnapshotProvider
         secureInputStatusProvider = isSecureInputEnabled
         self.secureInputPollingInterval = secureInputPollingInterval
     }
@@ -96,14 +97,23 @@ final class KeyInterceptor: KeyIntercepting {
     // MARK: - Start / Stop
 
     func start(targetPid: pid_t) {
-        let alreadyActive = state.withLockUnchecked {
-            $0.recordingEventTap != nil
+        // A tap still registered from an earlier recording is reused, but the
+        // new recording must own it: its target app and a fresh Enter token.
+        let previousTargetPid = state.withLockUnchecked { s -> pid_t? in
+            guard s.recordingEventTap != nil else { return nil }
+            let previous = s.targetPid
+            s.targetPid = targetPid
+            s.enterCaptureArmed = true
+            return previous
         }
-        guard !alreadyActive else {
+        if let previousTargetPid {
             HotkeyDiagnostics.record(
-                "key_interceptor_registration_skipped_already_active",
+                "key_interceptor_registration_rearmed_already_active",
                 level: .warning,
-                metadata: ["targetPid": String(targetPid)]
+                metadata: [
+                    "targetPid": String(targetPid),
+                    "previousTargetPid": String(previousTargetPid)
+                ]
             )
             return
         }
