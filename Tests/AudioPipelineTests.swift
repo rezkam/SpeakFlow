@@ -1871,3 +1871,28 @@ struct EventHandlingTests {
         #expect(col.entries[2].textToType == "")
     }
 }
+
+/// Cancelled audio is discarded, never uploaded: nothing may emit a chunk
+/// once cancellation has begun, including speech-end early emission triggered
+/// by VAD processing of audio still queued at cancel time.
+@Suite("StreamingRecorder — Cancel Discards Audio", .serialized)
+struct StreamingRecorderCancelDiscardTests {
+    @Test @MainActor
+    func earlyEmissionDuringCancellationDoesNotUpload() async {
+        let buffer = AudioBuffer(sampleRate: 16000)
+        await buffer.append(frames: [Float](repeating: 0.2, count: 32_000))
+        let recorder = StreamingRecorder()
+        recorder._testInjectAudioBuffer(buffer)
+        recorder._testSetIsRecording(true)
+        var uploaded: [AudioChunk] = []
+        recorder.onChunkReady = { uploaded.append($0) }
+
+        recorder.cancel()
+        // A speech-end event from VAD processing reaches the early-emit path.
+        let sent = await recorder._testInvokeSendChunkIfReady(reason: "speechEnd", minimumDuration: 0)
+        await recorder.waitForStopCompletion()
+
+        #expect(!sent)
+        #expect(uploaded.isEmpty, "Audio from a cancelled recording must never be emitted for upload")
+    }
+}
