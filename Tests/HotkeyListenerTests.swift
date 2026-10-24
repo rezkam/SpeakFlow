@@ -147,3 +147,46 @@ struct HotkeyListenerDoubleTapTests {
         #expect(!activated, "Control+Command should NOT count as a control-only double-tap")
     }
 }
+
+@Suite("HotkeyListener — Event Tap Registration", .serialized)
+struct HotkeyListenerRegistrationTests {
+    @MainActor @Test
+    func stopInvalidatesTheDoubleTapEventTap() throws {
+        let fake = FakeHotkeyEventTapDriver()
+        let listener = HotkeyListener(eventTapDriver: fake.driver)
+
+        listener.start(type: .doubleTapControl)
+        let tap = try #require(fake.createdTaps.first)
+        #expect(CFMachPortIsValid(tap), "A running listener must keep its tap valid")
+
+        listener.stop()
+
+        #expect(!CFMachPortIsValid(tap),
+                "stop() must invalidate the tap; a disabled-but-valid tap stays registered in the WindowServer")
+    }
+}
+
+final class FakeHotkeyEventTapDriver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _createdTaps: [CFMachPort] = []
+
+    var createdTaps: [CFMachPort] { lock.withLock { _createdTaps } }
+
+    var driver: HotkeyListener.EventTapDriver {
+        HotkeyListener.EventTapDriver(
+            createTap: { [self] _, _ in
+                var context = CFMachPortContext()
+                var shouldFree: DarwinBoolean = false
+                guard let port = CFMachPortCreate(
+                    kCFAllocatorDefault,
+                    { _, _, _, _ in },
+                    &context,
+                    &shouldFree
+                ) else { return nil }
+                lock.withLock { _createdTaps.append(port) }
+                return port
+            },
+            setTapEnabled: { _, _ in }
+        )
+    }
+}

@@ -26,6 +26,30 @@ public final class HotkeyListener {
 
     public var onActivate: (() -> Void)?
 
+    /// Creates and toggles the flagsChanged event tap. Injected so tests can
+    /// observe the tap lifecycle without installing a real WindowServer tap.
+    struct EventTapDriver: Sendable {
+        /// Creates a flagsChanged event tap that calls `callback` with `refcon` as user info.
+        let createTap: @Sendable (_ refcon: UnsafeMutableRawPointer, _ callback: CGEventTapCallBack) -> CFMachPort?
+        let setTapEnabled: @Sendable (_ tap: CFMachPort, _ enabled: Bool) -> Void
+
+        static let system = EventTapDriver(
+            createTap: { refcon, callback in
+                CGEvent.tapCreate(
+                    tap: .cgSessionEventTap,
+                    place: .headInsertEventTap,
+                    options: .defaultTap,
+                    eventsOfInterest: CGEventMask(1 << CGEventType.flagsChanged.rawValue),
+                    callback: callback,
+                    userInfo: refcon
+                )
+            },
+            setTapEnabled: { tap, enabled in CGEvent.tapEnable(tap: tap, enable: enabled) }
+        )
+    }
+
+    private let eventTapDriver: EventTapDriver
+
     #if DEBUG
     // swiftlint:disable:next identifier_name
     nonisolated(unsafe) static var _testStopHook: (() -> Void)?
@@ -35,7 +59,13 @@ public final class HotkeyListener {
     var _testDoubleTapDetected: (() -> Void)?
     #endif
 
-    public init() {}
+    public init() {
+        eventTapDriver = .system
+    }
+
+    init(eventTapDriver: EventTapDriver) {
+        self.eventTapDriver = eventTapDriver
+    }
 
     deinit {
         #if DEBUG
@@ -52,8 +82,9 @@ public final class HotkeyListener {
             s.globalMonitor = nil
             return result
         }
-        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let tap { eventTapDriver.setTapEnabled(tap, false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let tap { CFMachPortInvalidate(tap) }
         if let monitor { NSEvent.removeMonitor(monitor) }
     }
 
@@ -90,8 +121,9 @@ public final class HotkeyListener {
             return result
         }
 
-        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let tap { eventTapDriver.setTapEnabled(tap, false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
+        if let tap { CFMachPortInvalidate(tap) }
         if let monitor { NSEvent.removeMonitor(monitor) }
 
         let metadata = [
@@ -119,14 +151,9 @@ public final class HotkeyListener {
             return
         }
 
-        let eventMask = (1 << CGEventType.flagsChanged.rawValue)
-
-        let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(eventMask),
-            callback: { (_, eventType, event, refcon) -> Unmanaged<CGEvent>? in
+        let tap = eventTapDriver.createTap(
+            Unmanaged.passUnretained(self).toOpaque(),
+            { (_, eventType, event, refcon) -> Unmanaged<CGEvent>? in
                 guard let refcon else { return Unmanaged.passRetained(event) }
                 let listener = Unmanaged<HotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
                 if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
@@ -135,8 +162,7 @@ public final class HotkeyListener {
                 }
                 listener.handleFlagsChanged(event: event)
                 return Unmanaged.passRetained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
+            }
         )
 
         guard let tap else {
@@ -166,7 +192,7 @@ public final class HotkeyListener {
         }
 
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        eventTapDriver.setTapEnabled(tap, true)
         tapState.withLockUnchecked {
             $0.eventTap = tap
             $0.runLoopSource = source
@@ -280,7 +306,7 @@ public final class HotkeyListener {
         ]) { _, new in new }
         HotkeyDiagnostics.record("hotkey_event_tap_disabled", level: .warning, metadata: metadata)
         guard let tap else { return }
-        CGEvent.tapEnable(tap: tap, enable: true)
+        eventTapDriver.setTapEnabled(tap, true)
         HotkeyDiagnostics.record("hotkey_event_tap_reenabled", metadata: metadata)
     }
 
