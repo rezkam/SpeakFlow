@@ -53,6 +53,8 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         var pendingBytes = 0
         var droppedChunks = 0
         var isShutdown = false
+        /// A frame has been dequeued and its send has not returned yet.
+        var sendInFlight = false
     }
 
     private static let maxBufferedAudioBytes = 1_000_000
@@ -159,6 +161,28 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         }
     }
 
+    /// Waits until every buffered frame has been sent, or until `timeout`.
+    /// Returns false when frames remain: the deadline passed, or there is no
+    /// active session to send them to. Used by stop, never by cancel.
+    func drain(timeout: Duration) async -> Bool {
+        let shouldSignal = state.withLock { $0.active && $0.session != nil && !$0.pendingAudio.isEmpty }
+        if shouldSignal {
+            sendSignalContinuation.yield(())
+        }
+        let deadline = ContinuousClock.now + timeout
+        while true {
+            let (drained, canProgress) = state.withLock { state in
+                (
+                    state.pendingAudio.isEmpty && !state.sendInFlight,
+                    state.sendInFlight || (state.active && state.session != nil)
+                )
+            }
+            if drained { return true }
+            guard canProgress, ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     /// Terminates the sender task and permanently invalidates this reference.
     /// Reconnect uses `deactivatePreservingBuffer()` instead so the sender stays reusable.
     func shutdown() {
@@ -169,6 +193,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
             state.active = false
             state.pendingAudio.removeAll()
             state.pendingBytes = 0
+            state.sendInFlight = false
             return true
         }
         guard shouldFinish else { return }
@@ -182,9 +207,13 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
             while let (session, frame) = dequeueFrameIfActive() {
                 do {
                     try await session.sendAudio(frame)
+                    state.withLock { $0.sendInFlight = false }
                 } catch {
                     logger.warning("Audio send failed: \(error.localizedDescription, privacy: .public)")
-                    state.withLock { $0.active = false }
+                    state.withLock {
+                        $0.sendInFlight = false
+                        $0.active = false
+                    }
                     break
                 }
             }
@@ -202,6 +231,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
                   !state.pendingAudio.isEmpty else { return nil }
             let frame = state.pendingAudio.removeFirst()
             state.pendingBytes -= frame.count
+            state.sendInFlight = true
             return (session, frame)
         }
     }
@@ -226,6 +256,8 @@ public final class LiveStreamingController {
 
     // Thread-safe reference for audio callback (runs off MainActor)
     private let audioSessionRef = LiveStreamingAudioSessionRef()
+    /// Longest stop() waits for captured audio to reach the provider.
+    private static let stopDrainTimeout: Duration = .seconds(1)
 
     // Interim text tracking for replacement
     private var lastInterimText = ""
@@ -576,6 +608,20 @@ public final class LiveStreamingController {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
+        // Capture has stopped; deliver what was already captured (for example
+        // audio queued behind network backpressure) before finalizing, bounded
+        // so a stalled network cannot hold stop open. Cancel discards instead.
+        if session != nil {
+            let drained = await audioSessionRef.drain(timeout: Self.stopDrainTimeout)
+            observabilityEvent(
+                "stop_audio_drained",
+                level: drained ? .debug : .warning,
+                metadata: [
+                    "drained": drained ? "true" : "false",
+                    "remainingChunks": String(audioSessionRef.pendingChunkCount)
+                ]
+            )
+        }
         audioSessionRef.shutdown()
 
         // It is possible we're already inactive (e.g. during a reconnect window).
