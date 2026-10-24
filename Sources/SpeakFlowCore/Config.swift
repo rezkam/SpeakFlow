@@ -712,6 +712,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityEnabled)
+            ObservabilityConfigurator.shared.apply(from: self)
         }
     }
 
@@ -726,6 +727,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Keys.observabilityVerbosity)
+            ObservabilityConfigurator.shared.apply(from: self)
         }
     }
 
@@ -739,6 +741,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityCaptureSettingsSnapshot)
+            ObservabilityConfigurator.shared.apply(from: self)
         }
     }
 
@@ -752,6 +755,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityCaptureSystemContext)
+            ObservabilityConfigurator.shared.apply(from: self)
         }
     }
 
@@ -765,6 +769,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityCaptureTextPayloads)
+            ObservabilityConfigurator.shared.apply(from: self)
         }
     }
 

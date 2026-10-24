@@ -782,16 +782,7 @@ final class RecordingController {
     }
 
     private func applyObservabilityConfigurationFromSettings() {
-        let settings = self.settings
-        Task {
-            await ObservabilityStore.shared.applyConfiguration(
-                enabled: settings.observabilityEnabled,
-                verbosity: settings.observabilityVerbosity,
-                captureSettingsSnapshot: settings.observabilityCaptureSettingsSnapshot,
-                captureSystemContext: settings.observabilityCaptureSystemContext,
-                captureTextPayloads: settings.observabilityCaptureTextPayloads
-            )
-        }
+        ObservabilityConfigurator.shared.apply(from: settings)
     }
 
     private func observabilityEvent(
