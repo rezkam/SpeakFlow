@@ -194,6 +194,11 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await httpDataProvider.data(for: request)
+        } catch is CancellationError {
+            // Cancellation is not a network failure; let callers recognize it.
+            throw CancellationError()
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            throw CancellationError()
         } catch let urlError as URLError {
             throw MistralBatchError.networkError(urlError.localizedDescription)
         } catch {
