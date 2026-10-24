@@ -15,6 +15,9 @@ public final class HotkeyListener {
     private struct DoubleTapState: @unchecked Sendable {
         var lastControlReleaseTime: Date?
         var controlWasDown = false
+        /// The current Control press took part in a shortcut or chord, so its
+        /// release is not a tap.
+        var controlPressDisqualified = false
         var eventTap: CFMachPort?
         var runLoopSource: CFRunLoopSource?
         var globalMonitor: Any?
@@ -39,7 +42,10 @@ public final class HotkeyListener {
                     tap: .cgSessionEventTap,
                     place: .headInsertEventTap,
                     options: .defaultTap,
-                    eventsOfInterest: CGEventMask(1 << CGEventType.flagsChanged.rawValue),
+                    // keyDown is observed only to tell a Control tap from a Control shortcut.
+                    eventsOfInterest: CGEventMask(
+                        (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+                    ),
                     callback: callback,
                     userInfo: refcon
                 )
@@ -160,7 +166,11 @@ public final class HotkeyListener {
                     listener.handleEventTapDisabled(eventType: eventType)
                     return Unmanaged.passRetained(event)
                 }
-                listener.handleFlagsChanged(event: event)
+                if eventType == .keyDown {
+                    listener.handleTapKeyDown(event: event)
+                } else {
+                    listener.handleFlagsChanged(event: event)
+                }
                 return Unmanaged.passRetained(event)
             }
         )
@@ -204,10 +214,18 @@ public final class HotkeyListener {
             metadata: registrationMetadata(for: type).merging([
                 "eventTap": "cgSessionEventTap",
                 "tapPlacement": "headInsertEventTap",
-                "eventMask": "flagsChanged",
+                "eventMask": "flagsChanged,keyDown",
                 "accessibilityTrusted": accessibilityTrustedValue()
             ]) { _, new in new }
         )
+    }
+
+    /// Key-down seen by the double-tap tap, passed through untouched. A key
+    /// pressed while Control is held makes that press a shortcut, not a tap.
+    func handleTapKeyDown(event: CGEvent) {
+        tapState.withLockUnchecked { s in
+            if s.controlWasDown { s.controlPressDisqualified = true }
+        }
     }
 
     func handleFlagsChanged(event: CGEvent) {
@@ -219,19 +237,31 @@ public final class HotkeyListener {
                                 flags.contains(.maskShift)
 
         let doubleTapDetected = tapState.withLockUnchecked { s -> Bool in
-            // Detect Control key RELEASE (was down, now up) with no other modifiers
-            if s.controlWasDown && !controlDown && !hasOtherModifiers {
-                let now = Date()
-                if let lastRelease = s.lastControlReleaseTime,
-                   now.timeIntervalSince(lastRelease) < doubleTapInterval {
-                    s.lastControlReleaseTime = nil
-                    s.controlWasDown = controlDown
-                    return true
-                } else {
-                    s.lastControlReleaseTime = now
-                }
+            // Any other modifier during the press makes it a chord, even if that
+            // modifier is released before Control.
+            if controlDown && hasOtherModifiers { s.controlPressDisqualified = true }
+            guard s.controlWasDown && !controlDown else {
+                if controlDown && !s.controlWasDown { s.controlPressDisqualified = hasOtherModifiers }
+                s.controlWasDown = controlDown
+                return false
+            }
+            // Control RELEASE. Only an isolated press counts as a tap; a shortcut
+            // or chord also breaks any pending first tap.
+            let isolated = !s.controlPressDisqualified && !hasOtherModifiers
+            s.controlPressDisqualified = false
+            guard isolated else {
+                s.lastControlReleaseTime = nil
+                s.controlWasDown = controlDown
+                return false
             }
             s.controlWasDown = controlDown
+            let now = Date()
+            if let lastRelease = s.lastControlReleaseTime,
+               now.timeIntervalSince(lastRelease) < doubleTapInterval {
+                s.lastControlReleaseTime = nil
+                return true
+            }
+            s.lastControlReleaseTime = now
             return false
         }
 
