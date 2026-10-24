@@ -275,7 +275,7 @@ public final class LiveStreamingController {
     /// captured to when that final arrived.
     public var onFinalLatency: ((Double) -> Void)?
     /// Longest stop() waits for captured audio to reach the provider.
-    private static let stopDrainTimeout: Duration = .seconds(1)
+    var stopDrainTimeout: Duration = .seconds(1)
 
     // Interim text tracking for replacement
     private var lastInterimText = ""
@@ -630,7 +630,7 @@ public final class LiveStreamingController {
         // audio queued behind network backpressure) before finalizing, bounded
         // so a stalled network cannot hold stop open. Cancel discards instead.
         if session != nil {
-            let drained = await audioSessionRef.drain(timeout: Self.stopDrainTimeout)
+            let drained = await audioSessionRef.drain(timeout: stopDrainTimeout)
             observabilityEvent(
                 "stop_audio_drained",
                 level: drained ? .debug : .warning,

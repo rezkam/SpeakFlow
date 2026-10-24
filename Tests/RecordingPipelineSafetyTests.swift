@@ -69,6 +69,8 @@ struct LiveStreamingStopDrainTests {
     func stopSendsQueuedAudioBeforeFinalizing() async {
         let session = SlowRecordingSession(sendDelay: .milliseconds(20))
         let controller = await startController(session: session)
+        // Ordering is under test, not the bound: allow for a loaded scheduler.
+        controller.stopDrainTimeout = .seconds(10)
         for byte in UInt8(1)...5 { controller._testEnqueueAudioFrame(Data([byte])) }
 
         await controller.stop(trailingFinalTimeout: 0)
