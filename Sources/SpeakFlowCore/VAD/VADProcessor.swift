@@ -131,6 +131,9 @@ public actor VADModelCache {
 ///   See: `VADConfiguration.volumeGateEnabled`.
 public actor VADProcessor {
     private var vadManager: VadManager?
+    /// Holds a raw speech onset until it is sustained for `minSpeechDuration`.
+    private var onsetGate = SpeechOnsetGate()
+
     /// One processChunk call runs at a time; later callers wait in order.
     private var isProcessingChunk = false
     private var processingWaiters: [CheckedContinuation<Void, Never>] = []
@@ -422,8 +425,25 @@ public actor VADProcessor {
             // back to false so FluidAudio can re-emit on a future qualifying frame.
             var speechEvent: SpeechEvent?
             var needsStateRollback = false
+            let frameSeconds = Double(samples.count) / 16_000
 
-            if let event = result.event {
+            if result.event == nil, onsetGate.isPending {
+                // FluidAudio ignores minSpeechDuration in streaming: hold the onset
+                // until speech is sustained, and drop it if it was a transient.
+                switch onsetGate.observe(
+                    aboveThreshold: result.probability >= config.threshold,
+                    frameSeconds: frameSeconds,
+                    minimum: config.minSpeechDuration
+                ) {
+                case .pending:
+                    break
+                case let .confirmed(onset):
+                    speechEvent = confirmSpeechStart(at: onset)
+                case .rejected:
+                    // Roll back like a gated start, so a real onset can fire again.
+                    needsStateRollback = true
+                }
+            } else if let event = result.event {
                 switch event.kind {
                 case .speechStart:
                     // Apply volume gate when enabled
@@ -439,15 +459,21 @@ public actor VADProcessor {
                         // Roll back triggered state so FluidAudio can re-emit speechStart
                         // on a future frame with sufficient volume.
                         needsStateRollback = true
-                    } else {
-                        // Gate open: both probability and volume pass. Forward the event.
-                        isSpeaking = true
-                        lastSpeechStartTime = Date()
-                        speechEvent = .started(at: event.time ?? Double(processedChunks) * 0.032)
-                        logger.debug("Speech started at \(event.time ?? 0)s vol=\(String(format: "%.4f", self.smoothedVolume))")
+                    } else if let onset = onsetGate.begin(
+                        at: event.time ?? Double(processedChunks) * 0.032,
+                        frameSeconds: frameSeconds,
+                        minimum: config.minSpeechDuration
+                    ) {
+                        // Gate open and sustained long enough. Forward the event.
+                        speechEvent = confirmSpeechStart(at: onset)
                     }
 
                 case .speechEnd:
+                    // An onset still pending was a transient: no start, no end.
+                    guard !onsetGate.isPending else {
+                        onsetGate.reset()
+                        break
+                    }
                     // speechEnd is NOT volume-gated — dropping volume IS the end signal.
                     isSpeaking = false
                     lastSpeechEndTime = Date()
@@ -502,6 +528,7 @@ public actor VADProcessor {
     /// each session starts from a clean volume baseline.
     public func resetSession() async {
         await resetChunk()
+        onsetGate.reset()
         isSpeaking = false
         lastSpeechEndTime = nil
         lastSpeechStartTime = nil
@@ -532,6 +559,14 @@ public actor VADProcessor {
     public var currentSilenceDuration: TimeInterval? {
         guard !isSpeaking, let lastEnd = lastSpeechEndTime else { return nil }
         return Date().timeIntervalSince(lastEnd)
+    }
+
+    /// Marks speech as started once its onset has been sustained long enough.
+    func confirmSpeechStart(at onset: Double) -> SpeechEvent {
+        isSpeaking = true
+        lastSpeechStartTime = Date()
+        logger.debug("Speech started at \(onset)s vol=\(String(format: "%.4f", self.smoothedVolume))")
+        return .started(at: onset)
     }
 
     /// The current smoothed RMS volume (read-only, exposed for diagnostics/tests).
@@ -567,7 +602,23 @@ extension VADProcessor {
         // not on every frame — mirrors the real FluidAudio state machine.
         var speechEvent: SpeechEvent?
 
-        if frame.isSpeaking && !isSpeaking {
+        let frameSeconds = 0.05
+        if frame.isSpeaking && !isSpeaking && onsetGate.isPending {
+            // Same minimum-duration hold as the real path.
+            switch onsetGate.observe(
+                aboveThreshold: frame.probability >= config.threshold,
+                frameSeconds: frameSeconds,
+                minimum: config.minSpeechDuration
+            ) {
+            case .pending, .rejected:
+                break
+            case let .confirmed(onset):
+                speechEvent = confirmSpeechStart(at: onset)
+            }
+        } else if !frame.isSpeaking && onsetGate.isPending {
+            // The onset never lasted long enough: a transient, not speech.
+            onsetGate.reset()
+        } else if frame.isSpeaking && !isSpeaking {
             // TRANSITION: quiet → speaking. Apply volume gate (speechStart only).
             if config.volumeGateEnabled && smoothedVolume < config.minVolumeForSpeech {
                 // Gate closed — suppress this transition
@@ -577,11 +628,13 @@ extension VADProcessor {
                     < minVol=\(self.config.minVolumeForSpeech) \
                     prob=\(String(format: "%.3f", frame.probability))
                     """)
-            } else {
-                // Gate open — fire speechStart
-                isSpeaking = true
-                lastSpeechStartTime = Date()
-                speechEvent = .started(at: Double(processedChunks) * 0.05)
+            } else if let onset = onsetGate.begin(
+                at: Double(processedChunks) * 0.05,
+                frameSeconds: frameSeconds,
+                minimum: config.minSpeechDuration
+            ) {
+                // Gate open and sustained long enough — fire speechStart
+                speechEvent = confirmSpeechStart(at: onset)
             }
         } else if !frame.isSpeaking && isSpeaking {
             // TRANSITION: speaking → quiet. speechEnd is never gated.

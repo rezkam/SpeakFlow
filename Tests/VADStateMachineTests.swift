@@ -766,3 +766,55 @@ struct VADProcessorSerializationTests {
         #expect(await backend.callCount == 3)
     }
 }
+
+/// The pinned FluidAudio streaming state machine starts speech on the first
+/// qualifying frame and ignores minSpeechDuration. SpeakFlow enforces it.
+@Suite("VADProcessor — Minimum Speech Duration")
+struct VADMinimumSpeechDurationTests {
+    private func run(_ frames: [VADFrame], minSpeech: TimeInterval = 0.25) async throws -> [VADResult] {
+        var config = VADConfiguration.default
+        config.minSpeechDuration = minSpeech
+        let processor = VADProcessor(config: config)
+        await processor._testInjectBackend(MockVADBackend(frames))
+        var results: [VADResult] = []
+        for _ in frames {
+            results.append(try await processor.processChunk([Float](repeating: 0.05, count: 800)))
+        }
+        return results
+    }
+
+    @Test
+    func transientShorterThanTheMinimumIsNotSpeech() async throws {
+        let results = try await run([.speech(), .speech()] + Array(repeating: .silence(), count: 10))
+
+        #expect(results.allSatisfy { $0.event == nil }, "A 100 ms transient must raise neither start nor end")
+        #expect(results.allSatisfy { !$0.isSpeaking })
+    }
+
+    @Test
+    func sustainedSpeechStartsOnceWithItsOnsetTime() async throws {
+        let results = try await run(Array(repeating: .speech(), count: 8) + Array(repeating: .silence(), count: 2))
+
+        let starts = results.enumerated().filter { if case .started = $0.element.event { return true }; return false }
+        #expect(starts.count == 1)
+        #expect(starts.first?.offset == 4, "Start is confirmed after 0.25 s of sustained speech (5 frames)")
+        if case let .started(at)? = starts.first?.element.event {
+            #expect(abs(at - 0.05) < 0.001, "The confirmed start keeps the onset time, got \(at)")
+        }
+        #expect(!results[3].isSpeaking && results[4].isSpeaking)
+        let endedOnFirstSilence: Bool
+        if case .ended = results[8].event { endedOnFirstSilence = true } else { endedOnFirstSilence = false }
+        #expect(endedOnFirstSilence, "A confirmed segment still ends normally")
+    }
+
+    @Test
+    func aDipBelowThresholdBeforeTheMinimumResetsTheOnset() async throws {
+        let results = try await run([.speech(), .speech(), .silence()] + Array(repeating: .speech(), count: 5))
+
+        let starts = results.enumerated().filter { if case .started = $0.element.event { return true }; return false }
+        #expect(starts.map(\.offset) == [7], "Only the later sustained run counts")
+        if case let .started(at)? = starts.first?.element.event {
+            #expect(abs(at - 0.20) < 0.001, "Onset is the start of the sustained run, got \(at)")
+        }
+    }
+}
