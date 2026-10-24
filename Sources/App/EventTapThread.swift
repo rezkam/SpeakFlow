@@ -20,7 +20,10 @@ final class EventTapThread: @unchecked Sendable {
     func start(name: String) {
         let scheduled = DispatchSemaphore(value: 0)
         let thread = Thread { [self] in
-            let current = CFRunLoopGetCurrent()!
+            guard let current = CFRunLoopGetCurrent() else {
+                scheduled.signal()
+                return
+            }
             CFRunLoopAddSource(current, source, .commonModes)
             lock.withLock { runLoop = current }
             scheduled.signal()

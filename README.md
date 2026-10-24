@@ -145,6 +145,8 @@ SpeakFlow activates with a global hotkey — press it to start dictation, press 
 | **Escape** | Cancel recording — discard audio, insert nothing |
 | **Enter** | Stop recording; after transcription completes, press Enter in the target app (useful for sending messages in chat apps) |
 
+Escape and Enter are only captured while the recording's app has focus, and only without modifiers: Shift, Option, Command, or Control with Enter or Escape (for example Shift+Enter for a new line) goes to the app unchanged. Enter is captured once per recording; a second Enter goes to the app.
+
 Text is inserted into whichever app was focused when you started recording. If you switch to a different app during transcription, typing pauses automatically and resumes when you return — text never goes to the wrong app. In streaming mode, words appear in real-time as you speak. In batch mode, text appears after you stop.
 
 ### Configurable Settings
