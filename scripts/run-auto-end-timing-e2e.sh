@@ -10,6 +10,9 @@ export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$ROOT_DIR/.
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/clang-module-cache}"
 mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" .build
 
+# shellcheck source=SCRIPTDIR/lib/e2e-result.sh
+source "$ROOT_DIR/scripts/lib/e2e-result.sh"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -68,15 +71,15 @@ run_case() {
     local rc=$?
     set -e
 
-    local elapsed
-    elapsed="$(grep -Eo 'AUTO-END triggered after [0-9]+\.[0-9]+s' "$output_file" | tail -n 1 | awk '{print $4}' | sed 's/s$//' || true)"
+    local elapsed verdict
+    elapsed="$(e2e_auto_end_seconds "$output_file")"
 
-    if [[ $rc -eq 0 ]]; then
+    if [[ $rc -eq 0 ]] && verdict="$(e2e_check "$output_file" autoEndFired autoEndWindow)"; then
         PASS_COUNT=$((PASS_COUNT + 1))
         echo "✅ PASS ($name)${elapsed:+ — auto-end=${elapsed}s}"
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "❌ FAIL ($name)"
+        echo "❌ FAIL ($name) — exit=$rc ${verdict:-}"
         echo "Last output lines:"
         tail -n 30 "$output_file"
     fi

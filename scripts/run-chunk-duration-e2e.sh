@@ -10,6 +10,9 @@ export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$ROOT_DIR/.
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/clang-module-cache}"
 mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" .build
 
+# shellcheck source=SCRIPTDIR/lib/e2e-result.sh
+source "$ROOT_DIR/scripts/lib/e2e-result.sh"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -59,17 +62,19 @@ run_case() {
 
     set +e
     (
-        export SPEAKFLOW_E2E_TEST_AUTO_END=true
         export SPEAKFLOW_E2E_CHUNK_DURATION="$chunk_duration"
         export SPEAKFLOW_E2E_TIMEOUT_SECONDS="$timeout"
         export SPEAKFLOW_E2E_AUTO_SPEAK_RATE="$speak_rate"
 
         if [[ "$test_noise_rejection" == "true" ]]; then
             export SPEAKFLOW_E2E_TEST_NOISE_REJECTION=1
+            export SPEAKFLOW_E2E_AUDIO_FILE_PATH="$SILENCE_WAV"
             export SPEAKFLOW_E2E_RECORD_SECONDS=12
             unset SPEAKFLOW_E2E_AUTO_SPEAK_TEXT
         else
+            export SPEAKFLOW_E2E_TEST_AUTO_END=true
             export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="$speak_text"
+            export SPEAKFLOW_E2E_EXPECT_MIN_CHUNKS="$min_chunks"
             # Allow generous auto-end window
             export SPEAKFLOW_E2E_EXPECT_AUTO_END_MIN_SECONDS=5
             export SPEAKFLOW_E2E_EXPECT_AUTO_END_MAX_SECONDS="$timeout"
@@ -80,27 +85,26 @@ run_case() {
     local rc=$?
     set -e
 
-    # Count chunks from output
-    local chunk_count
-    chunk_count="$(grep -c '^chunk #' "$output_file" || echo 0)"
+    local chunk_count verdict
+    chunk_count="$(e2e_chunk_count "$output_file")"
 
     if [[ "$test_noise_rejection" == "true" ]]; then
         # For silence test, expect 0 chunks
-        if [[ $rc -eq 0 ]]; then
+        if [[ $rc -eq 0 ]] && verdict="$(e2e_check "$output_file" noChunks)"; then
             PASS_COUNT=$((PASS_COUNT + 1))
             echo "✅ PASS ($name) — 0 chunks sent (noise rejection)"
         else
             FAIL_COUNT=$((FAIL_COUNT + 1))
-            echo "❌ FAIL ($name)"
+            echo "❌ FAIL ($name) — exit=$rc ${verdict:-}"
             tail -n 15 "$output_file"
         fi
     else
-        if [[ $rc -eq 0 && $chunk_count -ge $min_chunks ]]; then
+        if [[ $rc -eq 0 ]] && verdict="$(e2e_check "$output_file" chunkRange autoEndFired autoEndWindow)"; then
             PASS_COUNT=$((PASS_COUNT + 1))
             echo "✅ PASS ($name) — ${chunk_count} chunks emitted (min required: ${min_chunks})"
         else
             FAIL_COUNT=$((FAIL_COUNT + 1))
-            echo "❌ FAIL ($name) — ${chunk_count} chunks emitted (min required: ${min_chunks}), exit=$rc"
+            echo "❌ FAIL ($name) — ${chunk_count} chunks emitted (min required: ${min_chunks}), exit=$rc ${verdict:-}"
             echo "Last output lines:"
             tail -n 20 "$output_file"
         fi

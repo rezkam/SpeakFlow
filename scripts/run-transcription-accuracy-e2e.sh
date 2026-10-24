@@ -10,6 +10,9 @@ export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$ROOT_DIR/.
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/clang-module-cache}"
 mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" .build
 
+# shellcheck source=SCRIPTDIR/lib/e2e-result.sh
+source "$ROOT_DIR/scripts/lib/e2e-result.sh"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -66,15 +69,15 @@ run_case() {
     local rc=$?
     set -e
 
-    # Extract transcript from output
-    local transcript
-    transcript="$(grep '^Transcript:' "$output_file" | head -1 | sed 's/^Transcript: //' || true)"
+    local transcript chunk_count verdict
+    transcript="$(e2e_transcript "$output_file")"
+    chunk_count="$(e2e_chunk_count "$output_file")"
+    local required=(phrase)
+    if [[ "$test_auto_end" == "true" ]]; then
+        required+=(autoEndFired autoEndWindow)
+    fi
 
-    # Count chunks
-    local chunk_count
-    chunk_count="$(grep -c '^chunk #' "$output_file" || echo 0)"
-
-    if [[ $rc -eq 0 ]]; then
+    if [[ $rc -eq 0 ]] && verdict="$(e2e_check "$output_file" "${required[@]}")"; then
         PASS_COUNT=$((PASS_COUNT + 1))
         echo "✅ PASS ($name) — ${chunk_count} chunk(s)"
         if [[ -n "$transcript" ]]; then
@@ -87,7 +90,7 @@ run_case() {
         fi
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "❌ FAIL ($name)"
+        echo "❌ FAIL ($name) — exit=$rc ${verdict:-}"
         echo "Last output lines:"
         tail -n 20 "$output_file"
     fi

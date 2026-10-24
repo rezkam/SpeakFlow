@@ -28,10 +28,16 @@ let package = Package(
                 .process("../Resources")
             ]
         ),
+        // Configuration and assertion contract shared by the live E2E runner
+        // and its wrapper scripts
+        .target(
+            name: "LiveE2EKit",
+            path: "Sources/LiveE2EKit"
+        ),
         // End-to-end test runner (mock audio + real transcription API)
         .executableTarget(
             name: "SpeakFlowLiveE2E",
-            dependencies: ["SpeakFlowCore"],
+            dependencies: ["SpeakFlowCore", "LiveE2EKit"],
             path: "Sources/LiveE2E"
         ),
         // Deepgram streaming E2E tests (requires DEEPGRAM_API_KEY env var)
@@ -51,6 +57,7 @@ let package = Package(
             dependencies: [
                 "SpeakFlowCore",
                 "SpeakFlow",
+                "LiveE2EKit",
                 .product(name: "ConcurrencyExtras", package: "swift-concurrency-extras"),
             ],
             path: "Tests"

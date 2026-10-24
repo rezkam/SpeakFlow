@@ -10,6 +10,9 @@ export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$ROOT_DIR/.
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/clang-module-cache}"
 mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" .build
 
+# shellcheck source=SCRIPTDIR/lib/e2e-result.sh
+source "$ROOT_DIR/scripts/lib/e2e-result.sh"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
@@ -102,15 +105,15 @@ run_case() {
     local rc=$?
     set -e
 
-    local chunk_count
-    chunk_count="$(grep -c '^chunk #' "$output_file" || echo 0)"
+    local chunk_count verdict
+    chunk_count="$(e2e_chunk_count "$output_file")"
 
-    if [[ $rc -eq 0 && $chunk_count -eq 0 ]]; then
+    if [[ $rc -eq 0 ]] && verdict="$(e2e_check "$output_file" noChunks)"; then
         PASS_COUNT=$((PASS_COUNT + 1))
         echo "✅ PASS ($name) — 0 chunks sent to API"
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "❌ FAIL ($name) — ${chunk_count} chunk(s) sent, exit=$rc"
+        echo "❌ FAIL ($name) — ${chunk_count} chunk(s) sent, exit=$rc ${verdict:-}"
         echo "Last output lines:"
         tail -n 20 "$output_file"
     fi
