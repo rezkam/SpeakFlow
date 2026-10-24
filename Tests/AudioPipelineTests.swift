@@ -826,7 +826,8 @@ struct IntegrationRecorderToQueueTests {
         // Consume stream in background
         let received = OSAllocatedUnfairLock<[String]>(initialState: [])
         let streamTask = Task {
-            for await text in await queue.textStream {
+            for await item in await queue.textStream {
+                let text = item.text
                 received.withLock { $0.append(text) }
             }
         }
@@ -967,7 +968,8 @@ struct IntegrationRecorderToQueueTests {
 
         let received = OSAllocatedUnfairLock<[String]>(initialState: [])
         let streamTask = Task {
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 received.withLock { $0.append(text) }
             }
         }

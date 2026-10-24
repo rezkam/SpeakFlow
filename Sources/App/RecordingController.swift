@@ -34,6 +34,14 @@ final class RecordingController {
     private var latestStreamingError: Error?
     private var presentedRecordingErrorMessage: String?
     private let lifecycleCoordinator = RecordingLifecycleCoordinator()
+    /// Identity of the current recording. Advanced when a recording starts and
+    /// when one is cancelled. Callbacks and finalizers capture it and act only
+    /// while it is still current, so late work from a retired recording can
+    /// never act on the next one.
+    private var recordingGeneration: UInt64 = 0
+    /// Recorder whose stop pipeline must finish enqueuing final audio before
+    /// batch finalization may complete.
+    private var batchStoppingRecorder: StreamingRecorder?
     /// Wall-clock anchor for the next streaming segment. Set when streaming
     /// begins and again after each final, so each final contributes its own
     /// elapsed segment duration to the stats time totals (streaming providers
@@ -104,6 +112,17 @@ final class RecordingController {
             }
         }
         configureRecordingComponents()
+    }
+
+    /// Whether work from recording `generation` may still act: it is current
+    /// and either recording or finishing.
+    private func owns(_ generation: UInt64) -> Bool {
+        generation == recordingGeneration && (isRecording || isProcessingFinal)
+    }
+
+    /// Whether the finalizer of recording `generation` still owns finalization.
+    private func ownsFinalization(_ generation: UInt64) -> Bool {
+        generation == recordingGeneration && isProcessingFinal && !isRecording
     }
 
     // MARK: - Hotkey
@@ -247,6 +266,7 @@ final class RecordingController {
         }
 
         guard captureTargetOrRefuseStart() else { return }
+        recordingGeneration &+= 1
 
         beginMetricsSession(providerId: provider.id, mode: provider.mode)
         maybeRecordSettingsSnapshot(
@@ -348,11 +368,19 @@ final class RecordingController {
     private func startBatchRecording(provider: any BatchTranscriptionProvider) {
         transcription.setActiveBatchProvider(provider)
         observabilityEvent("batch_recording_starting", metadata: ["providerId": provider.id])
-        recorder = StreamingRecorder()
-        recorder?.onChunkReady = { [weak self] chunk in
+        let generation = recordingGeneration
+        let startingRecorder = StreamingRecorder()
+        recorder = startingRecorder
+        startingRecorder.onChunkReady = { [weak self] chunk in
             Task { @MainActor in
-                guard let self else { return }
+                // Audio from a retired recording must not get a ticket in the
+                // current queue session, or it would be typed into the next one.
+                guard let self, self.owns(generation) else {
+                    self?.observabilityEvent("batch_chunk_dropped_stale", level: .debug)
+                    return
+                }
                 let ticket = await self.transcription.queueBridge.nextSequence()
+                guard self.owns(generation) else { return }
                 self.observabilityEvent(
                     "batch_chunk_ready",
                     level: .debug,
@@ -367,13 +395,28 @@ final class RecordingController {
                 self.transcription.transcribe(ticket: ticket, chunk: chunk)
             }
         }
-        recorder?.onAutoEnd = { [weak self] in
+        startingRecorder.onAutoEnd = { [weak self] in
             self?.observabilityEvent("batch_auto_end_triggered")
-            Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
+            Task { @MainActor in
+                guard let self, self.owns(generation), self.isRecording else { return }
+                self.stopRecording(reason: .autoEnd)
+            }
         }
         Task { @MainActor in
+            guard self.isStartingBatch(generation, startingRecorder) else { return }
             await self.transcription.queueBridge.reset()
-            let started = await recorder?.start() ?? false
+            guard self.isStartingBatch(generation, startingRecorder) else { return }
+            let started = await startingRecorder.start()
+            // Stop or cancel during startup makes start() return false on
+            // purpose; that recording is finalized or discarded elsewhere.
+            guard self.isStartingBatch(generation, startingRecorder) else {
+                self.observabilityEvent(
+                    "batch_start_result_ignored_stale",
+                    level: .debug,
+                    metadata: ["started": started ? "true" : "false"]
+                )
+                return
+            }
             if !started {
                 isRecording = false; isProcessingFinal = false; recorder = nil
                 self.lifecycleCoordinator.cancel()
@@ -391,6 +434,11 @@ final class RecordingController {
                 self.observabilityEvent("batch_recording_started")
             }
         }
+    }
+
+    /// Whether a batch startup step for `startingRecorder` is still wanted.
+    private func isStartingBatch(_ generation: UInt64, _ startingRecorder: StreamingRecorder) -> Bool {
+        generation == recordingGeneration && isRecording && recorder === startingRecorder
     }
 
     // MARK: - Stop / Cancel
@@ -426,6 +474,7 @@ final class RecordingController {
             let controller = liveStreamingController
             liveStreamingController = nil
             let trailingTimeout = settings.streamingTrailingFinalTimeout
+            let generation = recordingGeneration
             Task { @MainActor in
                 let startedAt = ContinuousClock.now
                 // Await stop() so trailing finals can be delivered before we proceed.
@@ -442,26 +491,17 @@ final class RecordingController {
                         "elapsedSeconds": String(format: "%.3f", elapsedSeconds)
                     ]
                 )
-                guard self.isProcessingFinal, !self.isRecording else { return }
+                guard self.ownsFinalization(generation) else { return }
                 // All trailing finals have now arrived; wait for their insertions too.
                 await self.textInserter.waitForPendingInsertions()
+                guard self.ownsFinalization(generation) else { return }
                 self.endMetricsSession(reason: reason.rawValue)
-                guard self.isProcessingFinal, !self.isRecording else { return }
                 // Stopping interception delivers any Enter or Escape the tap already
                 // swallowed, so read the submit request only after it returns.
                 self.lifecycleCoordinator.stop()
                 // A delivered Escape cancels the recording; nothing is left to finish.
-                guard self.isProcessingFinal, !self.isRecording else { return }
-                let enterRequested = self.shouldPressEnterOnComplete
-                self.shouldPressEnterOnComplete = false
-                self.isProcessingFinal = false
-                self.hasCapturedSubmitEnter = false
-                if enterRequested {
-                    self.textInserter.pressEnterKey()
-                    await self.textInserter.waitForPendingInsertions()
-                }
-                self.textInserter.reset()
-                self.textInserter.setObservabilitySessionId(nil)
+                guard self.ownsFinalization(generation) else { return }
+                await self.finishFinalization(generation: generation, playCompletion: false)
             }
         } else {
             isProcessingFinal = true; playSoundEffect(.stop)
@@ -469,6 +509,7 @@ final class RecordingController {
             let stoppingRecorder = recorder
             stoppingRecorder?.stop()
             recorder = nil
+            batchStoppingRecorder = stoppingRecorder
             observabilityEvent(
                 "batch_stop_requested",
                 metadata: ["reason": reason.rawValue]
@@ -489,6 +530,9 @@ final class RecordingController {
             ]
         )
         endMetricsSession(reason: StopReason.escape.rawValue)
+        // Retire this recording: its callbacks and finalizer must not act again.
+        recordingGeneration &+= 1
+        batchStoppingRecorder = nil
         lifecycleCoordinator.cancel()
         isRecording = false; isProcessingFinal = false
         shouldPressEnterOnComplete = false
@@ -526,6 +570,7 @@ final class RecordingController {
     /// Called immediately after `recorder.stop()` in the batch stop path.
     func startBatchFinalization(stoppingRecorder: StreamingRecorder? = nil) {
         let timeout = computeBatchFinalizationTimeout()
+        let generation = recordingGeneration
         observabilityEvent(
             "batch_finalization_started",
             metadata: ["timeoutSeconds": String(format: "%.3f", timeout)]
@@ -554,7 +599,7 @@ final class RecordingController {
 
             while ContinuousClock.now < deadline {
                 if Task.isCancelled { return }
-                guard self.isProcessingFinal else { return } // already completed or cancelled
+                guard self.ownsFinalization(generation) else { return } // completed or cancelled
                 let pending = await self.transcription.queueBridge.getPendingCount()
                 self.observabilityEvent(
                     "batch_finalization_poll",
@@ -564,30 +609,41 @@ final class RecordingController {
                 if pending == 0 { break }
                 try? await Task.sleep(for: .milliseconds(500))
             }
-            await self.completeBatchFinalization()
+            // At the deadline, finish with whatever arrived rather than hang.
+            let timedOut = ContinuousClock.now >= deadline
+            await self.completeBatchFinalization(generation: generation, force: timedOut)
         }
     }
 
-    /// Shared completion path for batch finalization.
-    /// Called by both the `onAllComplete` fast path and the deadline polling task.
-    /// Idempotent: the `isProcessingFinal` guard prevents double-execution.
+    /// Shared completion path for batch finalization, used by the queue-empty
+    /// fast path. Completes only for the recording currently finalizing.
     func completeBatchFinalization() async {
-        guard isProcessingFinal, !isRecording else { return }
+        await completeBatchFinalization(generation: recordingGeneration, force: false)
+    }
 
-        // Brief pause to let the queue actor deliver any text whose onTextReady
-        // callback has been queued but not yet fired.
-        try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+    /// Completes batch finalization for recording `generation` once its final
+    /// audio is enqueued, every ticket is transcribed, and every text delivered
+    /// has been typed. `force` skips the transcription wait at the deadline.
+    /// Idempotent: ownership is re-checked after every suspension.
+    private func completeBatchFinalization(generation: UInt64, force: Bool) async {
+        guard ownsFinalization(generation) else { return }
+
+        // Final-audio barrier: the stopping recorder must have enqueued its last chunk.
+        await batchStoppingRecorder?.waitForStopCompletion()
+        guard ownsFinalization(generation) else { return }
+        if !force, await !transcription.queueBridge.isIdle() {
+            // A later onAllComplete or the polling deadline finishes the job.
+            observabilityEvent("batch_finalization_deferred_pending", level: .debug)
+            return
+        }
         await textInserter.waitForPendingInsertions()
-
-        // Re-check: another task may have completed finalization during the sleeps.
-        guard isProcessingFinal, !isRecording else { return }
+        guard ownsFinalization(generation) else { return }
 
         // Stopping interception delivers any Enter or Escape the tap already
         // swallowed. A delivered Escape cancels the recording.
         lifecycleCoordinator.stop()
-        guard isProcessingFinal, !isRecording else { return }
-        isProcessingFinal = false
-        hasCapturedSubmitEnter = false
+        guard ownsFinalization(generation) else { return }
+        batchStoppingRecorder = nil
         transcription.setActiveBatchProvider(nil)
         let finalizationReason = batchFinalizationReason
         batchFinalizationReason = StopReason.unknown.rawValue
@@ -596,29 +652,32 @@ final class RecordingController {
             metadata: ["hadTranscript": fullTranscript.isEmpty ? "false" : "true"]
         )
         endMetricsSession(reason: finalizationReason)
+        let playCompletion = !fullTranscript.isEmpty && !hasPlayedCompletionSound
+        await finishFinalization(generation: generation, playCompletion: playCompletion)
+    }
 
+    /// Final step shared by streaming and batch: sends the requested submit
+    /// Enter, then resets the inserter. Finalization stays owned (and
+    /// `isProcessingFinal` true) until the Enter and cleanup are done, so a new
+    /// recording cannot start in between and have this cleanup reset it.
+    private func finishFinalization(generation: UInt64, playCompletion: Bool) async {
         let enterRequested = shouldPressEnterOnComplete
         shouldPressEnterOnComplete = false
-
-        guard !fullTranscript.isEmpty, !hasPlayedCompletionSound else {
-            if enterRequested {
-                await textInserter.waitForPendingInsertions()
-                textInserter.pressEnterKey()
-                await textInserter.waitForPendingInsertions()
-            }
-            textInserter.reset()
-            textInserter.setObservabilitySessionId(nil)
-            return
+        hasCapturedSubmitEnter = false
+        if playCompletion {
+            hasPlayedCompletionSound = true
+            playSoundEffect(.complete)
         }
-
-        hasPlayedCompletionSound = true
-        playSoundEffect(.complete)
         if enterRequested {
             textInserter.pressEnterKey()
             await textInserter.waitForPendingInsertions()
+            // A new recording that started over this one retired its Enter.
+            guard ownsFinalization(generation) else { return }
         }
         textInserter.reset()
         textInserter.setObservabilitySessionId(nil)
+        isProcessingFinal = false
+        onStateChanged?()
     }
 
     // MARK: - Cleanup
@@ -627,6 +686,8 @@ final class RecordingController {
         observabilityEvent("recording_controller_shutdown")
         endMetricsSession(reason: "SHUTDOWN")
         hotkeyListener?.stop(); hotkeyListener = nil
+        recordingGeneration &+= 1
+        batchStoppingRecorder = nil
         lifecycleCoordinator.cancel()
         if isRecording || isProcessingFinal {
             recorder?.cancel(); recorder = nil
@@ -831,6 +892,7 @@ extension RecordingController {
         // or consumes mic permissions — no host-OS side-effects from tests.
         let controller = LiveStreamingController(skipAudioEngineForTesting: testMode == .live)
         self.liveStreamingController = controller
+        let generation = recordingGeneration
         controller.sessionId = currentMetricsSessionId
         self.streamingSegmentStart = ContinuousClock.now
         controller.onAudioCaptureStarted = { [weak self, weak controller] in
@@ -844,7 +906,9 @@ extension RecordingController {
             // Accept text updates while recording AND while processing final.
             // The processing-final window is when the streaming server delivers
             // trailing finals after the stop-finalize signal — these must be typed.
-            guard let self, self.isRecording || self.isProcessingFinal else { return }
+            // Updates from a retired recording (stopped and replaced, or cancelled)
+            // must never touch the current recording's field.
+            guard let self, self.owns(generation) else { return }
 
             let textForInsertion: String
             if !textToType.isEmpty {
@@ -897,7 +961,10 @@ extension RecordingController {
         controller.minimumFinalWordCount = settings.streamingMinimumFinalWordCount
         controller.onAutoEnd = { [weak self] in
             self?.observabilityEvent("streaming_auto_end_triggered")
-            Task { @MainActor in self?.stopRecording(reason: .autoEnd) }
+            Task { @MainActor in
+                guard let self, self.owns(generation), self.isRecording else { return }
+                self.stopRecording(reason: .autoEnd)
+            }
         }
         controller.onUtteranceEnd = { [weak self] in
             Logger.audio.info("Streaming: utterance end")
@@ -936,7 +1003,7 @@ extension RecordingController {
         }
         controller.onSessionClosed = { [weak self] in
             Task { @MainActor in
-                guard let self, self.isRecording else { return }
+                guard let self, self.owns(generation), self.isRecording else { return }
                 self.observabilityEvent("streaming_session_closed")
                 let hadText = !self.fullTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 if hadText {

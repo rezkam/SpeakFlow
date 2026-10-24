@@ -321,3 +321,31 @@ struct TranscriptionChunkRecordingTests {
         )
     }
 }
+
+@Suite("TranscriptionQueueBridge — Session-Tagged Delivery", .serialized)
+struct TranscriptionQueueSessionDeliveryTests {
+    /// Text yielded before a reset but consumed after it must not be delivered
+    /// to the new session.
+    @MainActor @Test
+    func textBufferedBeforeResetIsNotDeliveredAfterIt() async throws {
+        let bridge = TranscriptionQueueBridge()
+        var delivered: [String] = []
+        bridge.onTextReady = { delivered.append($0) }
+
+        // The stream exists (a running bridge created it) but its consumer has
+        // not caught up when the session resets.
+        _ = await bridge.queue.textStream
+        let old = await bridge.nextSequence()
+        await bridge.submitResult(ticket: old, text: "old")
+        await bridge.reset()
+
+        bridge.startListening()
+        defer { bridge.stopListening() }
+        let new = await bridge.nextSequence()
+        await bridge.submitResult(ticket: new, text: "new")
+        try await waitUntil { !delivered.isEmpty }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(delivered == ["new"])
+    }
+}
