@@ -1121,7 +1121,6 @@ extension StreamingRecorder {
         scheduleProcessingPass()
     }
 
-    // swiftlint:disable:next identifier_name
     func _testInvokeProcessQueuedSamples() async {
         await processQueuedSamples()
     }
