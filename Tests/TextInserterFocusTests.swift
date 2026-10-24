@@ -263,12 +263,12 @@ struct TextInserterPidFocusTests {
     // MARK: - isTargetAppFrontmost
 
     @MainActor @Test
-    func isTargetAppFrontmostReturnsTrueWhenNoPidSet() {
+    func isTargetAppFrontmostReturnsFalseWhenNoPidSet() {
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
-        // With targetPid == 0, should return true (no target to guard)
-        #expect(inserter.isTargetAppFrontmost(),
-                "With no PID set, isTargetAppFrontmost should return true")
+        // No captured target means no safe destination: fail closed.
+        #expect(!inserter.isTargetAppFrontmost(),
+                "With no PID set, isTargetAppFrontmost must fail closed")
     }
 
     /// This test protects the CFEqual-based focus comparison path.
@@ -366,11 +366,11 @@ struct TextInserterPidFocusTests {
     // MARK: - ensureTargetFocused behavior
 
     @MainActor @Test
-    func ensureTargetFocusedReturnsTrueWithNoTarget() async {
+    func ensureTargetFocusedFailsClosedWithNoTarget() async {
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
         let result = await inserter.ensureTargetFocused()
-        #expect(result, "ensureTargetFocused should return true when no target was captured")
+        #expect(!result, "Without a captured target, synthetic input must not proceed")
     }
 
     /// Simulates the cross-app scenario: target app is not frontmost.

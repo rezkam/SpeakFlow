@@ -261,6 +261,17 @@ final class RecordingController {
             return
         }
 
+        // The focused field at start is the only place this recording may type.
+        // Without it, focus protection has nothing to protect, so do not start.
+        guard textInserter.captureTarget() else {
+            observabilityEvent("recording_start_failed_no_target", level: .warning)
+            playSoundEffect(.error)
+            presentRecordingError(
+                message: "Click into a text field, then start dictation again. SpeakFlow could not identify where to type."
+            )
+            return
+        }
+
         beginMetricsSession(providerId: provider.id, mode: provider.mode)
         maybeRecordSettingsSnapshot(
             sessionId: currentMetricsSessionId,
@@ -273,7 +284,6 @@ final class RecordingController {
         hasCapturedSubmitEnter = false
         fullTranscript = ""
 
-        textInserter.captureTarget()
         configureRecordingComponents()
         do {
             try lifecycleCoordinator.prepareAndStart()

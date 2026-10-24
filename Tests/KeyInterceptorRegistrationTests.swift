@@ -76,6 +76,21 @@ final class FakeEventTapDriver: @unchecked Sendable {
     }
 }
 
+extension KeyInterceptor {
+    nonisolated static let testTargetPid: pid_t = 42
+
+    /// Interceptor whose keyboard focus is always in `testTargetPid`.
+    @MainActor
+    static func focusedForTests(_ driver: EventTapDriver) -> KeyInterceptor {
+        KeyInterceptor(
+            eventTapDriver: driver,
+            focusQuery: { .init(focusedPid: testTargetPid, focusedAppPid: testTargetPid, source: "test") },
+            bundleIdentifierLookup: { _ in nil },
+            secureInputOwner: { nil }
+        )
+    }
+}
+
 @Suite("KeyInterceptor — Event Tap Registration", .serialized)
 struct KeyInterceptorRegistrationTests {
     @MainActor @Test
@@ -125,11 +140,11 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func stopDeliversACapturedEnterBeforeReturning() {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
+        let interceptor = KeyInterceptor.focusedForTests(fake.driver)
         var enterCallbacks = 0
         interceptor.onEnterPressed = { enterCallbacks += 1 }
 
-        interceptor.start(targetPid: 0)
+        interceptor.start(targetPid: KeyInterceptor.testTargetPid)
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 36), "Enter must be swallowed")
 
         // Finalization stops interception before the handler hop has run.
@@ -142,11 +157,11 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func stopDeliversACapturedEscapeBeforeReturning() {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
+        let interceptor = KeyInterceptor.focusedForTests(fake.driver)
         var escapeCallbacks = 0
         interceptor.onEscapePressed = { escapeCallbacks += 1 }
 
-        interceptor.start(targetPid: 0)
+        interceptor.start(targetPid: KeyInterceptor.testTargetPid)
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 53), "Escape must be swallowed")
         interceptor.stop()
 
@@ -157,11 +172,11 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func capturedKeyIsDeliveredExactlyOnce() async throws {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
+        let interceptor = KeyInterceptor.focusedForTests(fake.driver)
         var enterCallbacks = 0
         interceptor.onEnterPressed = { enterCallbacks += 1 }
 
-        interceptor.start(targetPid: 0)
+        interceptor.start(targetPid: KeyInterceptor.testTargetPid)
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 36))
         try await waitUntil { enterCallbacks == 1 }
         interceptor.stop()
@@ -173,11 +188,11 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func cancelDiscardsACapturedKeyInsteadOfDeliveringIt() async throws {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
+        let interceptor = KeyInterceptor.focusedForTests(fake.driver)
         var enterCallbacks = 0
         interceptor.onEnterPressed = { enterCallbacks += 1 }
 
-        interceptor.start(targetPid: 0)
+        interceptor.start(targetPid: KeyInterceptor.testTargetPid)
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 36))
         interceptor.cancel()
         try await Task.sleep(for: .milliseconds(50))
@@ -189,10 +204,10 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func tapIsServicedWhileTheMainThreadIsBlocked() throws {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
+        let interceptor = KeyInterceptor.focusedForTests(fake.driver)
         defer { interceptor.stop() }
 
-        interceptor.start(targetPid: 0)
+        interceptor.start(targetPid: KeyInterceptor.testTargetPid)
         let tap = try #require(fake.createdTaps.first)
 
         FakeEventTapDriver.sendMessage(to: tap)
@@ -267,9 +282,9 @@ struct KeyInterceptorRegistrationTests {
     ])
     func modifiedEnterAndEscapePassThroughUntouched(modifier: CGEventFlags) {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
+        let interceptor = KeyInterceptor.focusedForTests(fake.driver)
         defer { interceptor.stop() }
-        interceptor.start(targetPid: 0)
+        interceptor.start(targetPid: KeyInterceptor.testTargetPid)
 
         #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36, flags: modifier),
                 "Modified Enter is a different command (newline, alternate submit) and must reach the app")
@@ -283,9 +298,9 @@ struct KeyInterceptorRegistrationTests {
     @MainActor @Test
     func plainEnterIsStillCapturedWithNonCommandFlags() {
         let fake = FakeEventTapDriver()
-        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, secureInputOwner: { nil })
+        let interceptor = KeyInterceptor.focusedForTests(fake.driver)
         defer { interceptor.stop() }
-        interceptor.start(targetPid: 0)
+        interceptor.start(targetPid: KeyInterceptor.testTargetPid)
 
         // Caps Lock and the keypad/fn flags do not change what Enter means.
         #expect(interceptor._testHandleKeyEventForTests(
@@ -416,5 +431,17 @@ struct KeyInterceptorRegistrationTests {
         #expect(events.contains {
             $0.name == "key_interceptor_keys_missed_by_tap" && $0.metadata["missedKeyDowns"] == "4"
         }, "Hardware keys the tap missed must be reported even while SpeakFlow types")
+    }
+
+    @MainActor @Test
+    func noTargetAppMeansNothingIsIntercepted() {
+        let interceptor = KeyInterceptor(eventTapDriver: FakeEventTapDriver().driver, secureInputOwner: { nil })
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 0)
+
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Without a target app, Enter must reach whatever app has focus")
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53),
+                "Without a target app, Escape must reach whatever app has focus")
     }
 }
