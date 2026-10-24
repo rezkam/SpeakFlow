@@ -116,4 +116,79 @@ struct TextInserterCancellationTests {
         #expect(await inserter.ensureTargetFocused() == false)
         #expect(!inserter.isTargetAppFrontmost())
     }
+
+}
+
+/// Dictation must stay in the field it started in, not just the same app.
+@Suite("TextInserter Field Identity", .serialized)
+struct TextInserterFieldIdentityTests {
+    typealias Field = TextInserter.FieldIdentity
+
+    @Test
+    func identicalElementIsTheSameField() {
+        #expect(TextInserter.fieldIdentity(elementsEqual: true, capturedReportsFocused: nil, windowsMatch: false) == .same)
+    }
+
+    @Test
+    func capturedElementStillFocusedIsTheSameField() {
+        // Some apps hand out a new reference for the same element.
+        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .focused, windowsMatch: nil) == .same)
+    }
+
+    @Test
+    func capturedElementNotFocusedIsADifferentField() {
+        // Switched conversation, document, or field within the same app.
+        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .notFocused, windowsMatch: true) == .different)
+    }
+
+    @Test
+    func capturedElementGoneIsADifferentField() {
+        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .elementGone, windowsMatch: true) == .different)
+    }
+
+    @Test
+    func unknownFocusFallsBackToWindowIdentity() {
+        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .unknown, windowsMatch: false) == .different)
+        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .unknown, windowsMatch: true) == .same)
+        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .unknown, windowsMatch: nil) == .unknown,
+                "With no evidence either way, keep the app-level decision")
+    }
+
+    @MainActor @Test
+    func typingPausesInAnotherFieldOfTheSameAppAndResumesInTheOriginal() async throws {
+        let recorder = TextInserterCancellationTests.PostRecorder()
+        var field = Field.different
+        let inserter = TextInserter._testMakeIsolatedInstance()
+        inserter.targetElement = AXUIElementCreateApplication(42_424)
+        inserter.targetPid = 42_424
+        inserter._testSetTargetProcessLiveness { $0 == 42_424 }
+        inserter._testSetFlagsProvider { [] }
+        inserter._testSetEventPoster { recorder.record($0) }
+        inserter._testSetFocusObserver { .init(focusedPid: 42_424, field: field) }
+
+        inserter.insertText("hi")
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(recorder.keyDowns.isEmpty, "Same app, different field: typing must pause")
+
+        // The user returns to the original field; nothing forces focus.
+        field = .same
+        try await waitUntil(timeout: .seconds(2)) { recorder.keyDowns.count == 2 }
+        #expect(recorder.keyDowns == ["h", "i"])
+    }
+
+    @MainActor @Test
+    func unknownFieldIdentityKeepsTheAppLevelDecision() async throws {
+        let recorder = TextInserterCancellationTests.PostRecorder()
+        let inserter = TextInserter._testMakeIsolatedInstance()
+        inserter.targetElement = AXUIElementCreateApplication(42_424)
+        inserter.targetPid = 42_424
+        inserter._testSetTargetProcessLiveness { $0 == 42_424 }
+        inserter._testSetFlagsProvider { [] }
+        inserter._testSetEventPoster { recorder.record($0) }
+        inserter._testSetFocusObserver { .init(focusedPid: 42_424, field: .unknown) }
+
+        inserter.insertText("ok")
+        try await waitUntil(timeout: .seconds(2)) { recorder.keyDowns.count == 2 }
+        #expect(recorder.keyDowns == ["o", "k"])
+    }
 }

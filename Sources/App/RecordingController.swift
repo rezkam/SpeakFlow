@@ -217,22 +217,7 @@ final class RecordingController {
                 "activeProviderId": providerSettings.activeProviderId
             ]
         )
-        if isProcessingFinal {
-            if settings.hotkeyRestartsRecording {
-                observabilityEvent("recording_restart_during_processing")
-                cancelRecording()
-            } else {
-                observabilityEvent(
-                    "recording_start_blocked_processing",
-                    level: .warning,
-                    metadata: ["hotkeyRestartsRecording": "false"]
-                )
-                // This is an intentional blocked action, not a recording failure.
-                // The error cue is sufficient because the current recording is still finalizing.
-                playSoundEffect(.error)
-                return
-            }
-        }
+        guard resolveFinalizationBeforeStart() else { return }
         if testMode == .mock {
             isRecording = true; isProcessingFinal = false; hasPlayedCompletionSound = false
             shouldPressEnterOnComplete = false
@@ -261,16 +246,7 @@ final class RecordingController {
             return
         }
 
-        // The focused field at start is the only place this recording may type.
-        // Without it, focus protection has nothing to protect, so do not start.
-        guard textInserter.captureTarget() else {
-            observabilityEvent("recording_start_failed_no_target", level: .warning)
-            playSoundEffect(.error)
-            presentRecordingError(
-                message: "Click into a text field, then start dictation again. SpeakFlow could not identify where to type."
-            )
-            return
-        }
+        guard captureTargetOrRefuseStart() else { return }
 
         beginMetricsSession(providerId: provider.id, mode: provider.mode)
         maybeRecordSettingsSnapshot(
@@ -307,6 +283,40 @@ final class RecordingController {
             startBatchRecording(provider: batch)
         }
         onStateChanged?()
+    }
+
+    /// A start while the previous recording is still finalizing either replaces
+    /// it (when the hotkey restarts recording) or is refused.
+    private func resolveFinalizationBeforeStart() -> Bool {
+        guard isProcessingFinal else { return true }
+        if settings.hotkeyRestartsRecording {
+            observabilityEvent("recording_restart_during_processing")
+            cancelRecording()
+            return true
+        }
+        observabilityEvent(
+            "recording_start_blocked_processing",
+            level: .warning,
+            metadata: ["hotkeyRestartsRecording": "false"]
+        )
+        // This is an intentional blocked action, not a recording failure.
+        // The error cue is sufficient because the current recording is still finalizing.
+        playSoundEffect(.error)
+        return false
+    }
+
+    /// The focused field at start is the only place a recording may type.
+    /// Without it, focus protection has nothing to protect, so do not start.
+    private func captureTargetOrRefuseStart() -> Bool {
+        guard textInserter.captureTarget() else {
+            observabilityEvent("recording_start_failed_no_target", level: .warning)
+            playSoundEffect(.error)
+            presentRecordingError(
+                message: "Click into a text field, then start dictation again. SpeakFlow could not identify where to type."
+            )
+            return false
+        }
+        return true
     }
 
     private func signalRecordingStarted(provider: any TranscriptionProvider) {

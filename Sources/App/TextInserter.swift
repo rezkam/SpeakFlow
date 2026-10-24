@@ -113,6 +113,16 @@ final class TextInserter: TextInserting {
     /// exercised end-to-end without emitting real OS events.
     private var eventPoster: (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }
 
+    /// Reports where keyboard focus is relative to the captured target; nil
+    /// when Accessibility cannot answer. Tests inject a deterministic observer.
+    private var focusObserver: ((TextInserter) -> FocusObservation?)?
+
+    /// Why the last focus check failed, recorded when typing pauses.
+    private var lastFocusMismatch = "otherApp"
+
+    /// Window of the captured field, used when the field itself cannot answer.
+    private var targetWindow: AXUIElement?
+
     /// Liveness check for the captured target process. Production uses AppKit;
     /// tests inject a deterministic process identity without requiring a GUI app.
     private var isTargetProcessRunning: (pid_t) -> Bool = {
@@ -202,7 +212,9 @@ final class TextInserter: TextInserting {
             // Swift CF bridging always succeeds for this cast
             // swiftlint:disable:next force_cast
             let axElement = element as! AXUIElement
+            AXUIElementSetMessagingTimeout(axElement, Self.fieldQueryTimeoutSeconds)
             targetElement = axElement
+            targetWindow = Self.elementAttribute(kAXWindowAttribute, of: axElement)
 
             // Store the PID for reliable app-level focus comparison
             var pid: pid_t = 0
@@ -216,6 +228,7 @@ final class TextInserter: TextInserting {
         }
         // No focused element, no owning process, or accessibility denied.
         targetElement = nil
+        targetWindow = nil
         targetPid = 0
         targetBundleIdentifier = nil
         observabilityEvent("target_capture_failed", level: .warning)
@@ -469,6 +482,7 @@ final class TextInserter: TextInserting {
         queueGeneration &+= 1
         queuedInsertionCount = 0
         targetElement = nil
+        targetWindow = nil
         targetPid = 0
         targetBundleIdentifier = nil
     }
@@ -483,6 +497,7 @@ final class TextInserter: TextInserting {
         queueGeneration &+= 1
         queuedInsertionCount = 0
         targetElement = nil
+        targetWindow = nil
         targetPid = 0
         targetBundleIdentifier = nil
     }
@@ -609,7 +624,8 @@ final class TextInserter: TextInserting {
             "focus_lost_waiting",
             metadata: [
                 "timeoutSeconds": String(timeout),
-                "targetPid": String(targetPid)
+                "targetPid": String(targetPid),
+                "reason": lastFocusMismatch
             ]
         )
 
@@ -660,45 +676,16 @@ final class TextInserter: TextInserting {
         // depending on live NSWorkspace / AX state (which can be non-deterministic
         // in CI environments where the frontmost app may change between test steps).
         if let override = testIsTargetFrontmost { return override }
-
-        // Primary: ask the AX system which process owns the current keyboard focus.
-        // This is more authoritative than NSWorkspace.frontmostApplication because:
-        //   • Overlay windows (Spotlight, password dialogs) steal keyboard focus
-        //     without changing the NSWorkspace frontmost app.
-        //   • In CI the terminal process that owns the focused element is often
-        //     NOT the same process that NSWorkspace considers "frontmost".
-        //   • Some apps route UI through helper processes whose PID differs from
-        //     the main app PID even though the user is still in the same app.
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedElement: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
-            systemWide,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedElement
-        ) == .success,
-           let element = focusedElement,
-           CFGetTypeID(element) == AXUIElementGetTypeID() {
-            let focusedElementAX = unsafeDowncast(element, to: AXUIElement.self)
-            var focusedPid: pid_t = 0
-            if AXUIElementGetPid(focusedElementAX, &focusedPid) == .success {
-                if focusedPid == targetPid { return true }
-                // Helper-process check: same app family if bundle IDs share a prefix.
-                let targetBundle = targetBundleIdentifier
-                    ?? NSRunningApplication(processIdentifier: targetPid)?.bundleIdentifier
-                let focusedBundle = NSRunningApplication(
-                    processIdentifier: focusedPid
-                )?.bundleIdentifier
-                return Self.bundleIdentifiersLikelySameApp(
-                    target: targetBundle,
-                    candidate: focusedBundle
-                )
-            }
+        // Ask Accessibility which process and field own keyboard focus. This is
+        // more authoritative than NSWorkspace.frontmostApplication: overlays
+        // (Spotlight, password dialogs) take keyboard focus without changing the
+        // frontmost app, and some apps route UI through helper processes.
+        let observation = focusObserver.map { $0(self) } ?? systemFocusObservation()
+        guard let observation else {
+            // AX unavailable (permission not granted or no focused element).
+            return frontmostApplicationIsTarget()
         }
-
-        // Fallback: AX unavailable (permission not granted or no focused element).
-        // Use NSWorkspace.frontmostApplication as a best-effort substitute.
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
-        return frontmost.processIdentifier == targetPid
+        return focusMatchesTarget(observation)
     }
 
     /// Recovers `targetPid` when the target app relaunches with a new PID.
@@ -957,6 +944,128 @@ final class TextInserter: TextInserting {
 
 }
 
+// MARK: - Field Identity
+
+extension TextInserter {
+    /// Whether keyboard focus is still in the captured field.
+    enum FieldIdentity: Equatable, Sendable {
+        case same
+        case different
+        /// Accessibility gave no evidence either way.
+        case unknown
+    }
+
+    /// What the captured element itself reports about its focus.
+    enum CapturedFocusState: Equatable, Sendable {
+        case focused
+        case notFocused
+        /// The element was destroyed (for example the conversation was switched).
+        case elementGone
+        /// The app does not answer, or does not expose the attribute.
+        case unknown
+    }
+
+    /// Where keyboard focus is now, relative to the captured target.
+    struct FocusObservation: Sendable {
+        let focusedPid: pid_t?
+        let field: FieldIdentity
+    }
+
+    /// Decides whether focus is still in the captured field. Conservative: a
+    /// field counts as different only on definite evidence, because a false
+    /// "different" pauses dictation the user expects to continue.
+    nonisolated static func fieldIdentity(
+        elementsEqual: Bool,
+        capturedReportsFocused: CapturedFocusState?,
+        windowsMatch: Bool?
+    ) -> FieldIdentity {
+        if elementsEqual { return .same }
+        switch capturedReportsFocused {
+        case .focused:
+            return .same
+        case .notFocused, .elementGone:
+            return .different
+        case .unknown, nil:
+            guard let windowsMatch else { return .unknown }
+            return windowsMatch ? .same : .different
+        }
+    }
+
+    /// Longest an Accessibility query against the target app may block typing.
+    private static let fieldQueryTimeoutSeconds: Float = 0.25
+
+    /// Live Accessibility view of keyboard focus relative to the captured field.
+    private func systemFocusObservation() -> FocusObservation? {
+        let systemWide = AXUIElementCreateSystemWide()
+        guard let focused = Self.elementAttribute(kAXFocusedUIElementAttribute, of: systemWide) else { return nil }
+        var focusedPid: pid_t = 0
+        guard AXUIElementGetPid(focused, &focusedPid) == .success else { return nil }
+        guard let targetElement else { return FocusObservation(focusedPid: focusedPid, field: .unknown) }
+        if CFEqual(focused, targetElement) {
+            return FocusObservation(focusedPid: focusedPid, field: .same)
+        }
+        let windowsMatch: Bool? = {
+            guard let targetWindow,
+                  let focusedWindow = Self.elementAttribute(kAXWindowAttribute, of: focused) else { return nil }
+            return CFEqual(focusedWindow, targetWindow)
+        }()
+        let field = Self.fieldIdentity(
+            elementsEqual: false,
+            capturedReportsFocused: Self.focusState(of: targetElement),
+            windowsMatch: windowsMatch
+        )
+        return FocusObservation(focusedPid: focusedPid, field: field)
+    }
+
+    private static func focusState(of element: AXUIElement) -> CapturedFocusState {
+        var value: CFTypeRef?
+        switch AXUIElementCopyAttributeValue(element, kAXFocusedAttribute as CFString, &value) {
+        case .success:
+            guard let value, CFGetTypeID(value) == CFBooleanGetTypeID() else { return .unknown }
+            return CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self)) ? .focused : .notFocused
+        case .invalidUIElement:
+            return .elementGone
+        default:
+            return .unknown
+        }
+    }
+
+    private static func elementAttribute(_ attribute: String, of element: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value,
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return unsafeDowncast(value, to: AXUIElement.self)
+    }
+
+    /// Best-effort substitute when Accessibility cannot report keyboard focus.
+    private func frontmostApplicationIsTarget() -> Bool {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
+        return frontmost.processIdentifier == targetPid
+    }
+
+    /// Focus must be in the target app (or one of its helpers) and, when
+    /// Accessibility can tell, in the captured field.
+    private func focusMatchesTarget(_ observation: FocusObservation) -> Bool {
+        guard let focusedPid = observation.focusedPid else { return false }
+        if focusedPid != targetPid {
+            let targetBundle = targetBundleIdentifier
+                ?? NSRunningApplication(processIdentifier: targetPid)?.bundleIdentifier
+            let focusedBundle = NSRunningApplication(processIdentifier: focusedPid)?.bundleIdentifier
+            guard Self.bundleIdentifiersLikelySameApp(target: targetBundle, candidate: focusedBundle) else {
+                lastFocusMismatch = "otherApp"
+                return false
+            }
+        }
+        // Same app, but another conversation, document, or field: pause.
+        guard observation.field != .different else {
+            lastFocusMismatch = "otherFieldInTargetApp"
+            return false
+        }
+        return true
+    }
+}
+
 #if DEBUG
 extension TextInserter {
     // swiftlint:disable:next identifier_name
@@ -1024,6 +1133,11 @@ extension TextInserter {
     // swiftlint:disable:next identifier_name
     func _testSetEventPoster(_ poster: @escaping (CGEvent) -> Void) {
         eventPoster = poster
+    }
+
+    // swiftlint:disable:next identifier_name
+    func _testSetFocusObserver(_ observer: @escaping () -> FocusObservation?) {
+        focusObserver = { _ in observer() }
     }
 
     // swiftlint:disable:next identifier_name
