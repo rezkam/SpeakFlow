@@ -39,6 +39,12 @@ final class KeyInterceptor: KeyIntercepting {
         /// always either delivered (async hop or `stop()`) or deliberately
         /// discarded (`cancel()`), never silently lost.
         var pendingKeys = PendingKeys()
+        /// Hardware key-down events the tap received since registration.
+        var tapKeyDowns: UInt32 = 0
+        /// Synthetic key-down events (SpeakFlow's own typing) the tap received.
+        var tapSyntheticKeyDowns: UInt32 = 0
+        /// System key-down counter when the tap was registered; nil when not registered.
+        var systemKeyDownsAtStart: UInt32?
     }
 
     struct PendingKeys: Equatable {
@@ -81,6 +87,7 @@ final class KeyInterceptor: KeyIntercepting {
     private let keyboardFocusSnapshotProvider: @Sendable (_ targetPid: pid_t, _ targetBundle: String?) -> KeyboardFocusSnapshot
     private let bundleIdentifierLookup: @Sendable (pid_t) -> String?
     private let secureInputOwnerProvider: () -> pid_t?
+    private let systemKeyDownCounter: @Sendable () -> UInt32
     private let secureInputPollingInterval: Duration
     private var secureInputMonitorTask: Task<Void, Never>?
     /// Secure-input holder last observed while monitoring; nil when not monitoring.
@@ -97,8 +104,10 @@ final class KeyInterceptor: KeyIntercepting {
             NSRunningApplication(processIdentifier: $0)?.bundleIdentifier
         },
         secureInputOwner: @escaping () -> pid_t? = KeyInterceptor.currentSecureInputOwner,
-        secureInputPollingInterval: Duration = .seconds(1)
+        secureInputPollingInterval: Duration = .seconds(1),
+        systemKeyDownCounter: @escaping @Sendable () -> UInt32 = KeyInterceptor.currentSystemKeyDownCount
     ) {
+        self.systemKeyDownCounter = systemKeyDownCounter
         self.eventTapDriver = eventTapDriver
         self.bundleIdentifierLookup = bundleIdentifierLookup
         keyboardFocusSnapshotProvider = { targetPid, targetBundle in
@@ -121,6 +130,7 @@ final class KeyInterceptor: KeyIntercepting {
         keyboardFocusSnapshotProvider = { targetPid, _ in testKeyboardFocusSnapshotProvider(targetPid) }
         bundleIdentifierLookup = { _ in nil }
         secureInputOwnerProvider = Self.currentSecureInputOwner
+        systemKeyDownCounter = Self.currentSystemKeyDownCount
         secureInputPollingInterval = .seconds(1)
     }
 #endif
@@ -137,6 +147,9 @@ final class KeyInterceptor: KeyIntercepting {
             s.targetPid = targetPid
             s.targetBundleIdentifier = targetBundle
             s.enterCaptureArmed = true
+            s.tapKeyDowns = 0
+            s.tapSyntheticKeyDowns = 0
+            s.systemKeyDownsAtStart = systemKeyDownCounter()
             return previous
         }
         if let previousTargetPid {
@@ -184,10 +197,14 @@ final class KeyInterceptor: KeyIntercepting {
         let tapThread = EventTapThread(source: source)
         // Publish the registration before the tap can deliver its first event
         // on the tap thread.
+        let systemKeyDowns = systemKeyDownCounter()
         state.withLockUnchecked {
             $0.recordingEventTap = tap
             $0.recordingTapThread = tapThread
             $0.isActive = true
+            $0.tapKeyDowns = 0
+            $0.tapSyntheticKeyDowns = 0
+            $0.systemKeyDownsAtStart = systemKeyDowns
         }
         tapThread.start(name: "SpeakFlow.KeyInterceptor.EventTap")
         eventTapDriver.setTapEnabled(tap, true)
@@ -222,8 +239,24 @@ final class KeyInterceptor: KeyIntercepting {
 
     /// Removes the tap and returns keys that were swallowed but not yet delivered.
     private func tearDown(phase: String) -> PendingKeys {
-        let (tap, tapThread, targetPid, pending) = state.withLockUnchecked { s -> (CFMachPort?, EventTapThread?, pid_t, PendingKeys) in
-            let result = (s.recordingEventTap, s.recordingTapThread, s.targetPid, s.pendingKeys)
+        let systemKeyDownsAtStop = systemKeyDownCounter()
+        let registration = state.withLockUnchecked { s -> EndedRegistration in
+            let result = EndedRegistration(
+                tap: s.recordingEventTap,
+                tapThread: s.recordingTapThread,
+                targetPid: s.targetPid,
+                pending: s.pendingKeys,
+                keyCounts: s.systemKeyDownsAtStart.map {
+                    KeyDownCounts(
+                        system: systemKeyDownsAtStop &- $0,
+                        tap: s.tapKeyDowns,
+                        tapSynthetic: s.tapSyntheticKeyDowns
+                    )
+                }
+            )
+            s.tapKeyDowns = 0
+            s.tapSyntheticKeyDowns = 0
+            s.systemKeyDownsAtStart = nil
             s.isActive = false
             s.targetPid = 0
             s.targetBundleIdentifier = nil
@@ -233,6 +266,7 @@ final class KeyInterceptor: KeyIntercepting {
             s.recordingTapThread = nil
             return result
         }
+        let (tap, tapThread, targetPid) = (registration.tap, registration.tapThread, registration.targetPid)
         recordSecureInputTransitionIfNeeded(targetPid: targetPid, phase: "stop")
         stopSecureInputMonitoring()
         if let tap { eventTapDriver.setTapEnabled(tap, false) }
@@ -251,7 +285,27 @@ final class KeyInterceptor: KeyIntercepting {
         } else {
             HotkeyDiagnostics.record("key_interceptor_registration_stop_noop", level: .debug, metadata: metadata)
         }
-        return pending
+        if let keyCounts = registration.keyCounts {
+            recordKeyDownCounts(keyCounts, targetPid: targetPid, phase: phase)
+        }
+        return registration.pending
+    }
+
+    private struct EndedRegistration {
+        let tap: CFMachPort?
+        let tapThread: EventTapThread?
+        let targetPid: pid_t
+        let pending: PendingKeys
+        let keyCounts: KeyDownCounts?
+    }
+
+    private struct KeyDownCounts {
+        /// Key-down events the HID system produced while the tap was registered.
+        let system: UInt32
+        /// Hardware key-down events the tap received in the same window.
+        let tap: UInt32
+        /// Synthetic key-down events the tap received; not part of the comparison.
+        let tapSynthetic: UInt32
     }
 
     /// Runs on the main actor after the tap swallowed a key. Takes whatever is
@@ -274,72 +328,6 @@ final class KeyInterceptor: KeyIntercepting {
             HotkeyDiagnostics.record("key_interceptor_enter_handler_invoked", metadata: ["phase": phase])
             onEnterPressed?()
         }
-    }
-
-    private func startSecureInputMonitoring(targetPid: pid_t, initialOwner: pid_t?) {
-        stopSecureInputMonitoring()
-        secureInputObservation = SecureInputObservation(owner: initialOwner)
-        secureInputMonitorTask = Task { @MainActor [weak self] in
-            guard let interval = self?.secureInputPollingInterval else { return }
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: interval)
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled, let self else { return }
-                self.recordSecureInputTransitionIfNeeded(targetPid: targetPid, phase: "monitor")
-            }
-        }
-    }
-
-    private func stopSecureInputMonitoring() {
-        secureInputMonitorTask?.cancel()
-        secureInputMonitorTask = nil
-        secureInputObservation = nil
-    }
-
-    private func recordSecureInputTransitionIfNeeded(targetPid: pid_t, phase: String) {
-        guard let previous = secureInputObservation else { return }
-        let currentOwner = secureInputOwnerProvider()
-        guard currentOwner != previous.owner else { return }
-        secureInputObservation = SecureInputObservation(owner: currentOwner)
-
-        if let currentOwner {
-            recordSecureInputDetected(owner: currentOwner, targetPid: targetPid, phase: phase)
-        } else {
-            HotkeyDiagnostics.record(
-                "key_interceptor_secure_input_cleared",
-                metadata: [
-                    "targetPid": String(targetPid),
-                    "phase": phase
-                ]
-            )
-        }
-    }
-
-    /// Records which process holds Secure Event Input. While the target app
-    /// itself holds it, the tap is expected not to see Enter or Escape. A
-    /// different holder is recorded as context only: capture was observed to
-    /// keep working in other apps while a background app held secure input.
-    private func recordSecureInputDetected(owner: pid_t, targetPid: pid_t, phase: String) {
-        let targetBundle = state.withLockUnchecked { $0.targetBundleIdentifier }
-        let ownerBundle = bundleIdentifierLookup(owner)
-        let ownerIsTargetApp = targetPid != 0 && (
-            owner == targetPid
-                || TextInserter.bundleIdentifiersLikelySameApp(target: targetBundle, candidate: ownerBundle)
-        )
-        HotkeyDiagnostics.record(
-            "key_interceptor_secure_input_detected",
-            level: ownerIsTargetApp ? .warning : .info,
-            metadata: [
-                "targetPid": String(targetPid),
-                "ownerPid": String(owner),
-                "ownerBundleIdentifier": ownerBundle ?? "unknown",
-                "ownerIsTargetApp": String(ownerIsTargetApp),
-                "phase": phase
-            ]
-        )
     }
 
     private func handleEventTapUnavailable(reason: String) {
@@ -370,6 +358,7 @@ final class KeyInterceptor: KeyIntercepting {
     // MARK: - Event Handler
 
     private nonisolated func handleKeyEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
+        countTapKeyDown(event)
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         guard Self.isInterceptedKey(keyCode) else { return Unmanaged.passRetained(event) }
         guard !isModifiedKey(event, keyCode: keyCode) else { return Unmanaged.passRetained(event) }
@@ -454,6 +443,17 @@ final class KeyInterceptor: KeyIntercepting {
         return true
     }
 
+    /// Hardware input carries the HID system source state; SpeakFlow's own
+    /// typing uses a session source and must not count as a seen hardware key.
+    private nonisolated func countTapKeyDown(_ event: CGEvent) {
+        let isHardware = event.getIntegerValueField(.eventSourceStateID)
+            == Int64(CGEventSourceStateID.hidSystemState.rawValue)
+        state.withLockUnchecked { s in
+            guard s.systemKeyDownsAtStart != nil else { return }
+            if isHardware { s.tapKeyDowns &+= 1 } else { s.tapSyntheticKeyDowns &+= 1 }
+        }
+    }
+
     private nonisolated func scheduleDelivery() {
         Task { @MainActor [weak self] in self?.deliverPendingKeys() }
     }
@@ -500,6 +500,114 @@ final class KeyInterceptor: KeyIntercepting {
         }
     }
 
+    private nonisolated static func isInterceptedKey(_ keyCode: Int64) -> Bool {
+        keyCode == 53 || keyCode == 36 || keyCode == 76
+    }
+
+    private nonisolated static func keyMetadata(keyCode: Int64, targetPid: pid_t) -> [String: String] {
+        [
+            "keyCode": String(keyCode),
+            "keyName": keyName(for: keyCode),
+            "targetPid": String(targetPid)
+        ]
+    }
+
+    private nonisolated static func keyName(for keyCode: Int64) -> String {
+        switch keyCode {
+        case 53:
+            return "escape"
+        case 36, 76:
+            return "enter"
+        default:
+            return "unknown"
+        }
+    }
+
+    private nonisolated static func eventTypeName(_ type: CGEventType) -> String {
+        switch type {
+        case .tapDisabledByTimeout:
+            return "tapDisabledByTimeout"
+        case .tapDisabledByUserInput:
+            return "tapDisabledByUserInput"
+        default:
+            return String(type.rawValue)
+        }
+    }
+}
+
+// MARK: - Secure Input Diagnostics
+
+extension KeyInterceptor {
+    private func startSecureInputMonitoring(targetPid: pid_t, initialOwner: pid_t?) {
+        stopSecureInputMonitoring()
+        secureInputObservation = SecureInputObservation(owner: initialOwner)
+        secureInputMonitorTask = Task { @MainActor [weak self] in
+            guard let interval = self?.secureInputPollingInterval else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, let self else { return }
+                self.recordSecureInputTransitionIfNeeded(targetPid: targetPid, phase: "monitor")
+            }
+        }
+    }
+
+    private func stopSecureInputMonitoring() {
+        secureInputMonitorTask?.cancel()
+        secureInputMonitorTask = nil
+        secureInputObservation = nil
+    }
+
+    private func recordSecureInputTransitionIfNeeded(targetPid: pid_t, phase: String) {
+        guard let previous = secureInputObservation else { return }
+        let currentOwner = secureInputOwnerProvider()
+        guard currentOwner != previous.owner else { return }
+        secureInputObservation = SecureInputObservation(owner: currentOwner)
+
+        if let currentOwner {
+            recordSecureInputDetected(owner: currentOwner, targetPid: targetPid, phase: phase)
+        } else {
+            HotkeyDiagnostics.record(
+                "key_interceptor_secure_input_cleared",
+                metadata: [
+                    "targetPid": String(targetPid),
+                    "phase": phase
+                ]
+            )
+        }
+    }
+
+    /// Records which process holds Secure Event Input. While the target app
+    /// itself holds it, the tap is expected not to see Enter or Escape. A
+    /// different holder is recorded as context only: capture was observed to
+    /// keep working in other apps while a background app held secure input.
+    private func recordSecureInputDetected(owner: pid_t, targetPid: pid_t, phase: String) {
+        let targetBundle = state.withLockUnchecked { $0.targetBundleIdentifier }
+        let ownerBundle = bundleIdentifierLookup(owner)
+        let ownerIsTargetApp = targetPid != 0 && (
+            owner == targetPid
+                || TextInserter.bundleIdentifiersLikelySameApp(target: targetBundle, candidate: ownerBundle)
+        )
+        HotkeyDiagnostics.record(
+            "key_interceptor_secure_input_detected",
+            level: ownerIsTargetApp ? .warning : .info,
+            metadata: [
+                "targetPid": String(targetPid),
+                "ownerPid": String(owner),
+                "ownerBundleIdentifier": ownerBundle ?? "unknown",
+                "ownerIsTargetApp": String(ownerIsTargetApp),
+                "phase": phase
+            ]
+        )
+    }
+}
+
+// MARK: - Keyboard Focus
+
+extension KeyInterceptor {
     /// Longest a focus query may block the tap thread. The default Accessibility
     /// messaging timeout is several seconds, longer than the WindowServer waits
     /// for an active tap before disabling it.
@@ -579,42 +687,51 @@ final class KeyInterceptor: KeyIntercepting {
         return pid
     }
 
+    /// Key-down events the HID system has produced since boot. Counts keys the
+    /// tap never receives, so the two can be compared.
+    nonisolated static func currentSystemKeyDownCount() -> UInt32 {
+        CGEventSource.counterForEventType(.hidSystemState, eventType: .keyDown)
+    }
+
     private nonisolated static let commandModifiers: CGEventFlags = [
         .maskShift, .maskAlternate, .maskCommand, .maskControl
     ]
+}
 
-    private nonisolated static func isInterceptedKey(_ keyCode: Int64) -> Bool {
-        keyCode == 53 || keyCode == 36 || keyCode == 76
-    }
+// MARK: - Missed-Key Diagnostics
 
-    private nonisolated static func keyMetadata(keyCode: Int64, targetPid: pid_t) -> [String: String] {
-        [
-            "keyCode": String(keyCode),
-            "keyName": keyName(for: keyCode),
-            "targetPid": String(targetPid)
-        ]
-    }
-
-    private nonisolated static func keyName(for keyCode: Int64) -> String {
-        switch keyCode {
-        case 53:
-            return "escape"
-        case 36, 76:
-            return "enter"
-        default:
-            return "unknown"
-        }
-    }
-
-    private nonisolated static func eventTypeName(_ type: CGEventType) -> String {
-        switch type {
-        case .tapDisabledByTimeout:
-            return "tapDisabledByTimeout"
-        case .tapDisabledByUserInput:
-            return "tapDisabledByUserInput"
-        default:
-            return String(type.rawValue)
-        }
+extension KeyInterceptor {
+    /// Keys that never reach the tap (secure input held by the target app, a
+    /// tap disabled by the system) cannot be logged by the tap itself. Compare
+    /// what the tap saw with the system-wide count so they leave a trace.
+    private func recordKeyDownCounts(_ counts: KeyDownCounts, targetPid: pid_t, phase: String) {
+        HotkeyDiagnostics.record(
+            "key_interceptor_session_summary",
+            metadata: [
+                "targetPid": String(targetPid),
+                "phase": phase,
+                "systemKeyDowns": String(counts.system),
+                "tapKeyDowns": String(counts.tap),
+                "tapSyntheticKeyDowns": String(counts.tapSynthetic)
+            ]
+        )
+        // One key pressed exactly at registration or teardown can land on one
+        // side only, because the two counts are sampled a moment apart.
+        guard counts.system > counts.tap, counts.system - counts.tap > 1 else { return }
+        let owner = secureInputOwnerProvider()
+        HotkeyDiagnostics.record(
+            "key_interceptor_keys_missed_by_tap",
+            level: .warning,
+            metadata: [
+                "targetPid": String(targetPid),
+                "phase": phase,
+                "missedKeyDowns": String(counts.system - counts.tap),
+                "systemKeyDowns": String(counts.system),
+                "tapKeyDowns": String(counts.tap),
+                "secureInputOwnerPid": owner.map(String.init) ?? "none",
+                "secureInputOwnerBundleIdentifier": owner.flatMap(bundleIdentifierLookup) ?? "none"
+            ]
+        )
     }
 }
 
@@ -638,8 +755,12 @@ extension KeyInterceptor {
     }
 
     // swiftlint:disable:next identifier_name
-    nonisolated func _testHandleKeyEventForTests(keyCode: CGKeyCode, flags: CGEventFlags = []) -> Bool {
-        let source = CGEventSource(stateID: .hidSystemState)
+    nonisolated func _testHandleKeyEventForTests(
+        keyCode: CGKeyCode,
+        flags: CGEventFlags = [],
+        sourceState: CGEventSourceStateID = .hidSystemState
+    ) -> Bool {
+        let source = CGEventSource(stateID: sourceState)
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) else {
             return false
         }
