@@ -241,6 +241,42 @@ struct ReconnectionTests {
                 "onSessionClosed should NOT fire on successful reconnect")
     }
 
+    // MARK: Test: visible interim across reconnect
+
+    /// The interim shown before a drop came from audio the old session already
+    /// received; the new session will not transcribe it again. It must be
+    /// committed (spaced and counted), not left as an untracked fragment that
+    /// the next session's text runs into.
+    @MainActor @Test("Reconnect commits the visible interim before resetting its tracking")
+    func reconnectCommitsVisibleInterim() async throws {
+        let provider = MultiSessionMockProvider()
+        provider.sessions = [MockStreamingSession(), MockStreamingSession()]
+        let c = LiveStreamingController()
+        c.reconnectEnabled = true
+        c.keepAliveEnabled = false
+        var updates: [(text: String, replacing: Int, isFinal: Bool, full: String)] = []
+        c.onTextUpdate = { updates.append(($0, $1, $2, $3)) }
+        c.isActive = true
+        c.reconnectProvider = provider
+        c.reconnectConfig = .default
+        c.hasAttemptedReconnect = false
+
+        c.handleEvent(.interim(TranscriptionResult(transcript: "hello wor", isFinal: false)))
+        c.handleEvent(.closed)
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
+            provider.startSessionCallCount == 1 && c.isActive
+        }
+        c.handleEvent(.interim(TranscriptionResult(transcript: "next", isFinal: false)))
+
+        let commitIndex = updates.firstIndex { $0.isFinal && $0.full == "hello wor" && $0.replacing == 0 }
+        let nextIndex = updates.firstIndex { $0.full == "next" }
+        #expect(commitIndex != nil, "The visible interim must be committed as final text, got \(updates)")
+        if let commitIndex, let nextIndex {
+            #expect(commitIndex < nextIndex, "The commit must happen before the new session's text")
+            #expect(updates[nextIndex].replacing == 0, "New text must not delete the committed fragment")
+        }
+    }
+
     // MARK: Test: failed reconnection
 
     @MainActor @Test("Failed reconnect: onSessionClosed fires after reconnect attempt")

@@ -1145,6 +1145,13 @@ public final class LiveStreamingController {
     /// if `cancel()` is called from another Task during the transition.
     ///
     /// Also starts the keepAlive timer.
+    private func commitVisibleInterimForReconnect() {
+        guard lastInterimCharCount > 0, !lastInterimText.isEmpty else { return }
+        let committed = lastInterimText
+        observabilityEvent("reconnect_interim_committed", metadata: ["characters": String(committed.count)])
+        onTextUpdate?("", 0, true, committed)
+    }
+
     private func activateSession(_ streamSession: StreamingSession) {
         suppressSessionClosedCallback = false
         isActive = true
@@ -1253,6 +1260,11 @@ public final class LiveStreamingController {
             eventTask?.cancel()
             eventTask = newEventTask
 
+            // The interim on screen came from audio the old session already
+            // received; the new session will not transcribe it again. Commit it
+            // as final text (spaced and counted) before tracking resets, so the
+            // new session's text neither runs into it nor deletes it.
+            commitVisibleInterimForReconnect()
             // Reactivate — audio tap is still installed and running
             activateSession(newSession)
             logger.info("Reconnection complete: \(provider.displayName)")
