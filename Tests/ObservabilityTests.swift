@@ -300,17 +300,26 @@ struct ObservabilityTests {
 struct ObservabilitySettingsPropagationTests {
     @MainActor @Test
     func changingTheDiagnosticsSettingAppliesItToTheStoreRightAway() async {
+        // A private store: the shared one is reconfigured by other suites.
+        let store = ObservabilityStore(
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("obs-optout-\(UUID().uuidString)")
+        )
+        let configurator = ObservabilityConfigurator(store: store)
         let settings = Settings.shared
-        let original = settings.observabilityEnabled
-        defer { settings.observabilityEnabled = original }
+        let original = (settings.observabilityEnabled, settings.observabilityConfigurator)
+        settings.observabilityConfigurator = configurator
+        defer {
+            settings.observabilityEnabled = original.0
+            settings.observabilityConfigurator = original.1
+        }
 
         settings.observabilityEnabled = true
-        await ObservabilityConfigurator.shared.waitUntilApplied()
-        #expect(await ObservabilityStore.shared.isEnabled())
+        await configurator.waitUntilApplied()
+        #expect(await store.isEnabled())
 
         settings.observabilityEnabled = false
-        await ObservabilityConfigurator.shared.waitUntilApplied()
-        #expect(await !ObservabilityStore.shared.isEnabled(),
+        await configurator.waitUntilApplied()
+        #expect(await !store.isEnabled(),
                 "Opting out must stop diagnostic writes before any other trigger reapplies configuration")
     }
 
