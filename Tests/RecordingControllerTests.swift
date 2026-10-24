@@ -549,3 +549,41 @@ struct RecordingControllerSessionIdentityTests {
         #expect(textIndex < enterIndex, "The final chunk's text must be typed before Enter")
     }
 }
+
+/// Streaming finals must produce STT latency samples like batch chunks do,
+/// in the period/provider/language statistics and the session metrics.
+@Suite("RecordingController — Streaming Latency", .serialized)
+struct RecordingControllerStreamingLatencyTests {
+    @MainActor
+    private func deepgramLatencySamplesToday() -> Int {
+        Statistics.shared.usage(for: .day).values
+            .compactMap { $0.providers[ProviderId.deepgram]?.latency.samples }
+            .reduce(0, +)
+    }
+
+    @MainActor @Test
+    func streamingFinalLatencyIsRecorded() async throws {
+        let providerSettings = SpyProviderSettings()
+        let registry = SpyProviderRegistry()
+        let provider = MockStreamingProvider()
+        provider.mockSession = MockStreamingSession()
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        registry.register(provider)
+        let (controller, _, _, _) = makeTestRecordingController(providerSettings: providerSettings, providerRegistry: registry)
+        let before = deepgramLatencySamplesToday()
+
+        controller.startRecording()
+        let stream = try #require(controller.liveStreamingController)
+        let sessionId = try #require(stream.sessionId)
+        stream.onFinalLatency?(0.42)
+
+        #expect(deepgramLatencySamplesToday() == before + 1, "Streaming latency must reach the period statistics")
+        try await waitUntilAsync {
+            await SessionMetricsStore.shared.activeSession(id: sessionId)?.sttLatenciesMs.contains(420) == true
+        }
+        #expect(await SessionMetricsStore.shared.activeSession(id: sessionId)?.sttLatenciesMs.contains(420) == true,
+                "Streaming latency must reach the session metrics")
+        controller.cancelRecording()
+    }
+}

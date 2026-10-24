@@ -735,6 +735,20 @@ final class RecordingController {
         }
     }
 
+    /// Streaming counterpart of the batch chunk latency: time from the end of
+    /// a final's audio to its arrival.
+    private func recordStreamingLatency(seconds: Double, providerId: String) {
+        Statistics.shared.recordSTTLatency(
+            seconds: seconds,
+            providerId: providerId,
+            language: languageForStats(providerId: providerId)
+        )
+        guard let sessionId = currentMetricsSessionId else { return }
+        enqueueMetricsOperation {
+            await SessionMetricsStore.shared.recordSTTLatency(sessionId: sessionId, milliseconds: seconds * 1000)
+        }
+    }
+
     private func endMetricsSession(reason: String) {
         guard let sessionId = currentMetricsSessionId else { return }
         currentMetricsSessionId = nil
@@ -950,6 +964,10 @@ extension RecordingController {
         controller.keepAliveInterval = settings.streamingKeepAliveInterval
         controller.reconnectEnabled = settings.streamingReconnectEnabled
         controller.minimumFinalWordCount = settings.streamingMinimumFinalWordCount
+        controller.onFinalLatency = { [weak self] seconds in
+            guard let self, self.owns(generation) else { return }
+            self.recordStreamingLatency(seconds: seconds, providerId: provider.id)
+        }
         controller.onAutoEnd = { [weak self] in
             self?.observabilityEvent("streaming_auto_end_triggered")
             Task { @MainActor in
