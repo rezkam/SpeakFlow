@@ -1037,21 +1037,7 @@ public final class StreamingRecorder {
         
         // Start timers (same as real recording, including `.common`-mode
         // registration so they keep firing during menu tracking/window drag).
-        let processing = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.scheduleProcessingPass()
-            }
-        }
-        RunLoop.main.add(processing, forMode: .common)
-        processingTimer = processing
-
-        let check = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.periodicCheck()
-            }
-        }
-        RunLoop.main.add(check, forMode: .common)
-        checkTimer = check
+        startTimers()
         
         // Feed samples in a background task
         Task {
