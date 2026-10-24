@@ -62,9 +62,14 @@ final class SpyTextInserter: TextInserting {
         operations.append(.deleteChars(count))
     }
 
+    /// When set, becomes the pending task as soon as Enter is queued, so tests
+    /// can hold a finalizer inside its synthetic-Enter wait.
+    var pendingTaskAfterEnter: Task<Void, Never>?
+
     func pressEnterKey() {
         enterKeyPressed = true
         operations.append(.pressEnterKey)
+        if let pendingTaskAfterEnter { pendingTask = pendingTaskAfterEnter }
     }
 
     func cancelAndReset() {

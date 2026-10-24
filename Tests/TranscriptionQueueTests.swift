@@ -27,7 +27,8 @@ struct TranscriptionQueueTests {
         // Collect from stream with timeout
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count == 3 { break }
             }
@@ -84,7 +85,8 @@ struct TranscriptionQueueTests {
 
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count == 1 { break }
             }
@@ -207,7 +209,8 @@ struct Issue17TextStreamOverwriteRegressionTests {
         // Only iterate stream1 — if continuation was overwritten, this would hang
         let task = Task {
             var items: [String] = []
-            for await text in stream1 {
+            for await item in stream1 {
+                let text = item.text
                 items.append(text)
                 if items.count >= 1 { break }
             }
@@ -512,7 +515,8 @@ struct TranscriptionQueueResetTests {
         // Collect from stream — only "FRESH" should appear
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count >= 1 { break }
             }
@@ -656,7 +660,8 @@ struct TranscriptionQueueFlushReadyOrderingEdgeCasesTests {
 
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count >= 1 { break }
             }
@@ -683,7 +688,8 @@ struct TranscriptionQueueFlushReadyOrderingEdgeCasesTests {
 
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count >= 3 { break }
             }
@@ -710,7 +716,8 @@ struct TranscriptionQueueFlushReadyOrderingEdgeCasesTests {
 
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count >= 2 { break }
             }
@@ -735,7 +742,8 @@ struct TranscriptionQueueFlushReadyOrderingEdgeCasesTests {
 
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count >= 1 { break }
             }
@@ -758,7 +766,8 @@ struct TranscriptionQueueFlushReadyOrderingEdgeCasesTests {
 
         let collectTask = Task {
             var items: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 items.append(text)
                 if items.count >= 1 { break }
             }
@@ -815,7 +824,8 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         // produces a clean timeout failure rather than an infinite hang.
         let collectTask = Task {
             var results: [String] = []
-            for await text in stream {
+            for await item in stream {
+                let text = item.text
                 results.append(text)
                 if results.count == 2 { break }
             }
@@ -853,7 +863,8 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         let received = await withTaskGroup(of: [String]?.self) { group in
             group.addTask {
                 var items: [String] = []
-                for await text in stream {
+                for await item in stream {
+                    let text = item.text
                     items.append(text)
                     if items.count >= 1 { break }
                 }
@@ -926,7 +937,8 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         let received = await withTaskGroup(of: [String]?.self) { group in
             group.addTask {
                 var items: [String] = []
-                for await text in stream {
+                for await item in stream {
+                    let text = item.text
                     items.append(text)
                     if items.count >= 20 { break }
                 }

@@ -9,6 +9,13 @@ public struct TranscriptionTicket: Sendable, Equatable {
     public let seq: UInt64
 }
 
+/// Text yielded by `TranscriptionQueue`, tagged with the session that produced
+/// it so a consumer can drop text buffered before a reset.
+struct SessionText: Sendable {
+    let session: UInt64
+    let text: String
+}
+
 /// Actor-based queue that ensures transcription results are output in order
 ///
 /// This actor handles the sequencing of transcription chunks, ensuring they are
@@ -26,7 +33,7 @@ public actor TranscriptionQueue {
     let rateLimiter = RateLimiter()
 
     // Continuations for async streaming
-    private var textContinuation: AsyncStream<String>.Continuation?
+    private var textContinuation: AsyncStream<SessionText>.Continuation?
     private struct CompletionWaiter {
         let id: UUID
         let continuation: CheckedContinuation<Void, Never>
@@ -36,13 +43,13 @@ public actor TranscriptionQueue {
     /// Lazily-initialized text stream. Only one consumer is supported.
     /// Accessing this property multiple times returns the same stream;
     /// the continuation is bound once on first access.
-    private var _textStream: AsyncStream<String>?
+    private var _textStream: AsyncStream<SessionText>?
 
-    var textStream: AsyncStream<String> {
+    var textStream: AsyncStream<SessionText> {
         if let existing = _textStream {
             return existing
         }
-        let stream = AsyncStream<String> { continuation in
+        let stream = AsyncStream<SessionText> { continuation in
             self.textContinuation = continuation
         }
         _textStream = stream
@@ -88,6 +95,12 @@ public actor TranscriptionQueue {
             && consumedCount >= yieldedCount
     }
 
+    /// True when no ticket is outstanding and the consumer has taken every
+    /// text yielded this session.
+    func isIdle(consumedCount: UInt64) -> Bool {
+        pendingResults.isEmpty && currentSeq == nextSeqToOutput && consumedCount >= yieldedCount
+    }
+
     /// Submit a transcription result. Silently discards if the ticket's session
     /// doesn't match the current session (stale result from a previous session).
     public func submitResult(ticket: TranscriptionTicket, text: String) {
@@ -117,7 +130,7 @@ public actor TranscriptionQueue {
             pendingResults.removeValue(forKey: nextSeqToOutput)
             if !text.isEmpty {
                 Logger.transcription.info("Output: \(text, privacy: .private)")
-                textContinuation?.yield(text)
+                textContinuation?.yield(SessionText(session: sessionGeneration, text: text))
                 yieldedCount &+= 1
             }
             nextSeqToOutput &+= 1
@@ -221,9 +234,12 @@ public final class TranscriptionQueueBridge {
 
     func startListening() {
         streamTask = Task {
-            for await text in await queue.textStream {
+            for await item in await queue.textStream {
+                // Text buffered before a reset belongs to a finished session;
+                // delivering it would type it into the next recording.
+                guard item.session == (await queue.currentSessionGeneration()) else { continue }
                 self.consumedCount &+= 1
-                onTextReady?(text)
+                onTextReady?(item.text)
                 // Check completion AFTER delivering text, ensuring onAllComplete
                 // fires only when all text has been passed to the inserter.
                 await checkCompletion()
@@ -254,6 +270,12 @@ public final class TranscriptionQueueBridge {
 
     public func getPendingCount() async -> Int {
         await queue.getPendingCount()
+    }
+
+    /// True when every ticket of this session is transcribed and its text
+    /// has been delivered through `onTextReady`.
+    public func isIdle() async -> Bool {
+        await queue.isIdle(consumedCount: consumedCount)
     }
 
     public func submitResult(ticket: TranscriptionTicket, text: String) async {

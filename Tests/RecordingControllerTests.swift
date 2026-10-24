@@ -378,3 +378,174 @@ struct RecordingControllerTargetCaptureTests {
                 "The user must be told why dictation did not start")
     }
 }
+
+/// Each recording owns its callbacks and its finalization. Shared
+/// isRecording / isProcessingFinal flags cannot tell recordings apart, so late
+/// work from a retired recording used to act on the next one.
+@Suite("RecordingController — Session Identity", .serialized)
+struct RecordingControllerSessionIdentityTests {
+    @MainActor
+    private func makeStreaming() -> (RecordingController, SpyTextInserter, SpyBannerPresenter, SpySoundEffectPlayer) {
+        let providerSettings = SpyProviderSettings()
+        let registry = SpyProviderRegistry()
+        let provider = MockStreamingProvider()
+        provider.mockSession = MockStreamingSession()
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        registry.register(provider)
+        let settings = SpySettings()
+        settings.streamingTrailingFinalTimeout = 0
+        let sounds = SpySoundEffectPlayer()
+        let (controller, _, inserter, banner) = makeTestRecordingController(
+            providerSettings: providerSettings, providerRegistry: registry, settings: settings,
+            playSoundEffect: { sounds.play($0) }
+        )
+        return (controller, inserter, banner, sounds)
+    }
+
+    @MainActor
+    private struct BatchContext {
+        let controller: RecordingController
+        let inserter: SpyTextInserter
+        let transcription: SpyTranscription
+        let banner: SpyBannerPresenter
+        let sounds: SpySoundEffectPlayer
+    }
+
+    @MainActor
+    private func makeBatch() -> BatchContext {
+        let providerSettings = SpyProviderSettings()
+        providerSettings.activeProviderId = ProviderId.mistralBatch
+        let registry = SpyProviderRegistry()
+        let provider = MockBatchProvider()
+        provider.isConfigured = true
+        registry.register(provider)
+        let transcription = SpyTranscription()
+        let sounds = SpySoundEffectPlayer()
+        let (controller, _, inserter, banner) = makeTestRecordingController(
+            providerSettings: providerSettings, providerRegistry: registry, transcription: transcription,
+            playSoundEffect: { sounds.play($0) }
+        )
+        return BatchContext(
+            controller: controller, inserter: inserter, transcription: transcription, banner: banner, sounds: sounds
+        )
+    }
+
+    @MainActor @Test
+    func streamingTextFromARetiredRecordingIsNotTypedIntoTheNextOne() async throws {
+        let (controller, inserter, _, _) = makeStreaming()
+        controller.startRecording()
+        let first = try #require(controller.liveStreamingController)
+        controller.stopRecording(reason: .hotkey)
+        try await waitUntil { !controller.isProcessingFinal }
+
+        controller.startRecording()
+        #expect(controller.isRecording)
+        first.onTextUpdate?("late", 0, true, "late")
+        first.onTextUpdate?("", 5, false, "")
+
+        #expect(!inserter.operations.contains(.insertText("late ")),
+                "A retired recording's trailing final must not be typed into the new recording")
+        #expect(!inserter.operations.contains(.deleteChars(5)),
+                "A retired recording's interim deletion must not erase the new recording's text")
+    }
+
+    @MainActor @Test
+    func streamingTextFromACancelledRecordingIsNotTypedIntoTheNextOne() async throws {
+        let (controller, inserter, _, _) = makeStreaming()
+        controller.startRecording()
+        let first = try #require(controller.liveStreamingController)
+        controller.cancelRecording()
+        controller.startRecording()
+
+        first.onTextUpdate?("", 4, false, "")
+        first.onTextUpdate?("late", 0, true, "late")
+
+        #expect(!inserter.operations.contains(.deleteChars(4)))
+        #expect(!inserter.operations.contains(.insertText("late ")))
+    }
+
+    @MainActor @Test
+    func finalizationOwnsItsEnterAndCleanupAgainstANewRecording() async throws {
+        let (controller, inserter, _, _) = makeStreaming()
+        let enterGate = Task<Void, Never> { try? await Task.sleep(for: .milliseconds(400)) }
+        inserter.pendingTaskAfterEnter = enterGate
+
+        controller.startRecording()
+        controller.stopRecordingAndSubmit()
+        try await waitUntil { inserter.operations.contains(.pressEnterKey) }
+
+        // A new recording starts while the first one's Enter is still pending.
+        controller.startRecording()
+        let newCapture = try #require(inserter.operations.lastIndex(of: .captureTarget))
+        #expect(inserter.operations[..<newCapture].contains(.cancelAndReset),
+                "Starting over a pending submit must retire it, not let it submit into the new field")
+
+        await enterGate.value
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(!inserter.operations[newCapture...].contains(.reset),
+                "The old finalizer's cleanup must not reset the new recording's inserter")
+        #expect(controller.isRecording, "The new recording must keep running")
+        #expect(!controller.isProcessingFinal, "The old finalizer must not take over the new recording")
+    }
+
+    @MainActor @Test
+    func lateChunkFromARetiredBatchRecordingIsNotTranscribed() async throws {
+        let ctx = makeBatch()
+        let (controller, transcription) = (ctx.controller, ctx.transcription)
+        controller.startRecording()
+        let first = try #require(controller.recorder)
+        controller.stopRecording(reason: .hotkey)
+        controller.startRecording()
+        #expect(controller.isRecording)
+
+        first.onChunkReady?(AudioChunk(wavData: Data([1, 2, 3]), durationSeconds: 1))
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(transcription.transcribeCalls.isEmpty,
+                "Audio from a retired recording must not get a ticket in the new recording's queue session")
+    }
+
+    @MainActor @Test
+    func stopDuringBatchStartupIsNotTreatedAsAStartFailure() async throws {
+        let ctx = makeBatch()
+        let (controller, inserter, banner, sounds) = (ctx.controller, ctx.inserter, ctx.banner, ctx.sounds)
+        controller.startRecording()
+        // Stopped before the recorder finished starting: start() returns false on purpose.
+        controller.stopRecordingAndSubmit()
+
+        try await waitUntil(timeout: .seconds(5)) { inserter.operations.contains(.reset) }
+
+        #expect(sounds.count(.error) == 0, "An intentional stop is not a startup failure")
+        #expect(!banner.bannerMessages.contains { $0.0.contains("could not start") })
+        #expect(inserter.operations.contains(.pressEnterKey),
+                "The Enter captured for this recording must still be delivered")
+    }
+
+    @MainActor @Test
+    func batchCompletionWaitsForOutstandingTickets() async throws {
+        let ctx = makeBatch()
+        let (controller, inserter, transcription) = (ctx.controller, ctx.inserter, ctx.transcription)
+        transcription.queueBridge.startListening()
+        defer { transcription.queueBridge.stopListening() }
+        controller.startRecording()
+        try await Task.sleep(for: .milliseconds(100))
+        controller.recorder?.onChunkReady?(AudioChunk(wavData: Data([1]), durationSeconds: 1))
+        try await waitUntil { transcription.transcribeCalls.count == 1 }
+        controller.stopRecordingAndSubmit()
+
+        // The queue-empty fast path fires while the final chunk is still out.
+        await controller.completeBatchFinalization()
+        #expect(controller.isProcessingFinal, "Finalization must wait for the outstanding chunk")
+        #expect(!inserter.operations.contains(.pressEnterKey), "Enter must not be sent before the final text")
+
+        let ticket = try #require(transcription.transcribeCalls.first?.0)
+        await transcription.queueBridge.submitResult(ticket: ticket, text: "tail")
+        try await waitUntil(timeout: .seconds(5)) { inserter.operations.contains(.pressEnterKey) }
+
+        let textIndex = try #require(inserter.operations.firstIndex(of: .insertText("tail ")))
+        let enterIndex = try #require(inserter.operations.firstIndex(of: .pressEnterKey))
+        #expect(textIndex < enterIndex, "The final chunk's text must be typed before Enter")
+    }
+}
