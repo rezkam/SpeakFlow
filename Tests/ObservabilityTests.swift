@@ -293,3 +293,40 @@ struct ObservabilityTests {
         }
     }
 }
+
+/// Turning diagnostics off must stop writing immediately, not at the next
+/// recording or app launch.
+@Suite("Observability — Settings Apply Immediately", .serialized)
+struct ObservabilitySettingsPropagationTests {
+    @MainActor @Test
+    func changingTheDiagnosticsSettingAppliesItToTheStoreRightAway() async {
+        let settings = Settings.shared
+        let original = settings.observabilityEnabled
+        defer { settings.observabilityEnabled = original }
+
+        settings.observabilityEnabled = true
+        await ObservabilityConfigurator.shared.waitUntilApplied()
+        #expect(await ObservabilityStore.shared.isEnabled())
+
+        settings.observabilityEnabled = false
+        await ObservabilityConfigurator.shared.waitUntilApplied()
+        #expect(await !ObservabilityStore.shared.isEnabled(),
+                "Opting out must stop diagnostic writes before any other trigger reapplies configuration")
+    }
+
+    @MainActor @Test
+    func rapidChangesApplyInTheOrderTheyWereMade() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("obs-order-\(UUID().uuidString)")
+        let store = ObservabilityStore(baseDirectory: base)
+        let configurator = ObservabilityConfigurator(store: store)
+        let settings = SpySettings()
+
+        for enabled in [true, false, true, false, true, false] {
+            settings.observabilityEnabled = enabled
+            configurator.apply(from: settings)
+        }
+        await configurator.waitUntilApplied()
+
+        #expect(await !store.isEnabled(), "The last change must win")
+    }
+}

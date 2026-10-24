@@ -257,14 +257,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkey = HotkeySettings.shared.currentHotkey.rawValue
         let captureSettings = settings.observabilityCaptureSettingsSnapshot
 
+        let configurator = ObservabilityConfigurator.shared
+        configurator.apply(from: settings)
         Task {
-            await ObservabilityStore.shared.applyConfiguration(
-                enabled: settings.observabilityEnabled,
-                verbosity: settings.observabilityVerbosity,
-                captureSettingsSnapshot: captureSettings,
-                captureSystemContext: settings.observabilityCaptureSystemContext,
-                captureTextPayloads: settings.observabilityCaptureTextPayloads
-            )
+            await configurator.waitUntilApplied()
 
             await ObservabilityStore.shared.record(
                 component: "App",

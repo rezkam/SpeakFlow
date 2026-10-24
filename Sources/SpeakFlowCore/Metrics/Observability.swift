@@ -209,6 +209,11 @@ public actor ObservabilityStore {
         )
     }
 
+    /// Whether events are currently written.
+    public func isEnabled() -> Bool {
+        config.enabled
+    }
+
     public func captureTextPayloadsEnabled() -> Bool {
         config.enabled && config.captureTextPayloads
     }
