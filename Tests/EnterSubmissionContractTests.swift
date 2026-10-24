@@ -339,7 +339,12 @@ struct EnterSubmissionContractTests {
         }
         #expect(textInserter.operations.contains(.pressEnterKey),
                 "Startup submit must not wait for a trailing-final window without a session")
-        try await Task.sleep(for: .milliseconds(700))
+        // The mock handshake completes after 0.5 s and its session is closed
+        // asynchronously; wait for that instead of a fixed sleep, which raced
+        // under full-suite load.
+        try await waitUntilAsync(timeout: .seconds(3), interval: .milliseconds(20)) {
+            await session.closeCalled
+        }
 
         #expect(!startingController.recording,
                 "A provider handshake completing after Enter must not reactivate streaming")
