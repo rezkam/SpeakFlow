@@ -587,3 +587,35 @@ struct RecordingControllerStreamingLatencyTests {
         controller.cancelRecording()
     }
 }
+
+/// Key interception follows the recording directly: it starts for the
+/// captured target app, a finished recording stops it (delivering a swallowed
+/// key), and only a cancelled one cancels it.
+@Suite("RecordingController — Key Interception Lifecycle")
+struct RecordingControllerKeyInterceptionLifecycleTests {
+    @MainActor @Test
+    func interceptionStartsForTheTargetAndStopsWithTheRecording() async throws {
+        let providerSettings = SpyProviderSettings()
+        let registry = SpyProviderRegistry()
+        let provider = MockStreamingProvider()
+        provider.mockSession = MockStreamingSession()
+        providerSettings.activeProviderId = ProviderId.deepgram
+        providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
+        registry.register(provider)
+        let settings = SpySettings()
+        settings.streamingTrailingFinalTimeout = 0
+        let (controller, keyInterceptor, inserter, _) = makeTestRecordingController(
+            providerSettings: providerSettings, providerRegistry: registry, settings: settings
+        )
+        inserter.targetPid = 4242
+
+        controller.startRecording()
+        #expect(keyInterceptor.startCallCount == 1)
+        #expect(keyInterceptor.lastTargetPid == 4242)
+
+        controller.stopRecording(reason: .hotkey)
+        try await waitUntil { !controller.isProcessingFinal }
+        #expect(keyInterceptor.stopCallCount == 1, "A finished recording stops interception")
+        #expect(keyInterceptor.cancelCallCount == 0, "Only cancellation discards swallowed keys")
+    }
+}

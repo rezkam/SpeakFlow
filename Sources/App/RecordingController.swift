@@ -33,7 +33,6 @@ final class RecordingController {
     private var batchFinalizationReason: String = StopReason.unknown.rawValue
     private var latestStreamingError: Error?
     private var presentedRecordingErrorMessage: String?
-    private let lifecycleCoordinator = RecordingLifecycleCoordinator()
     /// Identity of the current recording. Advanced when a recording starts and
     /// when one is cancelled. Callbacks and finalizers capture it and act only
     /// while it is still current, so late work from a retired recording can
@@ -111,7 +110,6 @@ final class RecordingController {
                 self.shouldPressEnterOnComplete = true
             }
         }
-        configureRecordingComponents()
     }
 
     /// Whether work from recording `generation` may still act: it is current
@@ -280,22 +278,8 @@ final class RecordingController {
         hasCapturedSubmitEnter = false
         fullTranscript = ""
 
-        configureRecordingComponents()
-        do {
-            try lifecycleCoordinator.prepareAndStart()
-        } catch {
-            isRecording = false
-            isProcessingFinal = false
-            observabilityEvent(
-                "recording_start_failed_component",
-                level: .error,
-                metadata: ["error": error.localizedDescription]
-            )
-            endMetricsSession(reason: "START_FAILED_COMPONENT")
-            playSoundEffect(.error)
-            presentRecordingError(message: "Failed to initialize recording components")
-            return
-        }
+        // Enter and Escape are captured only while this recording's app has focus.
+        keyInterceptor.start(targetPid: textInserter.targetPid)
         if let streaming = provider as? any StreamingTranscriptionProvider {
             startStreamingRecording(provider: streaming)
         } else if let batch = provider as? any BatchTranscriptionProvider {
@@ -419,7 +403,7 @@ final class RecordingController {
             }
             if !started {
                 isRecording = false; isProcessingFinal = false; recorder = nil
-                self.lifecycleCoordinator.cancel()
+                self.keyInterceptor.cancel()
                 self.playSoundEffect(.error)
                 self.observabilityEvent("batch_recording_start_failed", level: .error)
                 self.presentRecordingError(
@@ -498,7 +482,7 @@ final class RecordingController {
                 self.endMetricsSession(reason: reason.rawValue)
                 // Stopping interception delivers any Enter or Escape the tap already
                 // swallowed, so read the submit request only after it returns.
-                self.lifecycleCoordinator.stop()
+                self.keyInterceptor.stop()
                 // A delivered Escape cancels the recording; nothing is left to finish.
                 guard self.ownsFinalization(generation) else { return }
                 await self.finishFinalization(generation: generation, playCompletion: false)
@@ -533,7 +517,7 @@ final class RecordingController {
         // Retire this recording: its callbacks and finalizer must not act again.
         recordingGeneration &+= 1
         batchStoppingRecorder = nil
-        lifecycleCoordinator.cancel()
+        keyInterceptor.cancel()
         isRecording = false; isProcessingFinal = false
         shouldPressEnterOnComplete = false
         hasCapturedSubmitEnter = false
@@ -641,7 +625,7 @@ final class RecordingController {
 
         // Stopping interception delivers any Enter or Escape the tap already
         // swallowed. A delivered Escape cancels the recording.
-        lifecycleCoordinator.stop()
+        keyInterceptor.stop()
         guard ownsFinalization(generation) else { return }
         batchStoppingRecorder = nil
         transcription.setActiveBatchProvider(nil)
@@ -688,7 +672,7 @@ final class RecordingController {
         hotkeyListener?.stop(); hotkeyListener = nil
         recordingGeneration &+= 1
         batchStoppingRecorder = nil
-        lifecycleCoordinator.cancel()
+        keyInterceptor.cancel()
         if isRecording || isProcessingFinal {
             recorder?.cancel(); recorder = nil
             isRecording = false; isProcessingFinal = false
@@ -868,13 +852,6 @@ final class RecordingController {
         return metadata
     }
 
-    private func configureRecordingComponents() {
-        let keyComponent = KeyInterceptorRecordingComponent(
-            interceptor: keyInterceptor,
-            targetPidProvider: { [weak self] in self?.textInserter.targetPid ?? 0 }
-        )
-        lifecycleCoordinator.setComponents([keyComponent])
-    }
 }
 
 // MARK: - Streaming Recording
@@ -1060,7 +1037,7 @@ extension RecordingController {
                 self.latestStreamingError = nil
                 isRecording = false; isProcessingFinal = false
                 liveStreamingController = nil
-                self.lifecycleCoordinator.cancel()
+                self.keyInterceptor.cancel()
                 self.playSoundEffect(.error)
                 self.observabilityEvent("streaming_recording_start_failed", level: .error)
                 self.endMetricsSession(reason: "START_FAILED")
