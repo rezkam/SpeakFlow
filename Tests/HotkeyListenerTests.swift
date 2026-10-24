@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import Testing
@@ -188,5 +189,32 @@ final class FakeHotkeyEventTapDriver: @unchecked Sendable {
             },
             setTapEnabled: { _, _ in }
         )
+    }
+}
+
+/// Holding a combination hotkey must not toggle dictation again on key repeat.
+@Suite("HotkeyListener — Combination Key Repeat", .serialized)
+struct HotkeyListenerKeyRepeatTests {
+    private func comboEvent(isRepeat: Bool) -> NSEvent? {
+        NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.control, .option],
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: "d", charactersIgnoringModifiers: "d", isARepeat: isRepeat, keyCode: 2
+        )
+    }
+
+    @MainActor @Test
+    func autoRepeatedKeyDownDoesNotActivate() throws {
+        let listener = HotkeyListener()
+        var activations = 0
+        HotkeyDiagnostics._testEventHook = { if $0.name == "hotkey_activation_detected" { activations += 1 } }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        listener.handleKeyDown(event: try #require(comboEvent(isRepeat: false)), type: .controlOptionD)
+        for _ in 0..<5 {
+            listener.handleKeyDown(event: try #require(comboEvent(isRepeat: true)), type: .controlOptionD)
+        }
+
+        #expect(activations == 1, "Only the fresh press toggles dictation; repeats while held must not")
     }
 }

@@ -283,8 +283,10 @@ public final class HotkeyListener {
         }
     }
 
-    private func handleKeyDown(event: NSEvent, type: HotkeyType) {
-        guard matches(event: event, type: type) else { return }
+    func handleKeyDown(event: NSEvent, type: HotkeyType) {
+        // Holding the combination auto-repeats key-down; only a fresh press
+        // toggles, or a held hotkey would start, stop, and restart dictation.
+        guard !event.isARepeat, matches(event: event, type: type) else { return }
         HotkeyDiagnostics.record(
             "hotkey_activation_detected",
             metadata: registrationMetadata(for: type).merging([
