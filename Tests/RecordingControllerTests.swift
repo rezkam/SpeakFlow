@@ -154,7 +154,9 @@ struct RecordingControllerCleanupTests {
         let (controller, keyInterceptor, _, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.cancelRecording()
-        #expect(keyInterceptor.stopCallCount >= 1, "Cancel must stop key interceptor")
+        #expect(keyInterceptor.cancelCallCount >= 1, "Cancel must cancel key interception")
+        #expect(keyInterceptor.stopCallCount == 0,
+                "Cancel must not use stop(), which would deliver swallowed keys")
     }
 
     @MainActor @Test
@@ -179,7 +181,7 @@ struct RecordingControllerCleanupTests {
         let (controller, keyInterceptor, textInserter, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.shutdown()
-        #expect(keyInterceptor.stopCallCount >= 1, "Shutdown must stop key interceptor")
+        #expect(keyInterceptor.cancelCallCount >= 1, "Shutdown must cancel key interception")
         #expect(textInserter.cancelCalled, "Shutdown must cancel text inserter")
         #expect(!controller.isRecording, "isRecording must be false after shutdown")
         #expect(!controller.isProcessingFinal, "isProcessingFinal must be false after shutdown")

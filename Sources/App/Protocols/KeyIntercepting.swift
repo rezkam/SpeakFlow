@@ -12,5 +12,10 @@ protocol KeyIntercepting: AnyObject {
     var onEscapePressed: (() -> Void)? { get set }
     var onEnterPressed: (() -> Void)? { get set }
     func start(targetPid: pid_t)
+    /// Ends interception for a recording that finished normally. Any key the
+    /// tap already swallowed is delivered to its handler before this returns.
     func stop()
+    /// Ends interception for a cancelled or failed recording. Swallowed keys
+    /// that have not reached their handler yet are discarded.
+    func cancel()
 }

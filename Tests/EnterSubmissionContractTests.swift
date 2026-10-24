@@ -211,6 +211,75 @@ struct EnterSubmissionContractTests {
     }
 
     /// Regression guard:
+    /// The tap can swallow Enter just before streaming finalization stops
+    /// interception. `stop()` delivers it, so finalization must read the submit
+    /// request after stopping interception, not before.
+    @MainActor @Test
+    func streamingEnterDeliveredWhileStoppingInterceptionStillSubmits() async throws {
+        let ctx = makeStreamingContext()
+        ctx.controller.startRecording()
+        ctx.keyInterceptor.onStop = { [keyInterceptor = ctx.keyInterceptor] in
+            keyInterceptor.onEnterPressed?()
+        }
+
+        ctx.controller.stopRecording(reason: .hotkey)
+
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
+            ctx.textInserter.operations.contains(.reset)
+        }
+        let enterCount = ctx.textInserter.operations.count(where: { $0 == .pressEnterKey })
+        #expect(enterCount == 1, "A swallowed Enter delivered during stop must still submit exactly once")
+    }
+
+    /// Regression guard: an Escape the tap swallowed just before streaming
+    /// finalization stopped interception must cancel, not be lost.
+    @MainActor @Test
+    func streamingEscapeDeliveredWhileStoppingInterceptionCancels() async throws {
+        let ctx = makeStreamingContext()
+        ctx.controller.startRecording()
+        ctx.controller.stopRecordingAndSubmit()
+        ctx.keyInterceptor.onStop = { [keyInterceptor = ctx.keyInterceptor] in
+            keyInterceptor.onEscapePressed?()
+        }
+
+        try await waitUntil(timeout: .seconds(5), interval: .milliseconds(20)) {
+            !ctx.controller.isProcessingFinal
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(ctx.textInserter.cancelCalled, "Escape delivered during stop must cancel the recording")
+        #expect(!ctx.textInserter.operations.contains(.pressEnterKey),
+                "A cancelled recording must not synthesize the pending submit Enter")
+    }
+
+    /// Regression guard: same as above for batch finalization.
+    @MainActor @Test
+    func batchEscapeDeliveredWhileStoppingInterceptionCancels() async {
+        let keyInterceptor = SpyKeyInterceptor()
+        let textInserter = SpyTextInserter()
+        let controller = RecordingController(
+            keyInterceptor: keyInterceptor,
+            textInserter: textInserter,
+            appState: SpyBannerPresenter(),
+            providerSettings: SpyProviderSettings(),
+            providerRegistry: SpyProviderRegistry(),
+            settings: SpySettings(),
+            transcription: SpyTranscription()
+        )
+        controller.testMode = .live
+        controller.isProcessingFinal = true
+        controller.fullTranscript = "final text"
+        controller.shouldPressEnterOnComplete = true
+        keyInterceptor.onStop = { keyInterceptor.onEscapePressed?() }
+
+        await controller.completeBatchFinalization()
+
+        #expect(textInserter.cancelCalled, "Escape delivered during stop must cancel the recording")
+        #expect(!textInserter.operations.contains(.pressEnterKey),
+                "A cancelled recording must not synthesize the pending submit Enter")
+    }
+
+    /// Regression guard:
     /// Enter can arrive while the provider handshake is still in flight. The late
     /// handshake must not reactivate streaming or play a delayed start cue after stop.
     @MainActor @Test

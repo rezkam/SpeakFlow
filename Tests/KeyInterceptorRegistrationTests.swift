@@ -81,4 +81,68 @@ struct KeyInterceptorRegistrationTests {
         #expect(interceptor._testHandleKeyEventForTests(keyCode: 36), "The new recording's first Enter must be captured")
         #expect(focusedTargets.withLock { $0.last } == 42, "Focus checks must target the new recording's app")
     }
+
+    @MainActor @Test
+    func stopDeliversACapturedEnterBeforeReturning() {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        var enterCallbacks = 0
+        interceptor.onEnterPressed = { enterCallbacks += 1 }
+
+        interceptor.start(targetPid: 0)
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36), "Enter must be swallowed")
+
+        // Finalization stops interception before the handler hop has run.
+        interceptor.stop()
+
+        #expect(enterCallbacks == 1,
+                "A swallowed Enter must reach the recording before stop() returns, or it is lost")
+    }
+
+    @MainActor @Test
+    func stopDeliversACapturedEscapeBeforeReturning() {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        var escapeCallbacks = 0
+        interceptor.onEscapePressed = { escapeCallbacks += 1 }
+
+        interceptor.start(targetPid: 0)
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53), "Escape must be swallowed")
+        interceptor.stop()
+
+        #expect(escapeCallbacks == 1,
+                "A swallowed Escape must reach the recording before stop() returns, or it is lost")
+    }
+
+    @MainActor @Test
+    func capturedKeyIsDeliveredExactlyOnce() async throws {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        var enterCallbacks = 0
+        interceptor.onEnterPressed = { enterCallbacks += 1 }
+
+        interceptor.start(targetPid: 0)
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36))
+        try await waitUntil { enterCallbacks == 1 }
+        interceptor.stop()
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(enterCallbacks == 1, "The async hop and stop() must not both deliver the same Enter")
+    }
+
+    @MainActor @Test
+    func cancelDiscardsACapturedKeyInsteadOfDeliveringIt() async throws {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        var enterCallbacks = 0
+        interceptor.onEnterPressed = { enterCallbacks += 1 }
+
+        interceptor.start(targetPid: 0)
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36))
+        interceptor.cancel()
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(enterCallbacks == 0, "A cancelled recording must never turn a captured Enter into a submit")
+        #expect(fake.createdTaps.allSatisfy { !CFMachPortIsValid($0) }, "cancel() must tear the tap down too")
+    }
 }
