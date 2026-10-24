@@ -29,6 +29,9 @@ final class KeyInterceptor: KeyIntercepting {
         /// if keyboard focus is in this app (prevents swallowing Escape/Enter
         /// when the user is in Spotlight, password dialogs, etc.).
         var targetPid: pid_t = 0
+        /// Bundle identifier of the target app, so focus in its helper processes
+        /// or in a relaunched instance still counts as the target.
+        var targetBundleIdentifier: String?
         /// One-shot Enter capture token. Armed at recording start, consumed by the
         /// first intercepted Enter so subsequent Enters pass through normally.
         var enterCaptureArmed: Bool = false
@@ -76,7 +79,8 @@ final class KeyInterceptor: KeyIntercepting {
 
     private let state = OSAllocatedUnfairLock(initialState: EventTapState())
     private let eventTapDriver: EventTapDriver
-    private let keyboardFocusSnapshotProvider: @Sendable (pid_t) -> KeyboardFocusSnapshot
+    private let keyboardFocusSnapshotProvider: @Sendable (_ targetPid: pid_t, _ targetBundle: String?) -> KeyboardFocusSnapshot
+    private let bundleIdentifierLookup: @Sendable (pid_t) -> String?
     private let secureInputStatusProvider: () -> Bool
     private let secureInputPollingInterval: Duration
     private var secureInputMonitorTask: Task<Void, Never>?
@@ -84,12 +88,23 @@ final class KeyInterceptor: KeyIntercepting {
 
     init(
         eventTapDriver: EventTapDriver = .system,
-        keyboardFocusSnapshotProvider: @escaping @Sendable (pid_t) -> KeyboardFocusSnapshot = KeyInterceptor.keyboardFocusSnapshot,
+        focusQuery: @escaping @Sendable () -> FocusQueryResult = KeyInterceptor.queryKeyboardFocus,
+        bundleIdentifierLookup: @escaping @Sendable (pid_t) -> String? = {
+            NSRunningApplication(processIdentifier: $0)?.bundleIdentifier
+        },
         isSecureInputEnabled: @escaping () -> Bool = { IsSecureEventInputEnabled() },
         secureInputPollingInterval: Duration = .seconds(1)
     ) {
         self.eventTapDriver = eventTapDriver
-        self.keyboardFocusSnapshotProvider = keyboardFocusSnapshotProvider
+        self.bundleIdentifierLookup = bundleIdentifierLookup
+        keyboardFocusSnapshotProvider = { targetPid, targetBundle in
+            Self.focusSnapshot(
+                focusQuery(),
+                targetPid: targetPid,
+                targetBundle: targetBundle,
+                bundleIdentifierLookup: bundleIdentifierLookup
+            )
+        }
         secureInputStatusProvider = isSecureInputEnabled
         self.secureInputPollingInterval = secureInputPollingInterval
     }
@@ -99,7 +114,8 @@ final class KeyInterceptor: KeyIntercepting {
     @MainActor
     init(testKeyboardFocusSnapshotProvider: @escaping @Sendable (pid_t) -> KeyboardFocusSnapshot) {
         eventTapDriver = .system
-        keyboardFocusSnapshotProvider = testKeyboardFocusSnapshotProvider
+        keyboardFocusSnapshotProvider = { targetPid, _ in testKeyboardFocusSnapshotProvider(targetPid) }
+        bundleIdentifierLookup = { _ in nil }
         secureInputStatusProvider = { IsSecureEventInputEnabled() }
         secureInputPollingInterval = .seconds(1)
     }
@@ -108,12 +124,14 @@ final class KeyInterceptor: KeyIntercepting {
     // MARK: - Start / Stop
 
     func start(targetPid: pid_t) {
+        let targetBundle = targetPid == 0 ? nil : bundleIdentifierLookup(targetPid)
         // A tap still registered from an earlier recording is reused, but the
         // new recording must own it: its target app and a fresh Enter token.
         let previousTargetPid = state.withLockUnchecked { s -> pid_t? in
             guard s.recordingEventTap != nil else { return nil }
             let previous = s.targetPid
             s.targetPid = targetPid
+            s.targetBundleIdentifier = targetBundle
             s.enterCaptureArmed = true
             return previous
         }
@@ -130,6 +148,7 @@ final class KeyInterceptor: KeyIntercepting {
         }
         state.withLockUnchecked {
             $0.targetPid = targetPid
+            $0.targetBundleIdentifier = targetBundle
             $0.enterCaptureArmed = true
         }
         let secureInputEnabled = secureInputStatusProvider()
@@ -204,6 +223,7 @@ final class KeyInterceptor: KeyIntercepting {
             let result = (s.recordingEventTap, s.recordingTapThread, s.targetPid, s.pendingKeys)
             s.isActive = false
             s.targetPid = 0
+            s.targetBundleIdentifier = nil
             s.enterCaptureArmed = false
             s.pendingKeys = PendingKeys()
             s.recordingEventTap = nil
@@ -325,6 +345,7 @@ final class KeyInterceptor: KeyIntercepting {
         state.withLockUnchecked {
             $0.isActive = false
             $0.targetPid = 0
+            $0.targetBundleIdentifier = nil
             $0.enterCaptureArmed = false
             $0.pendingKeys = PendingKeys()
             $0.recordingEventTap = nil
@@ -338,7 +359,9 @@ final class KeyInterceptor: KeyIntercepting {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         guard Self.isInterceptedKey(keyCode) else { return Unmanaged.passRetained(event) }
 
-        let (isActive, targetPid) = state.withLockUnchecked { ($0.isActive, $0.targetPid) }
+        let (isActive, targetPid, targetBundle) = state.withLockUnchecked {
+            ($0.isActive, $0.targetPid, $0.targetBundleIdentifier)
+        }
         guard isActive else {
             HotkeyDiagnostics.record(
                 "key_interceptor_key_passed_inactive",
@@ -352,7 +375,7 @@ final class KeyInterceptor: KeyIntercepting {
         // If the user is in Spotlight, a password dialog, or another app,
         // let the key pass through so it acts on that UI instead.
         if targetPid != 0 {
-            let focus = keyboardFocusSnapshotProvider(targetPid)
+            let focus = keyboardFocusSnapshotProvider(targetPid, targetBundle)
             if !focus.isInTargetApp {
                 HotkeyDiagnostics.record(
                     "key_interceptor_key_passed_focus_mismatch",
@@ -450,30 +473,57 @@ final class KeyInterceptor: KeyIntercepting {
     /// for an active tap before disabling it.
     private nonisolated static let focusQueryTimeoutSeconds: Float = 0.25
 
+    /// Raw keyboard-focus owners reported by Accessibility.
+    struct FocusQueryResult: Sendable {
+        /// Owner of the focused UI element. Catches overlays (Spotlight, password
+        /// dialogs) that take keyboard focus without changing the focused app.
+        let focusedPid: pid_t?
+        let focusedAppPid: pid_t?
+        let source: String
+    }
+
     /// Runs on the tap thread, so it uses Accessibility only (no AppKit).
-    private nonisolated static func keyboardFocusSnapshot(targetPid: pid_t) -> KeyboardFocusSnapshot {
+    nonisolated static func queryKeyboardFocus() -> FocusQueryResult {
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, focusQueryTimeoutSeconds)
         let focusedAppPid = pid(ofAttribute: kAXFocusedApplicationAttribute, of: systemWide)
-        // The focused element catches overlays (Spotlight, password dialogs) that
-        // take keyboard focus without changing the focused application.
         if let focusedPid = pid(ofAttribute: kAXFocusedUIElementAttribute, of: systemWide) {
-            return KeyboardFocusSnapshot(
-                isInTargetApp: focusedPid == targetPid,
+            return FocusQueryResult(
                 focusedPid: focusedPid,
-                frontmostPid: focusedAppPid,
+                focusedAppPid: focusedAppPid,
                 source: "accessibilityFocusedElement"
             )
         }
         // The focused app did not answer in time or exposes no focused element.
-        guard let focusedAppPid else {
-            return KeyboardFocusSnapshot(isInTargetApp: false, focusedPid: nil, frontmostPid: nil, source: "none")
-        }
-        return KeyboardFocusSnapshot(
-            isInTargetApp: focusedAppPid == targetPid,
+        return FocusQueryResult(
             focusedPid: nil,
-            frontmostPid: focusedAppPid,
-            source: "accessibilityFocusedApplication"
+            focusedAppPid: focusedAppPid,
+            source: focusedAppPid == nil ? "none" : "accessibilityFocusedApplication"
+        )
+    }
+
+    /// Decides whether keyboard focus belongs to the target app.
+    nonisolated static func focusSnapshot(
+        _ query: FocusQueryResult,
+        targetPid: pid_t,
+        targetBundle: String?,
+        bundleIdentifierLookup: (pid_t) -> String?
+    ) -> KeyboardFocusSnapshot {
+        guard let ownerPid = query.focusedPid ?? query.focusedAppPid else {
+            return KeyboardFocusSnapshot(isInTargetApp: false, focusedPid: nil, frontmostPid: nil, source: query.source)
+        }
+        // Same rule TextInserter uses before typing: the target app's helper
+        // processes and a relaunched instance are still the target app.
+        let isInTargetApp = ownerPid == targetPid
+            || TextInserter.bundleIdentifiersLikelySameApp(
+                target: targetBundle,
+                candidate: bundleIdentifierLookup(ownerPid)
+            )
+        return KeyboardFocusSnapshot(
+            isInTargetApp: isInTargetApp,
+            focusedPid: query.focusedPid,
+            frontmostPid: query.focusedAppPid,
+            source: query.source
         )
     }
 
