@@ -222,8 +222,7 @@ final class KeyInterceptor: KeyIntercepting {
 
     /// Removes the tap and returns keys that were swallowed but not yet delivered.
     private func tearDown(phase: String) -> PendingKeys {
-        let (tap, tapThread, targetPid, pending) = state.withLockUnchecked {
-            s -> (CFMachPort?, EventTapThread?, pid_t, PendingKeys) in
+        let (tap, tapThread, targetPid, pending) = state.withLockUnchecked { s -> (CFMachPort?, EventTapThread?, pid_t, PendingKeys) in
             let result = (s.recordingEventTap, s.recordingTapThread, s.targetPid, s.pendingKeys)
             s.isActive = false
             s.targetPid = 0
@@ -373,17 +372,7 @@ final class KeyInterceptor: KeyIntercepting {
     private nonisolated func handleKeyEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         guard Self.isInterceptedKey(keyCode) else { return Unmanaged.passRetained(event) }
-        // Shift/Option/Command/Control+Enter mean something else to the app
-        // (newline, alternate submit), so they are never turned into a plain
-        // submit and do not consume the one-shot token. Same for Escape.
-        guard event.flags.intersection(Self.commandModifiers).isEmpty else {
-            HotkeyDiagnostics.record(
-                "key_interceptor_key_passed_modified",
-                metadata: Self.keyMetadata(keyCode: keyCode, targetPid: state.withLockUnchecked { $0.targetPid })
-                    .merging(["flags": String(event.flags.rawValue)]) { _, new in new }
-            )
-            return Unmanaged.passRetained(event)
-        }
+        guard !isModifiedKey(event, keyCode: keyCode) else { return Unmanaged.passRetained(event) }
 
         let (isActive, targetPid, targetBundle) = state.withLockUnchecked {
             ($0.isActive, $0.targetPid, $0.targetBundleIdentifier)
@@ -397,19 +386,8 @@ final class KeyInterceptor: KeyIntercepting {
             return Unmanaged.passRetained(event)
         }
 
-        // Only intercept Escape/Enter when the target app has keyboard focus.
-        // If the user is in Spotlight, a password dialog, or another app,
-        // let the key pass through so it acts on that UI instead.
-        if targetPid != 0 {
-            let focus = keyboardFocusSnapshotProvider(targetPid, targetBundle)
-            if !focus.isInTargetApp {
-                HotkeyDiagnostics.record(
-                    "key_interceptor_key_passed_focus_mismatch",
-                    metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
-                        .merging(focus.metadata) { _, new in new }
-                )
-                return Unmanaged.passRetained(event)
-            }
+        guard isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetBundle: targetBundle) else {
+            return Unmanaged.passRetained(event)
         }
 
         switch keyCode {
@@ -446,6 +424,34 @@ final class KeyInterceptor: KeyIntercepting {
         default:
             return Unmanaged.passRetained(event)
         }
+    }
+
+    /// Only intercept Escape/Enter when the target app has keyboard focus.
+    /// If the user is in Spotlight, a password dialog, or another app,
+    /// the key passes through so it acts on that UI instead.
+    private nonisolated func isFocusInTarget(keyCode: Int64, targetPid: pid_t, targetBundle: String?) -> Bool {
+        guard targetPid != 0 else { return true }
+        let focus = keyboardFocusSnapshotProvider(targetPid, targetBundle)
+        guard !focus.isInTargetApp else { return true }
+        HotkeyDiagnostics.record(
+            "key_interceptor_key_passed_focus_mismatch",
+            metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
+                .merging(focus.metadata) { _, new in new }
+        )
+        return false
+    }
+
+    /// Shift/Option/Command/Control+Enter mean something else to the app
+    /// (newline, alternate submit), so they are never turned into a plain
+    /// submit and do not consume the one-shot token. Same for Escape.
+    private nonisolated func isModifiedKey(_ event: CGEvent, keyCode: Int64) -> Bool {
+        guard !event.flags.isDisjoint(with: Self.commandModifiers) else { return false }
+        HotkeyDiagnostics.record(
+            "key_interceptor_key_passed_modified",
+            metadata: Self.keyMetadata(keyCode: keyCode, targetPid: state.withLockUnchecked { $0.targetPid })
+                .merging(["flags": String(event.flags.rawValue)]) { _, new in new }
+        )
+        return true
     }
 
     private nonisolated func scheduleDelivery() {
@@ -614,8 +620,8 @@ final class KeyInterceptor: KeyIntercepting {
 
 #if DEBUG
 extension KeyInterceptor {
+    // Consumes only the token; the Enter is not left pending for delivery.
     // swiftlint:disable:next identifier_name
-    /// Consumes only the token; the Enter is not left pending for delivery.
     nonisolated func _testConsumeEnterCaptureToken() -> Bool {
         let consumed = consumeEnterCaptureToken()
         state.withLockUnchecked { $0.pendingKeys.enter = false }
