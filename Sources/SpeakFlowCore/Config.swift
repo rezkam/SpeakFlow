@@ -303,6 +303,10 @@ public final class Settings {
 
     private let defaults: UserDefaults
 
+    /// Receives every observability setting change. Tests swap in a
+    /// configurator bound to a private store.
+    var observabilityConfigurator: ObservabilityConfigurator = .shared
+
     private init() {
         defaults = RuntimeIsolation.current.makeDefaults(prefix: "nu.rez.speakflow.tests")
     }
@@ -712,7 +716,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityEnabled)
-            ObservabilityConfigurator.shared.apply(from: self)
+            observabilityConfigurator.apply(from: self)
         }
     }
 
@@ -727,7 +731,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Keys.observabilityVerbosity)
-            ObservabilityConfigurator.shared.apply(from: self)
+            observabilityConfigurator.apply(from: self)
         }
     }
 
@@ -741,7 +745,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityCaptureSettingsSnapshot)
-            ObservabilityConfigurator.shared.apply(from: self)
+            observabilityConfigurator.apply(from: self)
         }
     }
 
@@ -755,7 +759,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityCaptureSystemContext)
-            ObservabilityConfigurator.shared.apply(from: self)
+            observabilityConfigurator.apply(from: self)
         }
     }
 
@@ -769,7 +773,7 @@ public final class Settings {
         }
         set {
             defaults.set(newValue, forKey: Keys.observabilityCaptureTextPayloads)
-            ObservabilityConfigurator.shared.apply(from: self)
+            observabilityConfigurator.apply(from: self)
         }
     }
 
