@@ -277,9 +277,17 @@ struct KeyInterceptorRegistrationTests {
         #expect(interceptor._testIsEnterCaptureArmed, "A passed-through Enter must not consume the token")
     }
 
-    @MainActor @Test(arguments: [
-        CGEventFlags.maskShift, .maskAlternate, .maskCommand, .maskControl
-    ])
+    /// Every non-empty combination of Shift, Option, Command, and Control.
+    nonisolated static let modifierCombinations: [CGEventFlags] = {
+        let single: [CGEventFlags] = [.maskShift, .maskAlternate, .maskCommand, .maskControl]
+        return (1..<(1 << single.count)).map { mask in
+            single.enumerated().reduce(into: CGEventFlags()) { flags, entry in
+                if mask & (1 << entry.offset) != 0 { flags.insert(entry.element) }
+            }
+        }
+    }()
+
+    @MainActor @Test(arguments: modifierCombinations)
     func modifiedEnterAndEscapePassThroughUntouched(modifier: CGEventFlags) {
         let fake = FakeEventTapDriver()
         let interceptor = KeyInterceptor.focusedForTests(fake.driver)
