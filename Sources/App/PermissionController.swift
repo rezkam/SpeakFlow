@@ -19,23 +19,51 @@ final class PermissionController: AccessibilityPermissionDelegate {
     let hotkeySettings: any HotkeySettingsProviding
     /// Injected closure to avoid circular dependency with RecordingController.
     let setupHotkeyAction: () -> Void
+    private let isAccessibilityTrusted: () -> Bool
 
     init(
         appState: any BannerPresenting = SpeakFlow.AppState.shared,
         hotkeySettings: any HotkeySettingsProviding = SpeakFlowCore.HotkeySettings.shared,
-        setupHotkeyAction: @escaping () -> Void = { RecordingController.shared.setupHotkey() }
+        setupHotkeyAction: @escaping () -> Void = { RecordingController.shared.setupHotkey() },
+        isAccessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }
     ) {
         self.appState = appState
         self.hotkeySettings = hotkeySettings
         self.setupHotkeyAction = setupHotkeyAction
+        self.isAccessibilityTrusted = isAccessibilityTrusted
+        lastObservedTrust = isAccessibilityTrusted()
         permissionManager.delegate = self
+    }
+
+    /// Trust as last observed by any check, so a grant is acted on once.
+    private var lastObservedTrust: Bool
+
+    /// Reads Accessibility trust and, on a transition to trusted, re-registers
+    /// the hotkey: a grant can arrive after the bounded permission poll gave
+    /// up, and only a fresh registration makes the hotkey work.
+    @discardableResult
+    private func observeTrust() -> Bool {
+        let trusted = isAccessibilityTrusted()
+        if trusted && !lastObservedTrust {
+            Logger.permissions.info("Accessibility granted; re-registering hotkey")
+            setupHotkeyAction()
+        }
+        lastObservedTrust = trusted
+        return trusted
+    }
+
+    /// Re-checks Accessibility trust, for example when the app becomes active
+    /// after the user changed it in System Settings.
+    func reconcileAccessibility() {
+        observeTrust()
+        appState.refresh()
     }
 
     // MARK: - Permission Readiness (called from RecordingController)
 
     /// Returns `true` when accessibility is granted, triggering a request flow if not.
     func isAccessibilityReady() -> Bool {
-        if AXIsProcessTrusted() { return true }
+        if observeTrust() { return true }
         SoundEffect.error.play()
         _ = ensureAccessibility()
         return false
@@ -61,7 +89,7 @@ final class PermissionController: AccessibilityPermissionDelegate {
     // MARK: - Public Actions (called from views)
 
     func checkAccessibility() {
-        let trusted = permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
+        let trusted = observeTrust() || permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
         if trusted {
             appState.showBanner("Accessibility permission is active", style: .success)
         }
@@ -90,7 +118,7 @@ final class PermissionController: AccessibilityPermissionDelegate {
     /// Silently check permissions on app startup — only reads current status, never triggers OS dialogs.
     /// The user sees the status in the General tab and grants access when ready via "Grant Access" buttons.
     func checkInitialPermissions() {
-        let trusted = AXIsProcessTrusted()
+        let trusted = observeTrust()
         Logger.permissions.debug("AXIsProcessTrusted: \(trusted)")
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         Logger.permissions.debug("Microphone status: \(String(describing: micStatus))")
@@ -115,6 +143,8 @@ final class PermissionController: AccessibilityPermissionDelegate {
     }
 
     func setupHotkey() {
+        // The permission poll saw the grant first and registers the hotkey itself.
+        lastObservedTrust = true
         setupHotkeyAction()
     }
 
