@@ -416,10 +416,12 @@ struct KeyInterceptorRegistrationTests {
         #expect(!events.contains { $0.name == "key_interceptor_keys_missed_by_tap" })
     }
 
-    /// SpeakFlow's own typing passes through the tap but is not hardware input.
-    /// Counting it would hide hardware keys the tap missed.
+    /// Observed in the running app: the HID system key-down counter includes
+    /// SpeakFlow's own synthetic typing (system = hardware seen + synthetic
+    /// seen, exactly). Missed keys are what the system counted beyond
+    /// everything the tap saw, or every dictation looks like missed keys.
     @MainActor @Test
-    func syntheticTypingDoesNotHideMissedHardwareKeys() {
+    func syntheticTypingCountsOnBothSidesOfTheComparison() {
         let systemKeyDowns = OSAllocatedUnfairLock<UInt32>(initialState: 0)
         let interceptor = makeCountingInterceptor(systemKeyDowns: systemKeyDowns)
         var events: [HotkeyDiagnosticEvent] = []
@@ -427,18 +429,40 @@ struct KeyInterceptorRegistrationTests {
         defer { HotkeyDiagnostics._testEventHook = nil }
 
         interceptor.start(targetPid: 0)
-        systemKeyDowns.withLock { $0 += 4 }
+        // 20 synthetic keys and 1 hardware key, all seen by the tap.
+        systemKeyDowns.withLock { $0 += 21 }
+        for _ in 0..<20 {
+            _ = interceptor._testHandleKeyEventForTests(keyCode: 0, sourceState: .combinedSessionState)
+        }
+        _ = interceptor._testHandleKeyEventForTests(keyCode: 0)
+        interceptor.stop()
+
+        let summary = events.first { $0.name == "key_interceptor_session_summary" }
+        #expect(summary?.metadata["tapKeyDowns"] == "1")
+        #expect(summary?.metadata["tapSyntheticKeyDowns"] == "20")
+        #expect(!events.contains { $0.name == "key_interceptor_keys_missed_by_tap" },
+                "Synthetic typing seen by the tap is not a missed key")
+    }
+
+    @MainActor @Test
+    func hardwareKeysMissedDuringSyntheticTypingAreStillReported() {
+        let systemKeyDowns = OSAllocatedUnfairLock<UInt32>(initialState: 0)
+        let interceptor = makeCountingInterceptor(systemKeyDowns: systemKeyDowns)
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        interceptor.start(targetPid: 0)
+        // 20 synthetic keys seen, plus 4 hardware keys the tap never received.
+        systemKeyDowns.withLock { $0 += 24 }
         for _ in 0..<20 {
             _ = interceptor._testHandleKeyEventForTests(keyCode: 0, sourceState: .combinedSessionState)
         }
         interceptor.stop()
 
-        let summary = events.first { $0.name == "key_interceptor_session_summary" }
-        #expect(summary?.metadata["tapKeyDowns"] == "0")
-        #expect(summary?.metadata["tapSyntheticKeyDowns"] == "20")
         #expect(events.contains {
             $0.name == "key_interceptor_keys_missed_by_tap" && $0.metadata["missedKeyDowns"] == "4"
-        }, "Hardware keys the tap missed must be reported even while SpeakFlow types")
+        })
     }
 
     @MainActor @Test
