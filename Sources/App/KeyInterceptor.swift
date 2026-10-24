@@ -304,7 +304,7 @@ final class KeyInterceptor: KeyIntercepting {
         let system: UInt32
         /// Hardware key-down events the tap received in the same window.
         let tap: UInt32
-        /// Synthetic key-down events the tap received; not part of the comparison.
+        /// Synthetic key-down events (SpeakFlow's typing) the tap received.
         let tapSynthetic: UInt32
     }
 
@@ -725,7 +725,10 @@ extension KeyInterceptor {
         )
         // One key pressed exactly at registration or teardown can land on one
         // side only, because the two counts are sampled a moment apart.
-        guard counts.system > counts.tap, counts.system - counts.tap > 1 else { return }
+        // The HID counter includes SpeakFlow's own synthetic typing, so compare
+        // it with everything the tap saw.
+        let seen = counts.tap &+ counts.tapSynthetic
+        guard counts.system > seen, counts.system - seen > 1 else { return }
         let owner = secureInputOwnerProvider()
         HotkeyDiagnostics.record(
             "key_interceptor_keys_missed_by_tap",
@@ -733,9 +736,10 @@ extension KeyInterceptor {
             metadata: [
                 "targetPid": String(targetPid),
                 "phase": phase,
-                "missedKeyDowns": String(counts.system - counts.tap),
+                "missedKeyDowns": String(counts.system - seen),
                 "systemKeyDowns": String(counts.system),
                 "tapKeyDowns": String(counts.tap),
+                "tapSyntheticKeyDowns": String(counts.tapSynthetic),
                 "secureInputOwnerPid": owner.map(String.init) ?? "none",
                 "secureInputOwnerBundleIdentifier": owner.flatMap(bundleIdentifierLookup) ?? "none"
             ]
