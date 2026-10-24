@@ -30,15 +30,9 @@ public actor TranscriptionQueue {
     /// Number of non-empty texts yielded to the AsyncStream this session.
     /// Used by the bridge to detect when all yielded items have been consumed.
     private var yieldedCount: UInt64 = 0
-    let rateLimiter = RateLimiter()
 
     // Continuations for async streaming
     private var textContinuation: AsyncStream<SessionText>.Continuation?
-    private struct CompletionWaiter {
-        let id: UUID
-        let continuation: CheckedContinuation<Void, Never>
-    }
-    private var completionWaiters: [CompletionWaiter] = []
 
     /// Lazily-initialized text stream. Only one consumer is supported.
     /// Accessing this property multiple times returns the same stream;
@@ -135,74 +129,13 @@ public actor TranscriptionQueue {
             }
             nextSeqToOutput &+= 1
         }
-
-        if pendingResults.isEmpty && currentSeq == nextSeqToOutput && currentSeq > 0 {
-            resumeAllCompletionWaiters()
-        }
-    }
-
-    private static let completionTimeoutSeconds: UInt64 = 30
-
-    func waitForCompletion() async {
-        if pendingResults.isEmpty && currentSeq == nextSeqToOutput && currentSeq > 0 {
-            return
-        }
-
-        let waiterId = UUID()
-
-        // Schedule a timeout to prevent indefinite hang if flushReady() never fires
-        let timeoutTask = Task {
-            try await Task.sleep(for: .seconds(Self.completionTimeoutSeconds))
-            self.resumeCompletionWaiter(waiterId, timedOut: true)
-        }
-
-        await withCheckedContinuation { continuation in
-            if pendingResults.isEmpty && currentSeq == nextSeqToOutput && currentSeq > 0 {
-                continuation.resume()
-                return
-            }
-            completionWaiters.append(CompletionWaiter(id: waiterId, continuation: continuation))
-        }
-
-        timeoutTask.cancel()
     }
 
     func finishStream() {
-        // Resume completion before cleanup so awaiters cannot get stuck waiting.
-        resumeAllCompletionWaiters()
         textContinuation?.finish()
         textContinuation = nil
     }
-
-    private func resumeCompletionWaiter(_ waiterId: UUID, timedOut: Bool) {
-        guard let index = completionWaiters.firstIndex(where: { $0.id == waiterId }) else {
-            return
-        }
-
-        let waiter = completionWaiters.remove(at: index)
-        if timedOut {
-            Logger.transcription.warning("waitForCompletion timed out after \(Self.completionTimeoutSeconds)s")
-        }
-        waiter.continuation.resume()
-    }
-
-    private func resumeAllCompletionWaiters() {
-        let waiters = completionWaiters
-        completionWaiters.removeAll()
-        for waiter in waiters {
-            waiter.continuation.resume()
-        }
-    }
 }
-
-#if DEBUG
-extension TranscriptionQueue {
-    // swiftlint:disable:next identifier_name
-    func _testCompletionWaiterCount() -> Int {
-        completionWaiters.count
-    }
-}
-#endif
 
 // MARK: - Callback Bridge
 

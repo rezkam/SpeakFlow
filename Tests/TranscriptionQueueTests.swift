@@ -100,89 +100,21 @@ struct TranscriptionQueueTests {
                 "Failed chunk should be skipped, not block subsequent results")
     }
 
-    @Test func testWaitForCompletionBlocksUntilAllPendingResultsAreSubmitted() async {
+    /// Completion (as production checks it) waits for every outstanding ticket.
+    @Test func testQueueIsNotIdleUntilAllPendingResultsAreSubmitted() async {
         let queue = TranscriptionQueue()
         let t0 = await queue.nextSequence()
         let t1 = await queue.nextSequence()
-
-        let done = OSAllocatedUnfairLock(initialState: false)
-        let waitTask = Task {
-            await queue.waitForCompletion()
-            done.withLock { $0 = true }
-        }
-        _ = waitTask // suppress unused warning
-
-        func isDone(afterMs ms: Int) async -> Bool {
-            try? await Task.sleep(for: .milliseconds(ms))
-            return done.withLock { $0 }
-        }
-
-        #expect(await isDone(afterMs: 80) == false,
-                "waitForCompletion should block while there are pending results")
+        #expect(await !queue.isIdle(consumedCount: 0), "Outstanding tickets keep the queue busy")
 
         await queue.submitResult(ticket: t0, text: "first")
-        #expect(await isDone(afterMs: 80) == false,
-                "waitForCompletion should remain blocked until all pending results arrive")
+        #expect(await !queue.isIdle(consumedCount: 1), "One ticket is still outstanding")
 
         await queue.submitResult(ticket: t1, text: "second")
-        #expect(await isDone(afterMs: 250) == true,
-                "waitForCompletion should complete after all pending results are flushed")
+        #expect(await queue.isIdle(consumedCount: 2), "All tickets transcribed and consumed")
+        #expect(await !queue.isIdle(consumedCount: 1), "Yielded text not yet consumed is not idle")
     }
 
-    @Test func testFinishStreamUnblocksWaitForCompletion() async {
-        let queue = TranscriptionQueue()
-        _ = await queue.nextSequence() // Introduce pending work so waitForCompletion actually waits.
-
-        let waitTask = Task {
-            await queue.waitForCompletion()
-        }
-
-        try? await Task.sleep(for: .milliseconds(60))
-        await queue.finishStream()
-
-        let completed = await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                await waitTask.value
-                return true
-            }
-            group.addTask {
-                try? await Task.sleep(for: .milliseconds(250))
-                return false
-            }
-            let result = await group.next() ?? false
-            group.cancelAll()
-            return result
-        }
-
-        #expect(completed == true, "finishStream should resume waitForCompletion continuation")
-    }
-
-    @Test func testWaitForCompletionSupportsMultipleConcurrentWaiters() async {
-        let queue = TranscriptionQueue()
-        let ticket = await queue.nextSequence()
-        let waiters = 3
-
-        let completionCount = OSAllocatedUnfairLock(initialState: 0)
-
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<waiters {
-                group.addTask {
-                    await queue.waitForCompletion()
-                    completionCount.withLock { $0 += 1 }
-                }
-            }
-
-            try? await Task.sleep(for: .milliseconds(80))
-            #expect(completionCount.withLock { $0 } == 0,
-                    "All waiters should block until the queue is complete")
-
-            await queue.submitResult(ticket: ticket, text: "done")
-            try? await Task.sleep(for: .milliseconds(120))
-            #expect(completionCount.withLock { $0 } == waiters,
-                    "All concurrent waiters must be resumed on completion")
-            group.cancelAll()
-        }
-    }
 }
 
 // MARK: - Issue #17: TranscriptionQueue.textStream overwrites continuation
@@ -298,133 +230,36 @@ struct TranscriptionQueueBridgeCleanupTests {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MARK: - TranscriptionQueue: waitForCompletion & finishStream Edge Cases
+// MARK: - TranscriptionQueue: finishStream Edge Cases
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-@Suite("TranscriptionQueue — waitForCompletion & finishStream Edge Cases")
-struct TranscriptionQueueWaitForCompletionTests {
+@Suite("TranscriptionQueue — finishStream Edge Cases")
+struct TranscriptionQueueFinishStreamTests {
 
-    /// Issue a ticket, submit its result, THEN call waitForCompletion — must return without blocking.
-    @Test func testWaitForCompletionReturnsImmediatelyWhenAlreadyComplete() async {
-        let queue = TranscriptionQueue()
-        let t0 = await queue.nextSequence()
-        await queue.submitResult(ticket: t0, text: "done")
-
-        let done = OSAllocatedUnfairLock(initialState: false)
-        Task {
-            await queue.waitForCompletion()
-            done.withLock { $0 = true }
-        }
-        try? await waitUntil(timeout: .milliseconds(250)) { done.withLock { $0 } }
-        #expect(done.withLock { $0 } == true,
-                "waitForCompletion must return immediately when all results submitted")
-    }
-
-    /// A fresh queue has currentSeq == 0, which fails the currentSeq > 0 check.
-    /// waitForCompletion() will suspend forever. Verify it does NOT return within a timeout.
-    /// NOTE: This documents intentional behavior — waitForCompletion on an empty queue
-    /// will hang forever unless finishStream() is called.
-    @Test func testWaitForCompletionOnFreshQueueNeverReturns() async {
-        let queue = TranscriptionQueue()
-        let done = OSAllocatedUnfairLock(initialState: false)
-        Task {
-            await queue.waitForCompletion()
-            done.withLock { $0 = true }
-        }
-
-        try? await Task.sleep(for: .milliseconds(200))
-        #expect(done.withLock { $0 } == false,
-                "waitForCompletion on empty queue (currentSeq=0) must not return immediately")
-
-        // Avoid leaking a waiter that would otherwise rely on the 30s timeout.
-        await queue.finishStream()
-    }
-
-    /// The minimal completion case — one ticket issued and submitted.
-    @Test func testWaitForCompletionWithSingleSequence() async {
-        let queue = TranscriptionQueue()
-        let t = await queue.nextSequence()
-
-        let done = OSAllocatedUnfairLock(initialState: false)
-        Task {
-            await queue.waitForCompletion()
-            done.withLock { $0 = true }
-        }
-
-        // Ensure waiter is actually registered before submitting completion.
-        let waiterRegistered = await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                while await queue._testCompletionWaiterCount() == 0 {
-                    try? await Task.sleep(for: .milliseconds(10))
-                }
-                return true
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(1))
-                return false
-            }
-
-            let result = await group.next() ?? false
-            group.cancelAll()
-            return result
-        }
-        #expect(waiterRegistered == true, "waitForCompletion waiter should register promptly")
-        #expect(done.withLock { $0 } == false, "Should still be waiting")
-
-        await queue.submitResult(ticket: t, text: "only")
-        try? await waitUntil(timeout: .seconds(1)) { done.withLock { $0 } }
-        #expect(done.withLock { $0 } == true, "Should complete with single result")
-    }
-
-    /// finishStream() must:
-    /// 1. Resume completionContinuation (unblocking waitForCompletion)
-    /// 2. Finish textContinuation (ending the for await loop)
-    @Test func testFinishStreamResumesBothContinuations() async {
+    /// finishStream() must finish the text stream, ending a for-await loop.
+    @Test func testFinishStreamEndsTheTextStream() async {
         let queue = TranscriptionQueue()
         let stream = await queue.textStream
-        _ = await queue.nextSequence()
-
-        // Start consuming stream
         let streamEnded = OSAllocatedUnfairLock(initialState: false)
         let streamTask = Task {
             for await _ in stream {}
             streamEnded.withLock { $0 = true }
         }
+        _ = streamTask
 
-        // Start waiting for completion
-        let completionDone = OSAllocatedUnfairLock(initialState: false)
-        let waitTask = Task {
-            await queue.waitForCompletion()
-            completionDone.withLock { $0 = true }
-        }
-        _ = streamTask; _ = waitTask
-
-        try? await waitUntilAsync(timeout: .seconds(1)) {
-            await queue._testCompletionWaiterCount() > 0
-        }
         await queue.finishStream()
-        try? await waitUntil(timeout: .seconds(1)) { completionDone.withLock { $0 } }
         try? await waitUntil(timeout: .seconds(1)) { streamEnded.withLock { $0 } }
 
-        #expect(completionDone.withLock { $0 } == true,
-                "finishStream must resume completionContinuation")
         #expect(streamEnded.withLock { $0 } == true,
                 "finishStream must finish textContinuation (ending for-await loop)")
     }
 
-    /// Calling finishStream() twice must not crash (continuations are nil-checked).
+    /// Calling finishStream() twice must not crash (the continuation is nil-checked).
     @Test func testFinishStreamIdempotent() async {
         let queue = TranscriptionQueue()
         _ = await queue.textStream  // force creation of textContinuation
-        _ = await queue.nextSequence()  // ensure completionContinuation can be set
-
-        let task = Task { await queue.waitForCompletion() }
-        try? await Task.sleep(for: .milliseconds(30))
-
-        await queue.finishStream()  // first: resumes continuation
-        await queue.finishStream()  // second: continuations already nil — no crash
-        // If we get here without crashing, test passes
-        _ = task
+        await queue.finishStream()
+        await queue.finishStream()
     }
 
     /// If finishStream() is called before textStream is ever accessed,
@@ -527,20 +362,7 @@ struct TranscriptionQueueResetTests {
         #expect(received == ["FRESH"], "Stale result must not appear on stream")
     }
 
-    /// Verify reset() does not affect the rate limiter.
-    /// The rateLimiter property is a `let` — verify it survives reset
-    /// (reset shouldn't create a new one).
-    @Test func testResetDoesNotAffectRateLimiter() async throws {
-        let queue = TranscriptionQueue()
-        // RateLimiter is an actor, so identity check via a behavioral test:
-        // Record a request, reset the queue, verify the rate limiter still has state
-        // (i.e., it was not replaced).
-        try await queue.rateLimiter.waitAndRecord()
-        await queue.reset()
-        // If rateLimiter was replaced, timeUntilNextAllowed would be 0
-        let wait = await queue.rateLimiter.timeUntilNextAllowed()
-        #expect(wait > 0, "rateLimiter must survive reset (let property, not var)")
-    }
+
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -785,19 +607,12 @@ struct TranscriptionQueueFlushReadyOrderingEdgeCasesTests {
         let t0 = await queue.nextSequence()
         let t1 = await queue.nextSequence()
 
-        let done = OSAllocatedUnfairLock(initialState: false)
-        let waitTask = Task {
-            await queue.waitForCompletion()
-            done.withLock { $0 = true }
-        }
-        _ = waitTask
-
         await queue.markFailed(ticket: t0)
         await queue.markFailed(ticket: t1)
 
-        try? await Task.sleep(for: .milliseconds(100))
-        #expect(done.withLock { $0 } == true,
-                "Completion must fire even when all sequences failed")
+        #expect(await queue.getPendingCount() == 0)
+        #expect(await queue.isIdle(consumedCount: 0),
+                "Completion must be reached even when all sequences failed (nothing to consume)")
     }
 }
 
