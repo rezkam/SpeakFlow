@@ -1896,3 +1896,83 @@ struct StreamingRecorderCancelDiscardTests {
         #expect(uploaded.isEmpty, "Audio from a cancelled recording must never be emitted for upload")
     }
 }
+
+/// A session whose sends are slow, recording the order of sends and finalize.
+actor SlowRecordingSession: StreamingSession {
+    nonisolated let events: AsyncStream<TranscriptionEvent>
+    private let continuation: AsyncStream<TranscriptionEvent>.Continuation
+    private(set) var log: [String] = []
+    let sendDelay: Duration
+
+    init(sendDelay: Duration) {
+        var cont: AsyncStream<TranscriptionEvent>.Continuation!
+        events = AsyncStream { cont = $0 }
+        continuation = cont
+        self.sendDelay = sendDelay
+    }
+
+    func sendAudio(_ data: Data) async throws {
+        try await Task.sleep(for: sendDelay)
+        log.append("send:\(data.first ?? 0)")
+    }
+    func finalize() async throws { log.append("finalize") }
+    func close() async throws {
+        log.append("close")
+        continuation.finish()
+    }
+    func keepAlive() async throws {}
+}
+
+/// Stopping a stream must deliver the audio already captured, not drop it.
+@Suite("LiveStreamingController — Stop Drains Captured Audio", .serialized)
+struct LiveStreamingStopDrainTests {
+    @MainActor
+    private func startController(session: SlowRecordingSession) async -> LiveStreamingController {
+        let provider = MockStreamingProvider()
+        provider.mockSession = session
+        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        _ = await controller.start(provider: provider, config: .default)
+        return controller
+    }
+
+    @MainActor @Test
+    func stopSendsQueuedAudioBeforeFinalizing() async {
+        let session = SlowRecordingSession(sendDelay: .milliseconds(20))
+        let controller = await startController(session: session)
+        for byte in UInt8(1)...5 { controller._testEnqueueAudioFrame(Data([byte])) }
+
+        await controller.stop(trailingFinalTimeout: 0)
+
+        let log = await session.log
+        #expect(Array(log.prefix(6)) == ["send:1", "send:2", "send:3", "send:4", "send:5", "finalize"],
+                "Audio captured before stop must reach the provider before finalize, got \(log)")
+    }
+
+    @MainActor @Test
+    func drainIsBoundedWhenTheNetworkStalls() async {
+        let session = SlowRecordingSession(sendDelay: .seconds(10))
+        let controller = await startController(session: session)
+        controller._testEnqueueAudioFrame(Data([1]))
+        controller._testEnqueueAudioFrame(Data([2]))
+
+        let started = ContinuousClock.now
+        await controller.stop(trailingFinalTimeout: 0)
+        let elapsed = ContinuousClock.now - started
+
+        #expect(elapsed < .seconds(3), "A stalled network must not hold stop open, took \(elapsed)")
+        #expect(await session.log.contains("finalize"))
+    }
+
+    @MainActor @Test
+    func cancelStillDiscardsQueuedAudio() async {
+        let session = SlowRecordingSession(sendDelay: .milliseconds(20))
+        let controller = await startController(session: session)
+        for byte in UInt8(1)...5 { controller._testEnqueueAudioFrame(Data([byte])) }
+
+        await controller.cancel()
+        try? await Task.sleep(for: .milliseconds(200))
+
+        let sends = await session.log.filter { $0.hasPrefix("send:") }
+        #expect(sends.count <= 1, "Cancel discards captured audio; at most the in-flight frame completes, got \(sends)")
+    }
+}
