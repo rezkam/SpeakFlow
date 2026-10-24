@@ -292,4 +292,129 @@ struct KeyInterceptorRegistrationTests {
             keyCode: 76, flags: [.maskAlphaShift, .maskNumericPad, .maskSecondaryFn]
         ), "Keypad Enter with only non-command flags must still submit")
     }
+
+    @MainActor
+    private func makeCountingInterceptor(
+        systemKeyDowns: OSAllocatedUnfairLock<UInt32>,
+        secureInputOwner: pid_t? = nil,
+        bundles: [pid_t: String] = [:]
+    ) -> KeyInterceptor {
+        KeyInterceptor(
+            eventTapDriver: FakeEventTapDriver().driver,
+            bundleIdentifierLookup: { bundles[$0] },
+            secureInputOwner: { secureInputOwner },
+            systemKeyDownCounter: { systemKeyDowns.withLock { $0 } }
+        )
+    }
+
+    /// Regression guard: keys that never reached the tap (secure input in the
+    /// target app, a disabled tap) used to leave no trace at all.
+    @MainActor @Test
+    func keysTheSystemSawButTheTapDidNotAreRecordedAtStop() {
+        let systemKeyDowns = OSAllocatedUnfairLock<UInt32>(initialState: 1_000)
+        let interceptor = makeCountingInterceptor(
+            systemKeyDowns: systemKeyDowns,
+            secureInputOwner: 42,
+            bundles: [42: "com.mitchellh.ghostty"]
+        )
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        interceptor.start(targetPid: 42)
+        // The user typed 5 keys; the tap saw only one of them.
+        systemKeyDowns.withLock { $0 += 5 }
+        _ = interceptor._testHandleKeyEventForTests(keyCode: 0)
+        interceptor.stop()
+
+        let summary = events.first { $0.name == "key_interceptor_session_summary" }
+        #expect(summary?.metadata["systemKeyDowns"] == "5")
+        #expect(summary?.metadata["tapKeyDowns"] == "1")
+        let missed = events.first { $0.name == "key_interceptor_keys_missed_by_tap" }
+        #expect(missed?.level == .warning, "Keys the tap never saw must leave a warning")
+        #expect(missed?.metadata["missedKeyDowns"] == "4")
+        #expect(missed?.metadata["secureInputOwnerPid"] == "42")
+        #expect(missed?.metadata["secureInputOwnerBundleIdentifier"] == "com.mitchellh.ghostty")
+        #expect(missed?.metadata["phase"] == "stop")
+    }
+
+    @MainActor @Test
+    func cancelAlsoRecordsKeysTheTapMissed() {
+        let systemKeyDowns = OSAllocatedUnfairLock<UInt32>(initialState: 10)
+        let interceptor = makeCountingInterceptor(systemKeyDowns: systemKeyDowns)
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        interceptor.start(targetPid: 42)
+        systemKeyDowns.withLock { $0 += 3 }
+        interceptor.cancel()
+
+        let missed = events.first { $0.name == "key_interceptor_keys_missed_by_tap" }
+        #expect(missed?.metadata["missedKeyDowns"] == "3")
+        #expect(missed?.metadata["secureInputOwnerPid"] == "none")
+        #expect(missed?.metadata["phase"] == "cancel")
+    }
+
+    @MainActor @Test
+    func noMissedKeyWarningWhenTheTapSawEveryKey() {
+        let systemKeyDowns = OSAllocatedUnfairLock<UInt32>(initialState: 0)
+        let interceptor = makeCountingInterceptor(systemKeyDowns: systemKeyDowns)
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        interceptor.start(targetPid: 0)
+        systemKeyDowns.withLock { $0 += 3 }
+        // Ordinary keys, a captured Enter, and a passed-through second Enter all count.
+        _ = interceptor._testHandleKeyEventForTests(keyCode: 0)
+        _ = interceptor._testHandleKeyEventForTests(keyCode: 36)
+        _ = interceptor._testHandleKeyEventForTests(keyCode: 36)
+        interceptor.stop()
+
+        #expect(events.contains { $0.name == "key_interceptor_session_summary" && $0.metadata["tapKeyDowns"] == "3" })
+        #expect(!events.contains { $0.name == "key_interceptor_keys_missed_by_tap" })
+    }
+
+    @MainActor @Test
+    func aSingleKeyInFlightAtStartOrStopIsNotReportedAsMissed() {
+        // The system counter and the tap are sampled a moment apart, so one key
+        // pressed exactly at registration or teardown can appear on one side only.
+        let systemKeyDowns = OSAllocatedUnfairLock<UInt32>(initialState: 0)
+        let interceptor = makeCountingInterceptor(systemKeyDowns: systemKeyDowns)
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        interceptor.start(targetPid: 0)
+        systemKeyDowns.withLock { $0 += 1 }
+        interceptor.stop()
+
+        #expect(!events.contains { $0.name == "key_interceptor_keys_missed_by_tap" })
+    }
+
+    /// SpeakFlow's own typing passes through the tap but is not hardware input.
+    /// Counting it would hide hardware keys the tap missed.
+    @MainActor @Test
+    func syntheticTypingDoesNotHideMissedHardwareKeys() {
+        let systemKeyDowns = OSAllocatedUnfairLock<UInt32>(initialState: 0)
+        let interceptor = makeCountingInterceptor(systemKeyDowns: systemKeyDowns)
+        var events: [HotkeyDiagnosticEvent] = []
+        HotkeyDiagnostics._testEventHook = { events.append($0) }
+        defer { HotkeyDiagnostics._testEventHook = nil }
+
+        interceptor.start(targetPid: 0)
+        systemKeyDowns.withLock { $0 += 4 }
+        for _ in 0..<20 {
+            _ = interceptor._testHandleKeyEventForTests(keyCode: 0, sourceState: .combinedSessionState)
+        }
+        interceptor.stop()
+
+        let summary = events.first { $0.name == "key_interceptor_session_summary" }
+        #expect(summary?.metadata["tapKeyDowns"] == "0")
+        #expect(summary?.metadata["tapSyntheticKeyDowns"] == "20")
+        #expect(events.contains {
+            $0.name == "key_interceptor_keys_missed_by_tap" && $0.metadata["missedKeyDowns"] == "4"
+        }, "Hardware keys the tap missed must be reported even while SpeakFlow types")
+    }
 }
