@@ -151,10 +151,28 @@ public actor MockVADBackend {
 
     // MARK: - Interface
 
+    /// Simulated inference time. While set, `next()` suspends like real model
+    /// inference, so overlapping callers become observable.
+    public var inferenceDelay: Duration?
+
+    /// Most calls to `next()` that were in progress at the same time.
+    public private(set) var maxConcurrentCalls = 0
+    private var concurrentCalls = 0
+
+    public func setInferenceDelay(_ delay: Duration?) {
+        inferenceDelay = delay
+    }
+
     /// Consume and return the next scripted frame.
     /// Falls back to `.silence()` once the script is exhausted.
-    public func next() -> VADFrame {
+    public func next() async -> VADFrame {
         callCount += 1
+        concurrentCalls += 1
+        maxConcurrentCalls = max(maxConcurrentCalls, concurrentCalls)
+        defer { concurrentCalls -= 1 }
+        if let inferenceDelay {
+            try? await Task.sleep(for: inferenceDelay)
+        }
         guard index < script.count else {
             return .silence()
         }

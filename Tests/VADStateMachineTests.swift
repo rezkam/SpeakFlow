@@ -741,3 +741,28 @@ struct MockVADBackendMechanicsTests {
         }
     }
 }
+
+/// processChunk snapshots stream state, awaits inference, then commits the new
+/// state. Two overlapping calls would both start from the same snapshot and one
+/// would overwrite the other's recurrent state, counts, and segmentation.
+@Suite("VADProcessor — Serialized Processing")
+struct VADProcessorSerializationTests {
+    @Test
+    func overlappingProcessChunkCallsRunOneAtATime() async throws {
+        let processor = VADProcessor()
+        let backend = MockVADBackend(repeating: .speech(), count: 3)
+        await backend.setInferenceDelay(.milliseconds(30))
+        await processor._testInjectBackend(backend)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<3 {
+                group.addTask { _ = try await processor.processChunk([Float](repeating: 0.1, count: 800)) }
+            }
+            try await group.waitForAll()
+        }
+
+        #expect(await backend.maxConcurrentCalls == 1,
+                "A second chunk must not start inference before the first commits its state")
+        #expect(await backend.callCount == 3)
+    }
+}

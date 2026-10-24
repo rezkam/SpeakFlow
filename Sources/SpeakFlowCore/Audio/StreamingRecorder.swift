@@ -279,7 +279,7 @@ public final class StreamingRecorder {
         // the oldest buffered speech is silently dropped.
         let processing = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.processQueuedSamples()
+                self?.scheduleProcessingPass()
             }
         }
         RunLoop.main.add(processing, forMode: .common)
@@ -459,6 +459,19 @@ public final class StreamingRecorder {
             sessionController = nil
             sessionStartDate = nil
             return false
+        }
+    }
+
+    /// The one processing pass allowed to run. Timer ticks while it runs are
+    /// skipped; their samples stay queued for the next pass, so audio reaches
+    /// the buffer and VAD in capture order.
+    private var processingPass: Task<Void, Never>?
+
+    private func scheduleProcessingPass() {
+        guard processingPass == nil else { return }
+        processingPass = Task { @MainActor [weak self] in
+            await self?.processQueuedSamples()
+            self?.processingPass = nil
         }
     }
 
@@ -866,7 +879,10 @@ public final class StreamingRecorder {
         let wasCancelled = isCancelled
         isCancelled = false
 
+        let inFlightPass = processingPass
         let stopTask = Task { [self] in
+            // The stop-time drain continues where the in-flight pass ends.
+            await inFlightPass?.value
             await filter?.stop()
             idleNudgeController = nil
             turnClassifier = nil
@@ -1023,7 +1039,7 @@ public final class StreamingRecorder {
         // registration so they keep firing during menu tracking/window drag).
         let processing = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.processQueuedSamples()
+                self?.scheduleProcessingPass()
             }
         }
         RunLoop.main.add(processing, forMode: .common)
@@ -1101,6 +1117,11 @@ extension StreamingRecorder {
         await periodicCheck()
     }
 
+    func _testScheduleProcessingPass() {
+        scheduleProcessingPass()
+    }
+
+    // swiftlint:disable:next identifier_name
     func _testInvokeProcessQueuedSamples() async {
         await processQueuedSamples()
     }
