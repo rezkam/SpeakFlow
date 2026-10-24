@@ -139,3 +139,53 @@ struct StreamingRecorderOrderedProcessingTests {
         #expect(maxConcurrent == 1)
     }
 }
+
+/// Streaming STT latency: the time from when the end of a final's audio was
+/// captured to when that final arrived. The audio clock starts at the first
+/// frame sent to the provider session, which is where provider timestamps
+/// count from.
+@Suite("LiveStreamingController — Final Latency", .serialized)
+struct LiveStreamingFinalLatencyTests {
+    @MainActor
+    private func startedController(_ session: MockStreamingSession) async throws -> LiveStreamingController {
+        let provider = MockStreamingProvider()
+        provider.mockSession = session
+        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        _ = await controller.start(provider: provider, config: .default)
+        controller._testEnqueueAudioFrame(Data(repeating: 0, count: 320))
+        try await waitUntilAsync { await !session.sentAudioChunks.isEmpty }
+        return controller
+    }
+
+    @MainActor @Test
+    func finalLatencyIsMeasuredFromTheEndOfItsAudio() async throws {
+        let session = MockStreamingSession()
+        let controller = try await startedController(session)
+        var samples: [Double] = []
+        controller.onFinalLatency = { samples.append($0) }
+
+        try await Task.sleep(for: .milliseconds(250))
+        controller.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "hello there", start: 0, duration: 0.05, isFinal: true, speechFinal: true
+        )))
+
+        #expect(samples.count == 1)
+        if let latency = samples.first {
+            #expect(latency > 0.15 && latency < 2, "Expected about 0.2 s after the audio ended, got \(latency)")
+        }
+        await controller.cancel()
+    }
+
+    @MainActor @Test
+    func finalsWithoutAudioTimingAreNotGuessed() async throws {
+        let session = MockStreamingSession()
+        let controller = try await startedController(session)
+        var samples: [Double] = []
+        controller.onFinalLatency = { samples.append($0) }
+
+        controller.handleEvent(.finalResult(TranscriptionResult(transcript: "hello there", isFinal: true, speechFinal: true)))
+
+        #expect(samples.isEmpty)
+        await controller.cancel()
+    }
+}

@@ -49,12 +49,20 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
     private struct State {
         var session: StreamingSession?
         var active: Bool = false
-        var pendingAudio: ArraySlice<Data> = []
+        var pendingAudio: ArraySlice<CapturedFrame> = []
         var pendingBytes = 0
         var droppedChunks = 0
         var isShutdown = false
         /// A frame has been dequeued and its send has not returned yet.
         var sendInFlight = false
+        /// Capture time of the first frame sent to the current session. Provider
+        /// timestamps count from that frame.
+        var sessionAudioAnchor: ContinuousClock.Instant?
+    }
+
+    struct CapturedFrame {
+        let data: Data
+        let capturedAt: ContinuousClock.Instant
     }
 
     private static let maxBufferedAudioBytes = 1_000_000
@@ -107,9 +115,15 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         state.withLock { $0.isShutdown }
     }
 
+    var sessionAudioAnchor: ContinuousClock.Instant? {
+        state.withLock { $0.sessionAudioAnchor }
+    }
+
     func set(session: StreamingSession?, active: Bool) {
         let shouldSignal = state.withLock { state in
             guard !state.isShutdown else { return false }
+            // Activating a session starts a new provider audio clock.
+            if session != nil { state.sessionAudioAnchor = nil }
             state.session = session
             state.active = active
             return active && session != nil && !state.pendingAudio.isEmpty
@@ -131,11 +145,11 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
             while state.pendingBytes + data.count > Self.maxBufferedAudioBytes,
                   !state.pendingAudio.isEmpty {
                 let dropped = state.pendingAudio.removeFirst()
-                state.pendingBytes -= dropped.count
+                state.pendingBytes -= dropped.data.count
                 state.droppedChunks &+= 1
             }
 
-            state.pendingAudio.append(data)
+            state.pendingAudio.append(CapturedFrame(data: data, capturedAt: .now))
             state.pendingBytes += data.count
             return state.active && state.session != nil
         }
@@ -230,9 +244,10 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
                   let session = state.session,
                   !state.pendingAudio.isEmpty else { return nil }
             let frame = state.pendingAudio.removeFirst()
-            state.pendingBytes -= frame.count
+            state.pendingBytes -= frame.data.count
             state.sendInFlight = true
-            return (session, frame)
+            if state.sessionAudioAnchor == nil { state.sessionAudioAnchor = frame.capturedAt }
+            return (session, frame.data)
         }
     }
 }
@@ -256,6 +271,9 @@ public final class LiveStreamingController {
 
     // Thread-safe reference for audio callback (runs off MainActor)
     private let audioSessionRef = LiveStreamingAudioSessionRef()
+    /// Called with the seconds from when the end of a final's audio was
+    /// captured to when that final arrived.
+    public var onFinalLatency: ((Double) -> Void)?
     /// Longest stop() waits for captured audio to reach the provider.
     private static let stopDrainTimeout: Duration = .seconds(1)
 
@@ -783,6 +801,7 @@ public final class LiveStreamingController {
             }
 
         case .finalResult(let result):
+            recordFinalLatency(result)
             observabilityEvent(
                 "event_final",
                 level: .debug,
@@ -1051,6 +1070,21 @@ public final class LiveStreamingController {
                 }
             }
         }
+    }
+
+    /// Reports the time from when the end of the final's audio was captured to
+    /// now. Finals without audio timing (duration 0) are skipped, not guessed.
+    private func recordFinalLatency(_ result: TranscriptionResult) {
+        guard result.duration > 0, let anchor = audioSessionRef.sessionAudioAnchor else {
+            observabilityEvent("final_latency_unavailable", level: .debug)
+            return
+        }
+        let audioEnd = anchor + .milliseconds(Int64(((result.start + result.duration) * 1000).rounded()))
+        let elapsed = ContinuousClock.now - audioEnd
+        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        guard seconds >= 0 else { return }
+        observabilityEvent("final_latency", level: .debug, metadata: ["seconds": String(format: "%.3f", seconds)])
+        onFinalLatency?(seconds)
     }
 
     private func transcriptText(from event: TranscriptionEvent) -> String {
