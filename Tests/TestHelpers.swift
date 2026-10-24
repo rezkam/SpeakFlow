@@ -148,56 +148,75 @@ func hitOAuthCallback(port: UInt16, query: String) async throws -> Int {
 
 /// Sends a raw HTTP callback in two writes to simulate packet fragmentation.
 /// Used to validate that OAuthCallbackServer handles partial request reads.
+///
+/// The blocking socket work runs on its own thread, not the cooperative pool:
+/// the server's accept loop is a Task on that pool, and under full-suite load
+/// a blocked pool thread could keep it from ever accepting, hanging the run.
 func hitOAuthCallbackFragmented(port: UInt16, query: String, splitAt: Int) async throws -> Int {
-    try await Task.detached(priority: .userInitiated) {
-        let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else { throw URLError(.cannotCreateFile) }
-        defer { Darwin.close(sock) }
+    try await withCheckedThrowingContinuation { continuation in
+        let thread = Thread {
+            continuation.resume(with: Result {
+                try sendFragmentedOAuthCallback(port: port, query: query, splitAt: splitAt)
+            })
+        }
+        thread.name = "OAuthTestClient"
+        thread.start()
+    }
+}
 
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = port.bigEndian
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+private func sendFragmentedOAuthCallback(port: UInt16, query: String, splitAt: Int) throws -> Int {
+    let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+    guard sock >= 0 else { throw URLError(.cannotCreateFile) }
+    defer { Darwin.close(sock) }
 
-        // Retry connect briefly while server accept loop comes up.
-        var connected = false
-        for _ in 0..<20 {
-            let result = withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
+    // Bound every blocking call so a missing server fails the test instead of hanging it.
+    var ioTimeout = timeval(tv_sec: 10, tv_usec: 0)
+    _ = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &ioTimeout, socklen_t(MemoryLayout<timeval>.size))
+    _ = setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &ioTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+    // Retry connect briefly while server accept loop comes up.
+    var connected = false
+    for _ in 0..<20 {
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
-            if result == 0 {
-                connected = true
-                break
-            }
-            usleep(50_000)
         }
-        guard connected else { throw URLError(.cannotConnectToHost) }
+        if result == 0 {
+            connected = true
+            break
+        }
+        usleep(50_000)
+    }
+    guard connected else { throw URLError(.cannotConnectToHost) }
 
-        let request = "GET /auth/callback?\(query) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\n\r\n"
-        let bytes = Array(request.utf8)
-        let split = max(1, min(splitAt, bytes.count - 1))
+    let request = "GET /auth/callback?\(query) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\n\r\n"
+    let bytes = Array(request.utf8)
+    let split = max(1, min(splitAt, bytes.count - 1))
 
-        _ = bytes[..<split].withUnsafeBytes { ptr in
-            Darwin.write(sock, ptr.baseAddress, split)
-        }
-        usleep(20_000)
-        _ = bytes[split...].withUnsafeBytes { ptr in
-            Darwin.write(sock, ptr.baseAddress, bytes.count - split)
-        }
+    _ = bytes[..<split].withUnsafeBytes { ptr in
+        Darwin.write(sock, ptr.baseAddress, split)
+    }
+    usleep(20_000)
+    _ = bytes[split...].withUnsafeBytes { ptr in
+        Darwin.write(sock, ptr.baseAddress, bytes.count - split)
+    }
 
-        var response = [UInt8](repeating: 0, count: 512)
-        let n = Darwin.read(sock, &response, response.count)
-        guard n > 0,
-              let text = String(bytes: response.prefix(n), encoding: .utf8),
-              let firstLine = text.split(separator: "\r\n").first,
-              let statusToken = firstLine.split(separator: " ").dropFirst().first,
-              let status = Int(statusToken) else {
-            return -1
-        }
-        return status
-    }.value
+    var response = [UInt8](repeating: 0, count: 512)
+    let n = Darwin.read(sock, &response, response.count)
+    guard n > 0,
+          let text = String(bytes: response.prefix(n), encoding: .utf8),
+          let firstLine = text.split(separator: "\r\n").first,
+          let statusToken = firstLine.split(separator: " ").dropFirst().first,
+          let status = Int(statusToken) else {
+        return -1
+    }
+    return status
 }
 
 /// Opens a localhost OAuth callback socket and sends a partial HTTP request without
