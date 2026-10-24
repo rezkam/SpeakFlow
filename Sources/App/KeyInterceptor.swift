@@ -358,6 +358,17 @@ final class KeyInterceptor: KeyIntercepting {
     private nonisolated func handleKeyEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         guard Self.isInterceptedKey(keyCode) else { return Unmanaged.passRetained(event) }
+        // Shift/Option/Command/Control+Enter mean something else to the app
+        // (newline, alternate submit), so they are never turned into a plain
+        // submit and do not consume the one-shot token. Same for Escape.
+        guard event.flags.intersection(Self.commandModifiers).isEmpty else {
+            HotkeyDiagnostics.record(
+                "key_interceptor_key_passed_modified",
+                metadata: Self.keyMetadata(keyCode: keyCode, targetPid: state.withLockUnchecked { $0.targetPid })
+                    .merging(["flags": String(event.flags.rawValue)]) { _, new in new }
+            )
+            return Unmanaged.passRetained(event)
+        }
 
         let (isActive, targetPid, targetBundle) = state.withLockUnchecked {
             ($0.isActive, $0.targetPid, $0.targetBundleIdentifier)
@@ -537,6 +548,10 @@ final class KeyInterceptor: KeyIntercepting {
         return pid
     }
 
+    private nonisolated static let commandModifiers: CGEventFlags = [
+        .maskShift, .maskAlternate, .maskCommand, .maskControl
+    ]
+
     private nonisolated static func isInterceptedKey(_ keyCode: Int64) -> Bool {
         keyCode == 53 || keyCode == 36 || keyCode == 76
     }
@@ -592,12 +607,13 @@ extension KeyInterceptor {
     }
 
     // swiftlint:disable:next identifier_name
-    nonisolated func _testHandleKeyEventForTests(keyCode: CGKeyCode) -> Bool {
+    nonisolated func _testHandleKeyEventForTests(keyCode: CGKeyCode, flags: CGEventFlags = []) -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) else {
             return false
         }
         event.type = .keyDown
+        event.flags = flags
         let result = handleKeyEvent(event: event)
         if let result {
             result.release()

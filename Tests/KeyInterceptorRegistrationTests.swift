@@ -261,4 +261,35 @@ struct KeyInterceptorRegistrationTests {
         #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53), "Escape in another app must pass through")
         #expect(interceptor._testIsEnterCaptureArmed, "A passed-through Enter must not consume the token")
     }
+
+    @MainActor @Test(arguments: [
+        CGEventFlags.maskShift, .maskAlternate, .maskCommand, .maskControl
+    ])
+    func modifiedEnterAndEscapePassThroughUntouched(modifier: CGEventFlags) {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 0)
+
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36, flags: modifier),
+                "Modified Enter is a different command (newline, alternate submit) and must reach the app")
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 76, flags: [modifier, .maskNumericPad]),
+                "Modified keypad Enter must reach the app")
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53, flags: modifier),
+                "Modified Escape must reach the app")
+        #expect(interceptor._testIsEnterCaptureArmed, "A modified Enter must not consume the submit token")
+    }
+
+    @MainActor @Test
+    func plainEnterIsStillCapturedWithNonCommandFlags() {
+        let fake = FakeEventTapDriver()
+        let interceptor = KeyInterceptor(eventTapDriver: fake.driver, isSecureInputEnabled: { false })
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 0)
+
+        // Caps Lock and the keypad/fn flags do not change what Enter means.
+        #expect(interceptor._testHandleKeyEventForTests(
+            keyCode: 76, flags: [.maskAlphaShift, .maskNumericPad, .maskSecondaryFn]
+        ), "Keypad Enter with only non-command flags must still submit")
+    }
 }
