@@ -1144,11 +1144,12 @@ struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
         recorder._testInjectSessionController(session)
 
         let vad = VADProcessor(config: .default)
-        // One scripted "speech" frame fires speechStart on the first VAD sub-chunk;
-        // once the script is exhausted MockVADBackend falls back to .silence(),
-        // which fires speechEnd on the very next sub-chunk (still within this one
-        // processQueuedSamples() call, since the audio was already appended in full).
-        await vad._testInjectBackend(MockVADBackend([.speech()]))
+        // Five scripted "speech" frames (the 0.25 s minimum speech duration)
+        // confirm speechStart; once the script is exhausted MockVADBackend falls
+        // back to .silence(), which fires speechEnd on the very next sub-chunk
+        // (still within this one processQueuedSamples() call, since the audio was
+        // already appended in full).
+        await vad._testInjectBackend(MockVADBackend(repeating: .speech(), count: 5))
         recorder._testInjectVADProcessor(vad)
 
         var receivedChunks: [AudioChunk] = []

@@ -124,6 +124,8 @@ struct VolumeGateRollbackTests {
         config.volumeGateEnabled = true
         config.minVolumeForSpeech = 0.1
         config.volumeSmoothingFactor = 1.0  // no smoothing
+        // Isolate the volume gate from the minimum speech duration hold.
+        config.minSpeechDuration = 0
 
         let frames: [VADFrame] = [
             .speech(0.95, rms: 0.01),  // high prob, low vol → suppressed
@@ -185,6 +187,8 @@ struct VolumeGateRollbackTests {
         config.volumeGateEnabled = true
         config.minVolumeForSpeech = 0.1
         config.volumeSmoothingFactor = 1.0
+        // Isolate the volume gate from the minimum speech duration hold.
+        config.minSpeechDuration = 0
 
         let frames: [VADFrame] = [
             .speech(0.95, rms: 0.5),    // speechStart (passes gate)
@@ -214,6 +218,8 @@ struct VolumeGateRollbackTests {
         config.volumeGateEnabled = true
         config.minVolumeForSpeech = 0.1
         config.volumeSmoothingFactor = 1.0
+        // Isolate the volume gate from the minimum speech duration hold.
+        config.minSpeechDuration = 0
 
         let frames: [VADFrame] = [
             .speech(0.95, rms: 0.01),  // suppressed
@@ -575,10 +581,10 @@ struct VADInputChunkingTests {
     /// Speech detection must work even when split across chunk boundaries.
     @Test("Speech detected in second chunk after silence in first")
     func speechInSecondChunk() async throws {
-        let frames: [VADFrame] = [
-            .silence(0.05, rms: 0.001),  // first chunk: silence
-            .speech(0.95, rms: 0.05),    // second chunk: speech starts
-        ]
+        // First chunk: silence. Then speech sustained for the 0.25 s minimum
+        // speech duration (5 mock frames), starting in the second chunk.
+        let frames: [VADFrame] = [.silence(0.05, rms: 0.001)]
+            + Array(repeating: .speech(0.95, rms: 0.05), count: 5)
 
         let backend = MockVADBackend(frames)
         let vad = VADProcessor(config: .default)
@@ -587,7 +593,8 @@ struct VADInputChunkingTests {
         let r1 = try await vad.processChunk([Float](repeating: 0, count: 2048))
         #expect(r1.event == nil, "First chunk is silence, no event expected")
 
-        let r2 = try await vad.processChunk([Float](repeating: 0, count: 2048))
+        var r2 = try await vad.processChunk([Float](repeating: 0, count: 2048))
+        for _ in 0..<4 { r2 = try await vad.processChunk([Float](repeating: 0, count: 2048)) }
         if case .started = r2.event {
             // expected — speech detected in second chunk
         } else {
