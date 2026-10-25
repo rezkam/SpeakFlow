@@ -25,8 +25,8 @@ struct RegressionScriptTests {
     }
     #endif
 
-    @Test(arguments: ["scripts/test-chunk-wrapper.sh", "scripts/test-noise-wrapper.sh", "scripts/test-modern-e2e-wrappers.sh"])
-    func legacyWrappersRequireExecutedAssertionsAndSuccessfulExit(script: String) throws {
+    @Test(arguments: ["scripts/test-chunk-wrapper.sh", "scripts/test-noise-wrapper.sh", "scripts/test-modern-e2e-wrappers.sh"], [false, true])
+    func legacyWrappersRequireExecutedAssertionsAndSuccessfulExit(script: String, nativeTemporaryFiles: Bool) throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let pipe = Pipe()
         let process = Process()
@@ -35,6 +35,15 @@ struct RegressionScriptTests {
         process.currentDirectoryURL = root
         process.standardOutput = pipe
         process.standardError = pipe
+        let fixture = root.appendingPathComponent(".agents/tests/native-temp-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        if nativeTemporaryFiles {
+            try writeExecutable(named: "mktemp", in: fixture, contents: "#!/bin/sh\nexec /usr/bin/mktemp \"$@\"\n")
+            var environment = ProcessInfo.processInfo.environment
+            environment["PATH"] = "\(fixture.path):\(environment["PATH"] ?? "/usr/bin:/bin")"
+            process.environment = environment
+        }
         try process.run()
         let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         process.waitUntilExit()
@@ -80,11 +89,21 @@ struct RegressionScriptTests {
         #expect(result.terminationStatus == 0, "\(result.output)")
     }
 
+    @Test func regressionRunnerSupportsNativeMacOSTemporaryFiles() throws {
+        let result = try runRegressionScript(
+            vadIntegrationWasExplicitlySkipped: false, vadPlatformAvailable: true,
+            nativeTemporaryFiles: true
+        )
+        #expect(result.terminationStatus == 0, "Native mktemp must not collide across suites: \(result.output)")
+        #expect(result.output.contains("Status: ALL OK"))
+    }
+
     private func runRegressionScript(
         vadIntegrationWasExplicitlySkipped: Bool,
         testProcessFails: Bool = false,
         vadPlatformAvailable: Bool = false,
-        suppressSharedDiagnostics: Bool = false
+        suppressSharedDiagnostics: Bool = false,
+        nativeTemporaryFiles: Bool = false
     ) throws -> (terminationStatus: Int32, output: String) {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -171,7 +190,12 @@ struct RegressionScriptTests {
         environment["EXPECTED_MODEL_CACHE_ROOT"] = modelRoot
         environment["SPEAKFLOW_RUN_LIVE_MISTRAL"] = "1"
         environment["SPEAKFLOW_REGRESSION_STRESS_RUNS"] = "1"
-        environment["SPEAKFLOW_REGRESSION_LOG_FILE"] = fixtureDirectory.appendingPathComponent("regression.log").path
+        if nativeTemporaryFiles {
+            try writeExecutable(named: "mktemp", in: fixtureDirectory, contents: "#!/bin/sh\nexec /usr/bin/mktemp \"$@\"\n")
+            environment.removeValue(forKey: "SPEAKFLOW_REGRESSION_LOG_FILE")
+        } else {
+            environment["SPEAKFLOW_REGRESSION_LOG_FILE"] = fixtureDirectory.appendingPathComponent("regression.log").path
+        }
         let observabilityDirectory = fixtureDirectory.appendingPathComponent("observability")
         environment["SPEAKFLOW_OBSERVABILITY_DIR"] = observabilityDirectory.path
         environment["SPEAKFLOW_REGRESSION_SUPPRESS_DIAGNOSTICS"] = suppressSharedDiagnostics ? "1" : "0"
@@ -182,7 +206,14 @@ struct RegressionScriptTests {
         try process.run()
         process.waitUntilExit()
         let output = String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        let log = try String(contentsOf: fixtureDirectory.appendingPathComponent("regression.log"), encoding: .utf8)
+        let logURL: URL
+        if nativeTemporaryFiles {
+            let logLine = try #require(output.split(separator: "\n").first { $0.hasPrefix("Log: ") })
+            logURL = URL(fileURLWithPath: String(logLine.dropFirst(5)))
+        } else {
+            logURL = fixtureDirectory.appendingPathComponent("regression.log")
+        }
+        let log = try String(contentsOf: logURL, encoding: .utf8)
         #expect(!log.contains("/Users/example-user"), "Diagnostics must be redacted before persistence")
         #expect(log.contains("<HOME>/fixture.swift"))
         #expect(!log.contains("synthetic-host-context"))
