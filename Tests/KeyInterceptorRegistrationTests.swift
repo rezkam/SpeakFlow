@@ -264,7 +264,7 @@ struct KeyInterceptorRegistrationTests {
     }
 
     @MainActor @Test
-    func focusInAnUnrelatedAppPassesKeysThrough() {
+    func focusInAnUnrelatedAppPassesEnterThrough() {
         let (interceptor, _) = makeFocusInterceptor(
             focusedPid: 99,
             bundles: [42: "com.vendor.Editor", 99: "com.other.Chat"]
@@ -273,7 +273,6 @@ struct KeyInterceptorRegistrationTests {
         interceptor.start(targetPid: 42)
 
         #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36), "Enter in another app must pass through")
-        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53), "Escape in another app must pass through")
         #expect(interceptor._testIsEnterCaptureArmed, "A passed-through Enter must not consume the token")
     }
 
@@ -466,14 +465,42 @@ struct KeyInterceptorRegistrationTests {
     }
 
     @MainActor @Test
-    func noTargetAppMeansNothingIsIntercepted() {
+    func noTargetAppMeansEnterIsNotIntercepted() {
         let interceptor = KeyInterceptor(eventTapDriver: FakeEventTapDriver().driver, secureInputOwner: { nil })
         defer { interceptor.stop() }
         interceptor.start(targetPid: 0)
 
         #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36),
                 "Without a target app, Enter must reach whatever app has focus")
-        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53),
-                "Without a target app, Escape must reach whatever app has focus")
+        // Escape still cancels: it never needs a destination.
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53))
+    }
+
+    /// Escape cancels the active recording from whichever app has focus:
+    /// the user may have switched apps and still wants to stop dictation.
+    /// Enter keeps the focus rule, because submitting into another app is harmful.
+    @MainActor @Test
+    func escapeCancelsFromAnyAppWhileEnterKeepsTheFocusRule() async throws {
+        let interceptor = KeyInterceptor(
+            eventTapDriver: FakeEventTapDriver().driver,
+            focusQuery: { .init(focusedPid: 938, focusedAppPid: 938, source: "test") },
+            bundleIdentifierLookup: { [42: "com.mitchellh.ghostty", 938: "com.google.Chrome"][$0] },
+            secureInputOwner: { nil }
+        )
+        var escapes = 0
+        var enters = 0
+        interceptor.onEscapePressed = { escapes += 1 }
+        interceptor.onEnterPressed = { enters += 1 }
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 42)
+
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36), "Enter in another app still reaches that app")
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53), "Escape in another app cancels the recording")
+        try await waitUntil { escapes == 1 }
+
+        #expect(escapes == 1)
+        #expect(enters == 0)
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53, flags: .maskCommand),
+                "Modified Escape still passes through")
     }
 }
