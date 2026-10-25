@@ -2,6 +2,26 @@ import Foundation
 import Testing
 @testable import SpeakFlowCore
 
+actor MockStreamingHandshakeGate {
+    private(set) var entered = false
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation {
+            continuation = $0
+            entered = true
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 /// A test-only streaming provider that returns a pre-configured MockStreamingSession.
 /// Set `mockSession` before calling `startSession()` to control what session is returned.
 ///
@@ -27,11 +47,15 @@ final class MockStreamingProvider: StreamingTranscriptionProvider, @unchecked Se
     /// Used to prove local capture does not wait for provider readiness.
     var startDelay: TimeInterval = 0
 
+    /// Explicitly hold readiness without relying on elapsed wall time.
+    var beforeStartSessionReturns: (@Sendable () async -> Void)?
+
     /// How many times `startSession()` was called.
     var startSessionCallCount = 0
 
     func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
         startSessionCallCount += 1
+        if let beforeStartSessionReturns { await beforeStartSessionReturns() }
         if startDelay > 0 {
             try await Task.sleep(for: .seconds(startDelay))
         }
