@@ -68,7 +68,7 @@ e2e_run_asserted_case() {
     local label="$1" output_file rc=0 verdict
     shift
     mkdir -p .agents/e2e
-    output_file="$(mktemp .agents/e2e/case.XXXXXX.log)"
+    output_file="$(mktemp .agents/e2e/case.log.XXXXXX)"
     e2e_execute_runner 2>&1 |
         redact_diagnostics > "$output_file" || rc=$?
     if [[ "$rc" != 0 ]]; then

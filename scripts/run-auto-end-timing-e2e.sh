@@ -41,7 +41,7 @@ run_case() {
     slug="$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
     local output_file
     mkdir -p .agents/e2e
-    output_file="$(mktemp ".agents/e2e/autoend-${slug}.XXXXXX.log")"
+    output_file="$(mktemp ".agents/e2e/autoend-${slug}.log.XXXXXX")"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

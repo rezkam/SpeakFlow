@@ -52,7 +52,7 @@ run_case() {
     slug="$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
     local output_file
     mkdir -p .agents/e2e
-    output_file="$(mktemp ".agents/e2e/chunk-${slug}.XXXXXX.log")"
+    output_file="$(mktemp ".agents/e2e/chunk-${slug}.log.XXXXXX")"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -126,7 +126,8 @@ run_case "30s chunks with 65s speech" 30 100 "$LONG_TEXT_65S" 170 2
 
 # 3) Silence with skipSilentChunks=true → expect 0 chunks (noise rejection)
 # Generate a mandatory ten-second PCM fixture without external audio tools.
-SILENCE_WAV="$(mktemp .agents/e2e/silence.XXXXXX.wav)"
+SILENCE_DIRECTORY="$(mktemp -d .agents/e2e/silence.XXXXXX)"
+SILENCE_WAV="$SILENCE_DIRECTORY/silence.wav"
 perl -e 'print pack("a4Va4a4VvvVVvva4V", "RIFF", 320036, "WAVE", "fmt ", 16, 1, 1, 16000, 32000, 2, 16, "data", 320000); print "\0" x 320000;' > "$SILENCE_WAV"
 [[ -s "$SILENCE_WAV" ]] || { echo 'FAIL: silence fixture was not generated'; exit 1; }
 run_case "Silence skip (skipSilentChunks)" 30 25 "" 170 0 true

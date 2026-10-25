@@ -21,7 +21,7 @@ source "$ROOT_DIR/scripts/lib/redact-diagnostics.sh"
 run_redacted() {
   "$@" 2>&1 | redact_diagnostics
 }
-LOG_FILE="${SPEAKFLOW_REGRESSION_LOG_FILE:-$(mktemp "$ARTIFACT_DIR/core.XXXXXX.log")}"
+LOG_FILE="${SPEAKFLOW_REGRESSION_LOG_FILE:-$(mktemp "$ARTIFACT_DIR/core.log.XXXXXX")}"
 : > "$LOG_FILE"
 
 if [[ "${SPEAKFLOW_REGRESSION_SUPPRESS_DIAGNOSTICS:-0}" == "1" ]]; then
@@ -137,7 +137,7 @@ run_vad_model_prefetch() {
   fi
 
   local prefetch_log
-  prefetch_log="$(mktemp "$ARTIFACT_DIR/vad-prefetch.XXXXXX.log")"
+  prefetch_log="$(mktemp "$ARTIFACT_DIR/vad-prefetch.log.XXXXXX")"
   local prefetch_cmd
   prefetch_cmd=(
     env
@@ -194,7 +194,7 @@ run_vad_model_prefetch
 run_suite() {
   local suite="$1"
   local suite_log
-  suite_log="$(mktemp "$ARTIFACT_DIR/suite.XXXXXX.log")"
+  suite_log="$(mktemp "$ARTIFACT_DIR/suite.log.XXXXXX")"
   local test_cmd
   test_cmd=(
     env
