@@ -106,6 +106,7 @@ REGRESSION_SUITES=(
   "ObservabilitySettingsPropagationTests"
   "LiveE2EContractTests"
   "LiveE2EActivityTests"
+  "LiveE2EFinalizationTests"
   "HTTPDataProviderTestabilityTests"
   "RecordingControllerKeyInterceptionLifecycleTests"
   "SettingsStoredZeroTests"

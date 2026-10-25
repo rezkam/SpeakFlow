@@ -830,7 +830,12 @@ struct SpeakFlowLiveE2E {
         static func fail(_ m: String) -> ScenarioResult { .init(success: false, error: m) }
     }
 
-    static func runScenario(scenario: TestScenario, fixture: AudioFixture) async -> ScenarioResult {
+    static func runScenario(
+        scenario: TestScenario,
+        fixture: AudioFixture,
+        beforeStopForTesting: (@MainActor (StreamingRecorder) async -> Void)? = nil,
+        beforeChunkDeliveryForTesting: (@MainActor () async -> Void)? = nil
+    ) async -> ScenarioResult {
         // Configure settings
         let settings = Settings.shared
         let savedChunk = settings.chunkDuration
@@ -865,6 +870,7 @@ struct SpeakFlowLiveE2E {
 
         let recorder = StreamingRecorder()
         recorder.onChunkReady = { chunk in
+            await beforeChunkDeliveryForTesting?()
             chunksSubmitted += 1
             let dur = String(format: "%.1f", chunk.durationSeconds)
             let sp  = String(format: "%.0f", chunk.speechProbability * 100)
@@ -917,6 +923,7 @@ struct SpeakFlowLiveE2E {
             let totalWait = fixture.durationSeconds + scenario.trailingSeconds
             print("    ⏱ Feeding \(String(format: "%.1f", fixture.durationSeconds))s + \(String(format: "%.0f", scenario.trailingSeconds))s trailing…")
             try? await Task.sleep(nanoseconds: UInt64(totalWait * 1_000_000_000))
+            await beforeStopForTesting?(recorder)
             recorder.stop()
 
             // ── Validate auto-end did NOT fire (if expected) ─────────
@@ -926,8 +933,8 @@ struct SpeakFlowLiveE2E {
             }
         }
 
-        // Grace period for stop()'s async final-chunk Task to fire
-        try? await Task.sleep(for: .seconds(2))
+        // Stop completion includes final-chunk delivery, not just scheduling it.
+        await recorder.waitForStopCompletion()
 
         if needsTranscription {
             // Drain transcription responses (up to 30 s)
@@ -1019,7 +1026,8 @@ struct SpeakFlowLiveE2E {
 
     static func observeConfigured(
         _ config: LiveE2EScenarioConfig,
-        fixture: AudioFixture
+        fixture: AudioFixture,
+        beforeStopForTesting: (@MainActor (StreamingRecorder) async -> Void)? = nil
     ) async -> LiveE2EObservation {
         let settings = Settings.shared
         let savedChunk = settings.chunkDuration
@@ -1112,6 +1120,7 @@ struct SpeakFlowLiveE2E {
         } else {
             let record = min(config.recordSeconds ?? (fixture.durationSeconds + 3), limit)
             try? await Task.sleep(for: .seconds(record))
+            await beforeStopForTesting?(recorder)
             recorder.stop()
         }
         await recorder.waitForStopCompletion()
