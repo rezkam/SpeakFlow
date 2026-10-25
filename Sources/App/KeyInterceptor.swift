@@ -375,7 +375,11 @@ final class KeyInterceptor: KeyIntercepting {
             return Unmanaged.passRetained(event)
         }
 
-        guard isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetBundle: targetBundle) else {
+        // Escape cancels the active recording from whichever app has focus, so
+        // dictation can be stopped after switching apps. Enter only submits in
+        // the recording's own app: submitting into another app would be harmful.
+        if keyCode != 53,
+           !isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetBundle: targetBundle) {
             return Unmanaged.passRetained(event)
         }
 
@@ -415,9 +419,9 @@ final class KeyInterceptor: KeyIntercepting {
         }
     }
 
-    /// Only intercept Escape/Enter when the target app has keyboard focus.
-    /// If the user is in Spotlight, a password dialog, or another app,
-    /// the key passes through so it acts on that UI instead.
+    /// Only intercept Enter when the target app has keyboard focus. If the user
+    /// is in Spotlight, a password dialog, or another app, Enter passes through
+    /// so it acts on that UI instead.
     private nonisolated func isFocusInTarget(keyCode: Int64, targetPid: pid_t, targetBundle: String?) -> Bool {
         // No target app: there is no recording field to protect, so the key
         // belongs to whatever has focus.
