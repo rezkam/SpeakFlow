@@ -11,12 +11,28 @@ if mkdir -p "$ROOT_DIR/.build" 2>/dev/null; then
   mkdir -p "$SWIFTPM_MODULECACHE_OVERRIDE" "$CLANG_MODULE_CACHE_PATH" 2>/dev/null || true
 fi
 
-LOG_FILE="${SPEAKFLOW_REGRESSION_LOG_FILE:-$(mktemp /tmp/speakflow-regression-core-XXXXXX)}"
+ARTIFACT_DIR="$ROOT_DIR/.agents/regression"
+mkdir -p "$ARTIFACT_DIR"
+export SPEAKFLOW_ISOLATED_STORAGE=1
+# Core regression is offline except for the explicit model prefetch below.
+unset SPEAKFLOW_RUN_LIVE_MISTRAL
+export SPEAKFLOW_VAD_MODEL_CACHE_ROOT="${SPEAKFLOW_VAD_MODEL_CACHE_ROOT:-$ARTIFACT_DIR/vad-models}"
+source "$ROOT_DIR/scripts/lib/redact-diagnostics.sh"
+run_redacted() {
+  "$@" 2>&1 | redact_diagnostics
+}
+LOG_FILE="${SPEAKFLOW_REGRESSION_LOG_FILE:-$(mktemp "$ARTIFACT_DIR/core.XXXXXX.log")}"
 : > "$LOG_FILE"
 
-OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-regression-$(date +%Y%m%d%H%M%S)-$$}"
-OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-/tmp/speakflow-observability-tests/$OBS_PROFILE}"
-mkdir -p "$OBS_DIR"
+if [[ "${SPEAKFLOW_REGRESSION_SUPPRESS_DIAGNOSTICS:-0}" == "1" ]]; then
+  # Suppress shared diagnostic persistence only. Every suite and model gate still runs.
+  OBS_PROFILE="regression-private"
+  OBS_DIR="/dev/null/speakflow-observability"
+else
+  OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-regression-$(date +%Y%m%d%H%M%S)-$$}"
+  OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-$ARTIFACT_DIR/speakflow-observability/$OBS_PROFILE}"
+  mkdir -p "$OBS_DIR"
+fi
 
 SKIP_BUILD="${SPEAKFLOW_REGRESSION_SKIP_BUILD:-0}"
 STRESS_RUNS="${SPEAKFLOW_REGRESSION_STRESS_RUNS:-3}"
@@ -43,6 +59,8 @@ REGRESSION_SUITES=(
   "SoundEffectTests"
   "SessionControllerTests"
   "SettingsAutoEndTests"
+  "SettingsStoredZeroTests"
+  "SettingsRelaunchTests"
   "ThinkingPauseDetectorTests"
   "VADStateMachineTests"
   "VADIntegrationTests"
@@ -68,6 +86,7 @@ REGRESSION_SUITES=(
   "TextInserterFieldIdentityTests"
   "RecordingControllerTargetCaptureTests"
   "RecordingControllerSessionIdentityTests"
+  "RecordingCrossModeTests"
   "RecordingControllerStreamingLatencyTests"
   "TranscriptionQueueSessionDeliveryTests"
   "StreamingRecorderCancelDiscardTests"
@@ -82,8 +101,11 @@ REGRESSION_SUITES=(
   "CredentialStorageTests"
   "AuthControllerCredentialFailureTests"
   "RuntimeIsolationTests"
+  "RecorderModelIsolationTests"
+  "RecordingTimerRunLoopTests"
   "ObservabilitySettingsPropagationTests"
   "LiveE2EContractTests"
+  "LiveE2EActivityTests"
   "HTTPDataProviderTestabilityTests"
   "RecordingControllerKeyInterceptionLifecycleTests"
   "SettingsStoredZeroTests"
@@ -115,7 +137,7 @@ run_vad_model_prefetch() {
   fi
 
   local prefetch_log
-  prefetch_log="$(mktemp /tmp/speakflow-vad-prefetch-XXXXXX)"
+  prefetch_log="$(mktemp "$ARTIFACT_DIR/vad-prefetch.XXXXXX.log")"
   local prefetch_cmd
   prefetch_cmd=(
     env
@@ -124,7 +146,6 @@ run_vad_model_prefetch() {
     SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE"
     SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
     SPEAKFLOW_PREFETCH_VAD_MODEL=1
-    SPEAKFLOW_VAD_MODEL_CACHE_ROOT=""
     swift
     test
     --filter
@@ -138,7 +159,7 @@ run_vad_model_prefetch() {
   fi
 
   echo "VAD model........ prefetch Silero dependency"
-  if ! "${prefetch_cmd[@]}" >"$prefetch_log" 2>&1; then
+  if ! run_redacted "${prefetch_cmd[@]}" >"$prefetch_log"; then
     cat "$prefetch_log" >>"$LOG_FILE"
     echo "FAILED: could not provision the Silero model required by VADIntegrationTests"
     echo "See log: $LOG_FILE"
@@ -165,7 +186,7 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   if [[ -n "$SCRATCH_PATH" ]]; then
     build_cmd+=(--scratch-path "$SCRATCH_PATH")
   fi
-  "${build_cmd[@]}" >>"$LOG_FILE" 2>&1
+  run_redacted "${build_cmd[@]}" >>"$LOG_FILE"
 fi
 
 run_vad_model_prefetch
@@ -173,7 +194,7 @@ run_vad_model_prefetch
 run_suite() {
   local suite="$1"
   local suite_log
-  suite_log="$(mktemp /tmp/speakflow-reg-suite-XXXXXX)"
+  suite_log="$(mktemp "$ARTIFACT_DIR/suite.XXXXXX.log")"
   local test_cmd
   test_cmd=(
     env
@@ -199,7 +220,7 @@ run_suite() {
   fi
 
   printf "%-18s %s\n" "Suite............" "$suite"
-  if ! "${test_cmd[@]}" >"$suite_log" 2>&1; then
+  if ! run_redacted "${test_cmd[@]}" >"$suite_log"; then
     cat "$suite_log" >>"$LOG_FILE"
     echo "FAILED: $suite"
     echo "See log: $LOG_FILE"
@@ -281,7 +302,7 @@ for ((i = 1; i <= STRESS_RUNS; i++)); do
     stress_cmd+=(--scratch-path "$SCRATCH_PATH")
   fi
 
-  if ! "${stress_cmd[@]}" >>"$LOG_FILE" 2>&1; then
+  if ! run_redacted "${stress_cmd[@]}" >>"$LOG_FILE"; then
     echo "FAILED: EnterSubmissionContractTests stress run #$i"
     echo "See log: $LOG_FILE"
     exit 1

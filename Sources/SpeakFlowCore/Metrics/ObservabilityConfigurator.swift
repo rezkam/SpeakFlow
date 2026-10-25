@@ -5,8 +5,9 @@ import Foundation
 ///
 /// The store caches its configuration and every component writes through it
 /// (hotkey diagnostics included), so a settings change must reach the store
-/// as soon as it is made: turning diagnostics off has to stop writes then,
-/// not at the next recording or launch.
+/// without another recording or launch. Propagation is asynchronous: events
+/// accepted before the disabled configuration reaches the actor may persist.
+/// Await `waitUntilApplied()` for the persistence cutoff.
 @MainActor
 public final class ObservabilityConfigurator {
     public static let shared = ObservabilityConfigurator(store: .shared)
@@ -43,6 +44,8 @@ public final class ObservabilityConfigurator {
     }
 
     /// Waits until every configuration requested so far has been applied.
+    /// After a disabled configuration is applied, later events are rejected
+    /// until a subsequent enabled configuration is applied.
     public func waitUntilApplied() async {
         await tail?.value
     }

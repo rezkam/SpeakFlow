@@ -668,7 +668,7 @@ final class TextInserter: TextInserting {
     /// keystrokes will actually go. This catches system overlays like
     /// Spotlight, Notification Center, and password dialogs that steal
     /// keyboard focus without changing the frontmost application.
-    /// Falls back to `NSWorkspace.frontmostApplication` if the AX query fails.
+    /// Fails closed if Accessibility cannot prove the captured field owns focus.
     func isTargetAppFrontmost() -> Bool {
         guard targetPid != 0 else { return false }
 
@@ -682,8 +682,9 @@ final class TextInserter: TextInserting {
         // frontmost app, and some apps route UI through helper processes.
         let observation = focusObserver.map { $0(self) } ?? systemFocusObservation()
         guard let observation else {
-            // AX unavailable (permission not granted or no focused element).
-            return frontmostApplicationIsTarget()
+            // App identity alone cannot distinguish fields or system overlays.
+            lastFocusMismatch = "unknownField"
+            return false
         }
         return focusMatchesTarget(observation)
     }
@@ -971,9 +972,8 @@ extension TextInserter {
         let field: FieldIdentity
     }
 
-    /// Decides whether focus is still in the captured field. Conservative: a
-    /// field counts as different only on definite evidence, because a false
-    /// "different" pauses dictation the user expects to continue.
+    /// Authorizes input only with positive evidence of the captured field.
+    /// A shared window is not proof: it may contain multiple editable fields.
     nonisolated static func fieldIdentity(
         elementsEqual: Bool,
         capturedReportsFocused: CapturedFocusState?,
@@ -986,8 +986,7 @@ extension TextInserter {
         case .notFocused, .elementGone:
             return .different
         case .unknown, nil:
-            guard let windowsMatch else { return .unknown }
-            return windowsMatch ? .same : .different
+            return windowsMatch == false ? .different : .unknown
         }
     }
 
@@ -1038,14 +1037,8 @@ extension TextInserter {
         return unsafeDowncast(value, to: AXUIElement.self)
     }
 
-    /// Best-effort substitute when Accessibility cannot report keyboard focus.
-    private func frontmostApplicationIsTarget() -> Bool {
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
-        return frontmost.processIdentifier == targetPid
-    }
-
-    /// Focus must be in the target app (or one of its helpers) and, when
-    /// Accessibility can tell, in the captured field.
+    /// Focus must be in the target app (or one of its helpers) and positively
+    /// identified as the captured field.
     private func focusMatchesTarget(_ observation: FocusObservation) -> Bool {
         guard let focusedPid = observation.focusedPid else { return false }
         if focusedPid != targetPid {
@@ -1057,9 +1050,9 @@ extension TextInserter {
                 return false
             }
         }
-        // Same app, but another conversation, document, or field: pause.
-        guard observation.field != .different else {
-            lastFocusMismatch = "otherFieldInTargetApp"
+        // Same app is insufficient when field identity is different or unknown.
+        guard observation.field == .same else {
+            lastFocusMismatch = observation.field == .unknown ? "unknownField" : "otherFieldInTargetApp"
             return false
         }
         return true

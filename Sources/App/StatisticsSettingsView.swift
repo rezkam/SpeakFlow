@@ -5,7 +5,12 @@ import SpeakFlowCore
 struct StatisticsSettingsView: View {
     @Environment(\.statistics) private var stats
     @State private var showResetConfirm = false
-    @State private var recentSessions: [SessionMetrics] = []
+    @State private var history: StatisticsSessionHistory
+    private var recentSessions: [SessionMetrics] { history.sessions }
+
+    init(history: StatisticsSessionHistory? = nil) {
+        _history = State(initialValue: history ?? StatisticsSessionHistory())
+    }
 
     private let historicalProviderId = "historical-unknown-provider"
     private let unknownLanguageId = "unknown"
@@ -67,11 +72,8 @@ struct StatisticsSettingsView: View {
             HeatmapCard(days: dailyRecordings, isPartial: dailyRecordingsArePartial)
             footerBar
         }
-        .task {
-            recentSessions = await SessionMetricsStore.shared.recentCompletedSessions(
-                after: stats.lastResetDate,
-                limit: 200
-            )
+        .task(id: stats.lastResetDate) {
+            await history.refresh { stats.lastResetDate }
         }
     }
 
@@ -233,7 +235,7 @@ struct StatisticsSettingsView: View {
                 // does not keep showing pre-reset breakdowns while the view is
                 // still on screen. The `.task` re-runs the filtered fetch next
                 // time this view appears.
-                recentSessions = []
+                history.reset()
             }
             Button("Cancel", role: .cancel) {}
         } message: {

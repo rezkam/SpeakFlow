@@ -40,7 +40,8 @@ run_case() {
     local slug
     slug="$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
     local output_file
-    output_file="$(mktemp "/tmp/speakflow-accuracy-${slug}.XXXX.log")"
+    mkdir -p .agents/e2e
+    output_file="$(mktemp ".agents/e2e/accuracy-${slug}.XXXXXX.log")"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -50,6 +51,7 @@ run_case() {
 
     set +e
     (
+        e2e_prepare_scenario
         export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="$speak_text"
         export SPEAKFLOW_E2E_EXPECT_PHRASE="$expect_phrase"
         export SPEAKFLOW_E2E_AUTO_SPEAK_RATE="$speak_rate"
@@ -64,7 +66,8 @@ run_case() {
             export SPEAKFLOW_E2E_RECORD_SECONDS="$record_seconds"
         fi
 
-        swift run --disable-sandbox SpeakFlowLiveE2E
+        swift run --disable-sandbox SpeakFlowLiveE2E 2>&1 |
+            redact_diagnostics
     ) >"$output_file" 2>&1
     local rc=$?
     set -e

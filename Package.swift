@@ -7,8 +7,8 @@ let package = Package(
         .macOS("26.0")
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.5"),
-        .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.4.1"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.17.7"),
+        .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.4.3"),
     ],
     targets: [
         // Core library with testable business logic
@@ -58,6 +58,9 @@ let package = Package(
                 "SpeakFlowCore",
                 "SpeakFlow",
                 "LiveE2EKit",
+                "SpeakFlowLiveE2E",
+                "DeepgramE2E",
+                "DeepgramTest",
                 .product(name: "ConcurrencyExtras", package: "swift-concurrency-extras"),
             ],
             path: "Tests"

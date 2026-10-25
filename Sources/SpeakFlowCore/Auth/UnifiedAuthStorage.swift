@@ -77,6 +77,14 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
         lock.withLockUnchecked { _ in chatGPTGeneration }
     }
 
+    /// A new authorization supersedes older login exchanges and refreshes.
+    public func beginChatGPTAuthorization() -> UInt64 {
+        lock.withLockUnchecked { _ in
+            chatGPTGeneration &+= 1
+            return chatGPTGeneration
+        }
+    }
+
     public func saveChatGPTCredentials(_ credentials: OAuthCredentials, expectedGeneration: UInt64? = nil) throws {
         let iso8601 = ISO8601DateFormatter()
         iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -106,6 +114,14 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
             content["chatgpt"] = sectionDict
             try writeFileUnlocked(content)
             chatGPTGeneration &+= 1
+        }
+    }
+
+    /// Credentials and their mutation generation must originate in one locked read.
+    public func loadChatGPTCredentialSnapshot() -> (credentials: OAuthCredentials, generation: UInt64)? {
+        lock.withLockUnchecked { _ in
+            guard let credentials = loadChatGPTUnlocked() else { return nil }
+            return (credentials, chatGPTGeneration)
         }
     }
 

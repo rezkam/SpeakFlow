@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import SpeakFlowCore
+import LiveE2EKit
 
 @MainActor
 private final class TestStatistics: StatisticsProviding {
@@ -73,6 +74,25 @@ private actor StubTranscriptionService: TranscriptionServiceProviding {
     }
 }
 
+private actor HeldTranscriptionService: TranscriptionServiceProviding {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+    let fail: Bool
+
+    init(fail: Bool) { self.fail = fail }
+
+    func transcribe(audio: Data) async throws -> String {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started = true
+        }
+        if fail { throw TranscriptionError.httpError(statusCode: 500, body: "test failure") }
+        return "retired response"
+    }
+
+    func release() { continuation?.resume(); continuation = nil }
+}
+
 @Suite("Transcription cancellation behavior", .serialized)
 struct TranscriptionCancellationBehaviorTests {
     @MainActor
@@ -81,6 +101,117 @@ struct TranscriptionCancellationBehaviorTests {
             if await bridge.getPendingCount() == 0 { return }
             try? await Task.sleep(for: .milliseconds(25))
         }
+    }
+
+    @MainActor @Test
+    func e2eCompletionTimeoutCancelsRealPendingTranscription() async throws {
+        let service = HeldTranscriptionService(fail: false)
+        let transcription = Transcription(statistics: TestStatistics(), service: service)
+        let bridge = transcription.queueBridge
+        var delivered: [String] = []
+        var finished = false
+        bridge.onTextReady = { delivered.append($0) }
+        transcription.taskFinishedForTesting = { finished = true }
+        defer {
+            Task { await service.release() }
+            bridge.stopListening()
+            transcription.cancelAll()
+        }
+        let first = await bridge.nextSequence()
+        await bridge.submitResult(ticket: first, text: "hello world")
+        try await waitUntil { delivered == ["hello world"] }
+        try #require(delivered == ["hello world"])
+        let tail = await bridge.nextSequence()
+        transcription.transcribe(ticket: tail, chunk: AudioChunk(wavData: Data([0]), durationSeconds: 1))
+        try await waitUntilAsync { await service.started }
+        try #require(await service.started)
+        let completed = await LiveE2ECompletion.wait(
+            timeout: .zero, isIdle: { await bridge.isIdle() }, cancel: { transcription.cancelAll() }
+        )
+        #expect(!completed)
+        #expect(!bridge.accepts(tail), "Timeout must retire the actual pending delivery")
+        await service.release()
+        try await waitUntil { finished }
+        try #require(finished)
+        #expect(delivered == ["hello world"])
+    }
+
+    @MainActor @Test(arguments: [true, false], [true, false])
+    func retirementDuringMetricsWriteCannotAffectReplacement(cancel: Bool, fail: Bool) async throws {
+        let stats = TestStatistics()
+        let service = HeldTranscriptionService(fail: fail)
+        let metrics = SessionMetricsStore(storageURL: URL(fileURLWithPath: "/dev/null/test-metrics"))
+        let gate = AsyncStream<Void>.makeStream()
+        await metrics.setLatencyGateForTesting { for await _ in gate.stream {} }
+        let oldId = await metrics.startSession(providerId: "old-provider", mode: .batch)
+        let newId = await metrics.startSession(providerId: "new-provider", mode: .batch)
+        let transcription = Transcription(statistics: stats, service: service, metricsStore: metrics)
+        transcription.setMetricsSession(oldId)
+        let bridge = transcription.queueBridge
+        var finished = false
+        var errors = 0
+        var texts: [String] = []
+        transcription.taskFinishedForTesting = { finished = true }
+        bridge.onChunkError = { _ in errors += 1 }
+        bridge.onTextReady = { texts.append($0) }
+        defer {
+            gate.continuation.finish()
+            Task { await service.release() }
+            bridge.stopListening()
+            transcription.cancelAll()
+        }
+        let ticket = await bridge.nextSequence()
+        transcription.transcribe(ticket: ticket, chunk: AudioChunk(wavData: Data([0]), durationSeconds: 1))
+        try await waitUntilAsync { await service.started }
+        await service.release()
+        try await waitUntilAsync { await metrics.latencyWriteWaitingForTesting }
+        if cancel { transcription.cancelAll() } else { await bridge.reset() }
+        transcription.setMetricsSession(newId)
+        gate.continuation.finish()
+        try await waitUntil { finished }
+        #expect(stats.totalWords == 0)
+        #expect(texts.isEmpty)
+        #expect(errors == 0)
+        #expect(transcription._testErrorSoundPlayCount == 0)
+        let original = try #require(await metrics.activeSession(id: oldId))
+        #expect(original.chunksSubmitted == 1)
+        #expect(original.sttLatenciesMs.count == 1, "The suspended write must retain its original session ID")
+        let replacement = try #require(await metrics.activeSession(id: newId))
+        #expect(replacement.sttLatenciesMs.isEmpty)
+        #expect(replacement.chunksSubmitted == 0)
+        #expect(replacement.chunksSucceeded == 0 && replacement.chunksFailed == 0)
+    }
+
+    @MainActor @Test(arguments: [true, false], [true, false])
+    func retiredResponseHasNoCurrentSessionEffects(cancel: Bool, fail: Bool) async throws {
+        let stats = TestStatistics()
+        let service = HeldTranscriptionService(fail: fail)
+        let transcription = Transcription(statistics: stats, service: service)
+        let bridge = transcription.queueBridge
+        var finished = false
+        var errors = 0
+        var texts: [String] = []
+        transcription.taskFinishedForTesting = { finished = true }
+        bridge.onChunkError = { _ in errors += 1 }
+        bridge.onTextReady = { texts.append($0) }
+        defer {
+            Task { await service.release() }
+            bridge.stopListening()
+            transcription.cancelAll()
+        }
+        let ticket = await bridge.nextSequence()
+        transcription.transcribe(ticket: ticket, chunk: AudioChunk(wavData: Data([0]), durationSeconds: 1))
+        try await waitUntilAsync { await service.started }
+        try #require(await service.started)
+        if cancel { transcription.cancelAll() } else { await bridge.reset() }
+        await service.release()
+        try await waitUntil { finished }
+        try #require(finished)
+        #expect(errors == 0)
+        #expect(transcription._testErrorSoundPlayCount == 0)
+        #expect(texts.isEmpty)
+        #expect(stats.recordedLatencies.isEmpty)
+        #expect(stats.totalWords == 0)
     }
 
     @MainActor
@@ -217,6 +348,9 @@ struct TranscriptionOnChunkErrorTests {
 
         transcription.setActiveBatchProvider(StubBatchProvider(result: "batch"))
         transcription.cancelAll()
+        // Cancellation retires delivery. A replacement batch explicitly starts
+        // a fresh queue session, just as RecordingController does.
+        await transcription.queueBridge.reset()
 
         var received: [String] = []
         transcription.queueBridge.onTextReady = { received.append($0) }
@@ -324,6 +458,90 @@ struct TranscriptionChunkRecordingTests {
 
 @Suite("TranscriptionQueueBridge — Session-Tagged Delivery", .serialized)
 struct TranscriptionQueueSessionDeliveryTests {
+    @MainActor @Test(arguments: [false, true])
+    func retirementBetweenGenerationReadAndDeliveryDropsOldText(reset: Bool) async throws {
+        let transcription = Transcription(statistics: TestStatistics())
+        let bridge = transcription.queueBridge
+        let gate = AsyncStream<Void>.makeStream()
+        var deliverySuspended = false
+        var delivered: [String] = []
+        bridge.beforeTextDeliveryForTesting = {
+            guard !deliverySuspended else { return }
+            deliverySuspended = true
+            for await _ in gate.stream {}
+        }
+        bridge.onTextReady = { delivered.append($0) }
+        defer {
+            gate.continuation.finish()
+            bridge.stopListening()
+            transcription.cancelAll()
+        }
+        let old = await bridge.nextSequence()
+        await bridge.submitResult(ticket: old, text: "retired")
+        try await waitUntil { deliverySuspended }
+        try #require(deliverySuspended)
+        if reset { await bridge.reset() } else { transcription.cancelAll() }
+        gate.continuation.finish()
+        // A sentinel in the same stream acknowledges consumption of the old item.
+        if !reset { await bridge.reset() }
+        let current = await bridge.nextSequence()
+        await bridge.submitResult(ticket: current, text: "current")
+        try await waitUntil { delivered.contains("current") }
+        #expect(delivered == ["current"])
+    }
+
+    @MainActor @Test
+    func allocationHeldAcrossResetCannotConsumeReplacementSequence() async throws {
+        let bridge = TranscriptionQueueBridge()
+        let gate = AsyncStream<Void>.makeStream()
+        var entered = false
+        bridge.beforeSequenceAllocationForTesting = {
+            guard !entered else { return }
+            entered = true
+            for await _ in gate.stream {}
+        }
+        defer { gate.continuation.finish() }
+        let oldTask = Task { @MainActor in await bridge.nextSequence() }
+        try await waitUntil { entered }
+        try #require(entered)
+        await bridge.reset()
+        let current = await bridge.nextSequence()
+        await bridge.submitResult(ticket: current, text: "")
+        #expect(await bridge.isIdle(), "Retired allocation must not hold replacement completion open")
+        gate.continuation.finish()
+        let old = await oldTask.value
+        #expect(old.session != current.session, "A held allocation must retain its originating session")
+        #expect(await bridge.getPendingCount() == 0, "Retired allocation must not leave a sequence hole")
+    }
+
+    @MainActor @Test
+    func cancelAllRetiresBufferedDeliveryWithoutStartingAnotherBatch() async throws {
+        let transcription = Transcription(statistics: TestStatistics())
+        let bridge = transcription.queueBridge
+        let gate = AsyncStream<Void>.makeStream()
+        var deliveriesAttempted = 0
+        var delivered: [String] = []
+        bridge.beforeTextDeliveryForTesting = {
+            deliveriesAttempted += 1
+            if deliveriesAttempted == 1 {
+                for await _ in gate.stream {}
+            }
+        }
+        bridge.onTextReady = { delivered.append($0) }
+        defer { gate.continuation.finish(); bridge.stopListening(); transcription.cancelAll() }
+        let old = await bridge.nextSequence()
+        let sentinel = await bridge.nextSequence()
+        await bridge.submitResult(ticket: old, text: "retired")
+        try await waitUntil { deliveriesAttempted == 1 }
+        try #require(deliveriesAttempted == 1)
+        transcription.cancelAll()
+        await bridge.submitResult(ticket: sentinel, text: "also retired")
+        gate.continuation.finish()
+        try await waitUntil { deliveriesAttempted == 2 }
+        try #require(deliveriesAttempted == 2)
+        #expect(delivered.isEmpty)
+    }
+
     /// Text yielded before a reset but consumed after it must not be delivered
     /// to the new session.
     @MainActor @Test

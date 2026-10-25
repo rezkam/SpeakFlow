@@ -322,7 +322,11 @@ final class TextUpdateCollector {
 
 // MARK: - Polling Assertion
 
-/// Polls a condition until it becomes true, or times out.
+enum PollingError: Error {
+    case timedOut
+}
+
+/// Polls a condition until it becomes true, throwing on timeout or cancellation.
 /// Use this instead of direct `Task.sleep` for timer-based assertions
 /// where main-actor contention can delay Task continuations.
 @MainActor
@@ -332,9 +336,12 @@ func waitUntil(
     condition: @MainActor () -> Bool
 ) async throws {
     let deadline = ContinuousClock.now + timeout
-    while ContinuousClock.now < deadline {
+    while true {
+        try Task.checkCancellation()
         if condition() { return }
-        try await Task.sleep(for: interval)
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        guard remaining > .zero else { throw PollingError.timedOut }
+        try await Task.sleep(for: min(interval, remaining))
     }
 }
 
@@ -345,8 +352,13 @@ func waitUntilAsync(
     condition: @escaping @Sendable () async -> Bool
 ) async throws {
     let deadline = ContinuousClock.now + timeout
-    while ContinuousClock.now < deadline {
-        if await condition() { return }
-        try await Task.sleep(for: interval)
+    while true {
+        try Task.checkCancellation()
+        let satisfied = await condition()
+        try Task.checkCancellation()
+        if satisfied { return }
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        guard remaining > .zero else { throw PollingError.timedOut }
+        try await Task.sleep(for: min(interval, remaining))
     }
 }

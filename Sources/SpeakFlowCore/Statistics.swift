@@ -1,12 +1,13 @@
 import Foundation
 import OSLog
+import Observation
 
 /// Tracks and persists usage statistics as a JSON file in `~/.speakflow/`.
 ///
 /// Uses `Codable` for clean serialization, independent of UserDefaults and
 /// bundle identifiers. The file is written atomically on every mutation to
 /// avoid data loss.
-@MainActor
+@MainActor @Observable
 public final class Statistics {
     public static let shared = Statistics()
 
@@ -322,8 +323,8 @@ public final class Statistics {
     //   `scheduleFlush`, and `flushIfDirty`. The flush Task captures `[weak self]`
     //   so it doesn't prevent deallocation in tests.
 
-    private var isDirty = false
-    private var flushTask: Task<Void, Never>?
+    @ObservationIgnored private var isDirty = false
+    @ObservationIgnored private var flushTask: Task<Void, Never>?
 
     /// Mark data as needing a flush and arm the debounce timer if not already armed.
     private func markDirty() {

@@ -109,8 +109,44 @@ actor SuspendingObservabilityStreamingSession: StreamingSession {
     }
 }
 
-@Suite("RecordingController — Streaming Recording Lifecycle")
+// These tests share Statistics.shared, including the nested duration checks.
+// Serialize their fixture scope; explicit in-test concurrency remains exercised.
+@Suite("RecordingController: Streaming Recording Lifecycle", .serialized)
 struct StreamingRecordingTests {
+    @Test @MainActor
+    func retiredReliabilityCallbacksCannotIncrementReplacementMetrics() async throws {
+        let ctx = makeController()
+        ctx.controller.startRecording()
+        try await waitUntil { ctx.controller.liveStreamingController?.isActive == true }
+        let old = try #require(ctx.controller.liveStreamingController)
+        let keepAlive = try #require(old.onKeepAliveSent)
+        let reconnected = try #require(old.onReconnected)
+        ctx.controller.cancelRecording()
+        ctx.provider.mockSession = MockStreamingSession()
+        ctx.controller.startRecording()
+        defer { ctx.controller.cancelRecording() }
+        try await waitUntil { ctx.controller.liveStreamingController?.isActive == true }
+        let replacement = try #require(ctx.controller.testCurrentMetricsSessionId)
+        try await waitUntilAsync { await SessionMetricsStore.shared.activeSession(id: replacement) != nil }
+        keepAlive()
+        reconnected()
+        await #expect(throws: PollingError.self) {
+            try await waitUntilAsync(timeout: .milliseconds(150), interval: .milliseconds(10)) {
+                guard let metrics = await SessionMetricsStore.shared.activeSession(id: replacement) else { return false }
+                return metrics.keepAlivesSent > 0 || metrics.reconnections > 0
+            }
+        }
+        let current = try #require(ctx.controller.liveStreamingController)
+        current.onKeepAliveSent?()
+        current.onReconnected?()
+        try await waitUntilAsync {
+            guard let metrics = await SessionMetricsStore.shared.activeSession(id: replacement) else { return false }
+            return metrics.keepAlivesSent > 0 && metrics.reconnections > 0
+        }
+        let metrics = try #require(await SessionMetricsStore.shared.activeSession(id: replacement))
+        #expect(metrics.keepAlivesSent == 1 && metrics.reconnections == 1)
+    }
+
 
     /// Creates a testable RecordingController wired with a MockStreamingProvider.
     /// Builds on the shared `makeTestRecordingController()` and adds streaming-specific mocks.
@@ -155,7 +191,7 @@ struct StreamingRecordingTests {
     @MainActor
     private func makeReconnectController(
         sessions: [any StreamingSession]? = nil
-    ) -> (RecordingController, MultiSessionMockProvider) {
+    ) -> (RecordingController, MultiSessionMockProvider, SpyTextInserter) {
         let providerSettings = SpyProviderSettings()
         providerSettings.activeProviderId = ProviderId.deepgram
         providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
@@ -171,12 +207,12 @@ struct StreamingRecordingTests {
         settings.streamingReconnectEnabled = true
         settings.streamingTrailingFinalTimeout = 0
 
-        let (controller, _, _, _) = makeTestRecordingController(
+        let (controller, _, inserter, _) = makeTestRecordingController(
             providerSettings: providerSettings,
             providerRegistry: providerRegistry,
             settings: settings
         )
-        return (controller, provider)
+        return (controller, provider, inserter)
     }
 
     // MARK: - Start
@@ -278,9 +314,46 @@ struct StreamingRecordingTests {
                 "Full transcript should accumulate final text")
     }
 
+    @MainActor @Test(arguments: [false, true])
+    func reconnectPreservesInsertionAndBothStatisticsStores(interimBeforeDrop: Bool) async throws {
+        let first = MockStreamingSession()
+        let second = MockStreamingSession()
+        let (controller, provider, inserter) = makeReconnectController(sessions: [first, second])
+        let initialWords = Statistics.shared.totalWords
+        let initialCalls = Statistics.shared.totalApiCalls
+        controller.startRecording()
+        defer { controller.cancelRecording() }
+        try await waitUntil { controller.liveStreamingController?.recording == true }
+        let sessionId = try #require(controller.testCurrentMetricsSessionId)
+        let firstResult = TranscriptionResult(
+            transcript: "first phrase", isFinal: !interimBeforeDrop, speechFinal: !interimBeforeDrop
+        )
+        await first.emit(interimBeforeDrop ? .interim(firstResult) : .finalResult(firstResult))
+        try await waitUntil { inserter.insertedTexts.joined() == (interimBeforeDrop ? "first phrase" : "first phrase ") }
+        await first.emit(.closed)
+        try await waitUntil { provider.startSessionCallCount == 2 && controller.liveStreamingController?.recording == true }
+        await second.emit(.finalResult(TranscriptionResult(
+            transcript: "second phrase", isFinal: true, speechFinal: true
+        )))
+        try await waitUntil { inserter.insertedTexts.joined() == "first phrase second phrase " }
+        #expect(inserter.deletedCounts.isEmpty, "A reconnect must not replace the previous connection's committed text")
+        #expect(Statistics.shared.totalWords == initialWords + 4)
+        #expect(Statistics.shared.totalApiCalls == initialCalls + 1, "Reconnect is not a second recording")
+        try await waitUntilAsync {
+            guard let metrics = await SessionMetricsStore.shared.activeSession(id: sessionId) else { return false }
+            return metrics.reconnections == 1 && metrics.wordsProduced == 4
+        }
+        controller.stopRecording()
+        try await waitUntil { !controller.isProcessingFinal }
+        let completed = await SessionMetricsStore.shared.recentCompletedSessions(limit: 200)
+        let metrics = try #require(completed.first { $0.sessionId == sessionId })
+        #expect(metrics.wordsProduced == 4 && metrics.reconnections == 1)
+        #expect(metrics.providerId == provider.id && metrics.mode == .streaming)
+    }
+
     @MainActor @Test
     func streamingRecording_closedEventReconnectsWithoutStoppingRecording() async throws {
-        let (controller, provider) = makeReconnectController()
+        let (controller, provider, _) = makeReconnectController()
         controller.startRecording()
 
         try await waitUntil {
@@ -496,7 +569,7 @@ struct StreamingRecordingTests {
         defer {
             Task { await firstSession.releaseClose() }
         }
-        let (controller, provider) = makeReconnectController(
+        let (controller, provider, _) = makeReconnectController(
             sessions: [firstSession, secondSession]
         )
 
@@ -623,7 +696,6 @@ struct StreamingRecordingTests {
         #expect(ctx.banner.bannerMessages.count == 1, "Should show error banner")
         #expect(ctx.banner.bannerMessages.first?.1 == .error, "Banner should be error style")
     }
-}
 
 // MARK: - Streaming Duration Accounting
 
@@ -715,4 +787,5 @@ struct StreamingDurationAccountingTests {
         #expect(afterSecond >= 0.15,
                 "Two segments of ~80ms each should sum to >= 150ms; got \(afterSecond)")
     }
+}
 }

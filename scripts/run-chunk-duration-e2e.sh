@@ -51,7 +51,8 @@ run_case() {
     local slug
     slug="$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
     local output_file
-    output_file="$(mktemp "/tmp/speakflow-chunk-${slug}.XXXX.log")"
+    mkdir -p .agents/e2e
+    output_file="$(mktemp ".agents/e2e/chunk-${slug}.XXXXXX.log")"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -62,6 +63,7 @@ run_case() {
 
     set +e
     (
+        e2e_prepare_scenario
         export SPEAKFLOW_E2E_CHUNK_DURATION="$chunk_duration"
         export SPEAKFLOW_E2E_TIMEOUT_SECONDS="$timeout"
         export SPEAKFLOW_E2E_AUTO_SPEAK_RATE="$speak_rate"
@@ -80,7 +82,8 @@ run_case() {
             export SPEAKFLOW_E2E_EXPECT_AUTO_END_MAX_SECONDS="$timeout"
         fi
 
-        swift run --disable-sandbox SpeakFlowLiveE2E
+        swift run --disable-sandbox SpeakFlowLiveE2E 2>&1 |
+            redact_diagnostics
     ) >"$output_file" 2>&1
     local rc=$?
     set -e
@@ -122,15 +125,11 @@ run_case "15s chunks with 35s speech" 15 60 "$LONG_TEXT_35S" 170 2
 run_case "30s chunks with 65s speech" 30 100 "$LONG_TEXT_65S" 170 2
 
 # 3) Silence with skipSilentChunks=true → expect 0 chunks (noise rejection)
-# Uses a pre-generated silence WAV
-SILENCE_WAV="/tmp/sf_test_silence.wav"
-if [[ -f "$SILENCE_WAV" ]]; then
-    run_case "Silence skip (skipSilentChunks)" 30 25 "" 170 0 true
-else
-    echo ""
-    echo "⚠️  SKIPPED: Silence test (no silence WAV at $SILENCE_WAV)"
-    echo "   Run: python3 /tmp/sf_generate_test_audio.py to generate test audio"
-fi
+# Generate a mandatory ten-second PCM fixture without external audio tools.
+SILENCE_WAV="$(mktemp .agents/e2e/silence.XXXXXX.wav)"
+perl -e 'print pack("a4Va4a4VvvVVvva4V", "RIFF", 320036, "WAVE", "fmt ", 16, 1, 1, 16000, 32000, 2, 16, "data", 320000); print "\0" x 320000;' > "$SILENCE_WAV"
+[[ -s "$SILENCE_WAV" ]] || { echo 'FAIL: silence fixture was not generated'; exit 1; }
+run_case "Silence skip (skipSilentChunks)" 30 25 "" 170 0 true
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

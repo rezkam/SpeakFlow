@@ -32,8 +32,10 @@ public struct LiveE2EScenarioConfig: Equatable, Sendable {
     public var chunkSeconds: Double?
     /// Total time to record when not waiting for auto-end.
     public var recordSeconds: Double?
-    /// Upper bound on the whole scenario.
+    /// Upper bound on recording, excluding preparation.
     public var timeoutSeconds: Double?
+    /// Explicit test silence threshold; nil preserves the product setting.
+    public var autoEndSilenceSeconds: Double?
     public var expectPhrase: String?
     public var autoEnd: AutoEndExpectation?
     /// Non-speech audio: no chunk may be sent for transcription.
@@ -68,6 +70,10 @@ public struct LiveE2EScenarioConfig: Equatable, Sendable {
         config.chunkSeconds = try env.double("SPEAKFLOW_E2E_CHUNK_DURATION")
         config.recordSeconds = try env.double("SPEAKFLOW_E2E_RECORD_SECONDS")
         config.timeoutSeconds = try env.double("SPEAKFLOW_E2E_TIMEOUT_SECONDS")
+        config.autoEndSilenceSeconds = try env.double("SPEAKFLOW_E2E_AUTO_END_SILENCE_SECONDS")
+        if let silence = config.autoEndSilenceSeconds, !silence.isFinite || silence < 1 {
+            throw LiveE2EConfigError.invalid("SPEAKFLOW_E2E_AUTO_END_SILENCE_SECONDS must be finite and at least 1")
+        }
         config.expectPhrase = env.string("SPEAKFLOW_E2E_EXPECT_PHRASE")
         config.noiseRejection = noiseRejection
         config.minChunks = try env.int("SPEAKFLOW_E2E_EXPECT_MIN_CHUNKS")
@@ -116,6 +122,10 @@ public struct LiveE2EScenarioConfig: Equatable, Sendable {
         guard let expectPhrase else { return }
         guard let transcript = observation.transcript else {
             outcome.failures.append("phrase: transcription did not run (ChatGPT login required)")
+            return
+        }
+        guard observation.transcriptionCompleted else {
+            outcome.failures.append("phrase: transcription incomplete (completion deadline reached)")
             return
         }
         outcome.executed.append("phrase")
@@ -178,11 +188,13 @@ public struct LiveE2EObservation: Sendable {
     public let autoEndSeconds: Double?
     /// nil when transcription did not run.
     public let transcript: String?
+    public let transcriptionCompleted: Bool
 
-    public init(chunks: Int, autoEndSeconds: Double?, transcript: String?) {
+    public init(chunks: Int, autoEndSeconds: Double?, transcript: String?, transcriptionCompleted: Bool = false) {
         self.chunks = chunks
         self.autoEndSeconds = autoEndSeconds
         self.transcript = transcript
+        self.transcriptionCompleted = transcriptionCompleted
     }
 }
 
