@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import os
 @testable import SpeakFlow
 @testable import SpeakFlowCore
 
@@ -15,6 +16,24 @@ private final class StubOAuthCallbackServer: OAuthCallbackServing, @unchecked Se
     func stop() {}
 }
 
+private actor HeldOAuthCallbackServer: OAuthCallbackServing {
+    private var continuation: CheckedContinuation<String?, Never>?
+    private(set) var waiting = false
+    nonisolated let stops = OSAllocatedUnfairLock(initialState: 0)
+    nonisolated func prepareForCallback() -> Bool { true }
+    nonisolated func stop() { stops.withLock { $0 += 1 } }
+    func waitForPreparedCallback(timeout: TimeInterval) async -> String? {
+        await withCheckedContinuation {
+            continuation = $0
+            waiting = true
+        }
+    }
+    func respond(_ code: String?) {
+        continuation?.resume(returning: code)
+        continuation = nil
+    }
+}
+
 private actor OAuthExchangeProbe {
     private(set) var code: String?
 
@@ -27,6 +46,60 @@ private actor OAuthExchangeProbe {
 
 @Suite("AuthController — DI Behavioral Contracts")
 struct AuthControllerDITests {
+    @Test(arguments: [false, true]) @MainActor
+    func retiredCallbackCannotStartExchange(replace: Bool) async throws {
+        let first = HeldOAuthCallbackServer()
+        var factories = 0
+        var exchanges = 0
+        let controller = AuthController(
+            appState: SpyBannerPresenter(), providerSettings: SpyProviderSettings(), providerRegistry: SpyProviderRegistry(),
+            callbackServerFactory: { _ in
+                factories += 1
+                return factories == 1 ? first : StubOAuthCallbackServer(result: nil)
+            },
+            openAuthorizationURL: { _ in },
+            exchangeAuthorizationCode: { _, _ in exchanges += 1 },
+            deleteChatGPTCredentials: {}
+        )
+        defer { controller.shutdown(); Task { await first.respond(nil) } }
+        controller.startLoginFlow()
+        let old = try #require(controller.loginTask)
+        try await waitUntilAsync { await first.waiting }
+        try #require(await first.waiting)
+        if replace { controller.startLoginFlow() } else { controller.handleLogout() }
+        await first.respond("retired-code")
+        await old.value
+        // The owned task includes callback and exchange, so completion is the barrier.
+        #expect(exchanges == 0)
+        #expect(first.stops.withLock { $0 } == 1)
+    }
+
+
+    @Test(arguments: [false, true]) @MainActor
+    func exchangeCompletingAfterLogoutCannotAnnounceLogin(fail: Bool) async throws {
+        let response = HeldOAuthCallbackServer()
+        let banner = SpyBannerPresenter()
+        let controller = AuthController(
+            appState: banner, providerSettings: SpyProviderSettings(), providerRegistry: SpyProviderRegistry(),
+            callbackServerFactory: { _ in StubOAuthCallbackServer(result: "code") },
+            openAuthorizationURL: { _ in },
+            exchangeAuthorizationCode: { _, _ in
+                _ = await response.waitForPreparedCallback(timeout: 0)
+                if fail { throw TranscriptionError.httpError(statusCode: 500, body: "test failure") }
+            },
+            deleteChatGPTCredentials: {}
+        )
+        defer { controller.shutdown(); Task { await response.respond(nil) } }
+        controller.startLoginFlow()
+        let task = try #require(controller.loginTask)
+        try await waitUntilAsync { await response.waiting }
+        try #require(await response.waiting)
+        controller.handleLogout()
+        await response.respond("finished")
+        await task.value
+        #expect(banner.bannerMessages.count == 1)
+        #expect(banner.bannerMessages.first?.0 == "Logged out from ChatGPT")
+    }
 
     @Test @MainActor
     func removeApiKeyDelegates() {

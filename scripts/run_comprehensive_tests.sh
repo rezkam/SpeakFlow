@@ -1,52 +1,24 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=SCRIPTDIR/lib/e2e-result.sh
+source "$ROOT_DIR/scripts/lib/e2e-result.sh"
 
-START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
-echo "Starting COMPREHENSIVE tests at $START_TS"
-
-# Clean previous logs
-echo "" > /tmp/speakflow_logs.txt
-
-# Start log capture in background
-log stream --style compact --info --debug \
-  --predicate '((subsystem == "nu.rez.speakflow") OR (subsystem == "SpeakFlow")) && ((category == "audio") OR (category == "Session") OR (category == "VAD") OR (category == "app") OR (category == "transcription"))' \
-  >> /tmp/speakflow_logs.txt &
-LOG_PID=$!
-
-function cleanup {
-    echo "Stopping log capture (PID $LOG_PID)..."
-    kill $LOG_PID 2>/dev/null || true
+run_case() {
+    local label="$1" text="$2" minimum="$3" maximum="$4"
+    e2e_prepare_scenario
+    export SPEAKFLOW_E2E_TEST_AUTO_END=true
+    export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="$text"
+    export SPEAKFLOW_E2E_TIMEOUT_SECONDS="$maximum"
+    export SPEAKFLOW_E2E_CHUNK_DURATION=3600
+    export SPEAKFLOW_E2E_EXPECT_AUTO_END_MIN_SECONDS="$minimum"
+    export SPEAKFLOW_E2E_EXPECT_AUTO_END_MAX_SECONDS="$maximum"
+    e2e_run_asserted_case "$label" autoEndFired autoEndWindow
 }
-trap cleanup EXIT
 
-# ------------------------------------------------------------------
-# TEST 1: Short Speech (Baseline)
-# ------------------------------------------------------------------
-echo "RUNNING TEST 1: Short Speech (Baseline)"
-echo "Expect: Auto-end after ~5s silence"
-export SPEAKFLOW_E2E_TEST_AUTO_END=true
-export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="Hello world, this is a short test."
-export SPEAKFLOW_E2E_TIMEOUT_SECONDS=15
-export SPEAKFLOW_E2E_CHUNK_DURATION=3600
-
-swift run --disable-sandbox SpeakFlowLiveE2E > /tmp/test1.out 2>&1 || echo "Test 1 failed (expected?)"
-
-# ------------------------------------------------------------------
-# TEST 2: Long Continuous Speech
-# ------------------------------------------------------------------
-echo "RUNNING TEST 2: Long Continuous Speech"
-echo "Expect: NO auto-end during 15s of speech"
-export SPEAKFLOW_E2E_TEST_AUTO_END=true
-# ~15 seconds of speech
-export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="This is a much longer test passage designed to last approximately fifteen seconds or more. I am speaking continuously to ensure that the voice activity detection does not trigger a premature end of session while the user is still actively dictating their thoughts."
-export SPEAKFLOW_E2E_TIMEOUT_SECONDS=30
-
-swift run --disable-sandbox SpeakFlowLiveE2E > /tmp/test2.out 2>&1 || echo "Test 2 failed"
-
-# ------------------------------------------------------------------
-# ANALYSIS
-# ------------------------------------------------------------------
-echo ""
-echo "==== LOG ANALYSIS ===="
-grep -E "🎤|🔇|⚡|🛑|VAD CONFIG DUMP|Auto-end triggered" /tmp/speakflow_logs.txt | grep -v "Filtering"
-
+run_case "Short speech baseline" "Hello world, this is a short test." 5 15
+run_case "Continuous speech does not end early" \
+    "This is a much longer test passage designed to last approximately fifteen seconds or more. I am speaking continuously to ensure that the voice activity detection does not trigger a premature end of session while the user is still actively dictating their thoughts." \
+    15 30
+printf 'ALL TIMING CASES PASSED\n'

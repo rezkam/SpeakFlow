@@ -209,7 +209,8 @@ public final class StreamingRecorder {
     public private(set) var sessionStartDate: Date?
 
     /// Callback when a chunk is ready for transcription
-    public var onChunkReady: ((AudioChunk) -> Void)?
+    /// Returns after the consumer has accepted the chunk into its ordered queue.
+    public var onChunkReady: ((AudioChunk) async -> Void)?
 
     /// Callback when session should auto-end (VAD detected prolonged silence)
     public var onAutoEnd: (() -> Void)?
@@ -267,7 +268,16 @@ public final class StreamingRecorder {
         }
     }
 
+    #if DEBUG
+    public enum NativeTimerKind: Sendable { case processing, check }
+    public var nativeTimerTickForTesting: (@Sendable (NativeTimerKind) -> Void)?
+    public private(set) var mockSamplesFedForTesting = 0
+    #endif
+
     private func startTimers() {
+        #if DEBUG
+        let nativeTick = nativeTimerTickForTesting
+        #endif
         // Timer to process queued samples on main actor.
         //
         // Registered in `.common` mode (not `.default`, which is what
@@ -278,6 +288,9 @@ public final class StreamingRecorder {
         // enqueuing into the bounded `AudioSampleQueue`, and once it fills up
         // the oldest buffered speech is silently dropped.
         let processing = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            #if DEBUG
+            nativeTick?(.processing)
+            #endif
             Task { @MainActor [weak self] in
                 self?.scheduleProcessingPass()
             }
@@ -288,6 +301,9 @@ public final class StreamingRecorder {
         // Timer for periodic chunk/auto-end checks. Same `.common`-mode
         // reasoning as above applies to auto-end/chunk timing.
         let check = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            #if DEBUG
+            nativeTick?(.check)
+            #endif
             Task { @MainActor [weak self] in
                 await self?.periodicCheck()
             }
@@ -532,7 +548,21 @@ public final class StreamingRecorder {
         }
     }
 
+    #if DEBUG
+    var beforeVADInitializationForTesting: (() throws -> Void)?
+    #endif
+
+    nonisolated static func allowsModelInitialization(isolatedAudio: Bool, environment: [String: String]) -> Bool {
+        !isolatedAudio || environment["SPEAKFLOW_RUN_VAD_MODEL_TESTS"] == "1"
+    }
+
     private func initializeVAD() async {
+        guard Self.allowsModelInitialization(
+            isolatedAudio: Self.shouldIsolateTestAudioCapture(), environment: ProcessInfo.processInfo.environment
+        ) else {
+            state.setVADActive(false)
+            return
+        }
         let settings = self.settings
 
         guard settings.vadEnabled && VADProcessor.isAvailable else {
@@ -576,6 +606,9 @@ public final class StreamingRecorder {
             )
 
             vadProcessor = VADProcessor(config: vadConfig)
+            #if DEBUG
+            try beforeVADInitializationForTesting?()
+            #endif
             try await vadProcessor?.initialize()
 
             sessionController = SessionController(
@@ -853,7 +886,7 @@ public final class StreamingRecorder {
 
         // Cancellation can begin while this path is suspended above.
         guard !isDiscardingAudio else { return false }
-        onChunkReady?(chunk)
+        await onChunkReady?(chunk)
         state.updateLastSoundTime()
         return true
     }
@@ -969,9 +1002,7 @@ public final class StreamingRecorder {
                     ]
                 )
                 let chunk = AudioChunk(wavData: wavData, durationSeconds: duration, speechProbability: speechProbability)
-                await MainActor.run {
-                    self.onChunkReady?(chunk)
-                }
+                await self.onChunkReady?(chunk)
             } else if duration < minDuration {
                 Logger.audio.debug("Recording too short (\(String(format: "%.2f", duration))s < \(String(format: "%.2f", minDuration))s)")
                 self.observabilityEvent(
@@ -1012,6 +1043,9 @@ public final class StreamingRecorder {
     /// Start a mock recording session using provided audio data.
     /// Used for E2E testing in environments without microphone hardware.
     public func startMock(audioData: [Float]) async {
+        #if DEBUG
+        mockSamplesFedForTesting = 0
+        #endif
         sessionStartDate = Date()
         audioBuffer = AudioBuffer(sampleRate: sampleRate)
         state.setRecording(true)
@@ -1057,6 +1091,9 @@ public final class StreamingRecorder {
                 }
 
                 sampleQueue.enqueue(frames: frames)
+                #if DEBUG
+                mockSamplesFedForTesting += frames.count
+                #endif
                 
                 offset = end
                 try? await Task.sleep(for: .milliseconds(50))

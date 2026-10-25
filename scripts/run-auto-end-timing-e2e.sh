@@ -40,7 +40,8 @@ run_case() {
     local slug
     slug="$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
     local output_file
-    output_file="$(mktemp "/tmp/speakflow-autoend-${slug}.XXXX.log")"
+    mkdir -p .agents/e2e
+    output_file="$(mktemp ".agents/e2e/autoend-${slug}.XXXXXX.log")"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -50,7 +51,10 @@ run_case() {
 
     set +e
     (
+        e2e_prepare_scenario
         export SPEAKFLOW_E2E_TEST_AUTO_END=true
+        # These windows exercise five seconds of trailing silence, not the product default.
+        export SPEAKFLOW_E2E_AUTO_END_SILENCE_SECONDS=5
         export SPEAKFLOW_E2E_CHUNK_DURATION=3600
         export SPEAKFLOW_E2E_TIMEOUT_SECONDS="$timeout"
         export SPEAKFLOW_E2E_EXPECT_AUTO_END_MIN_SECONDS="$min_expected"
@@ -66,7 +70,8 @@ run_case() {
             unset SPEAKFLOW_E2E_AUTO_SPEAK_GAP_SECONDS
         fi
 
-        swift run --disable-sandbox SpeakFlowLiveE2E
+        swift run --disable-sandbox SpeakFlowLiveE2E 2>&1 |
+            redact_diagnostics
     ) >"$output_file" 2>&1
     local rc=$?
     set -e
@@ -76,10 +81,10 @@ run_case() {
 
     if [[ $rc -eq 0 ]] && verdict="$(e2e_check "$output_file" autoEndFired autoEndWindow)"; then
         PASS_COUNT=$((PASS_COUNT + 1))
-        echo "✅ PASS ($name)${elapsed:+ — auto-end=${elapsed}s}"
+        echo "✅ PASS ($name)${elapsed:+: auto-end=${elapsed}s}"
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "❌ FAIL ($name) — exit=$rc ${verdict:-}"
+        echo "❌ FAIL ($name): exit=$rc ${verdict:-}"
         echo "Last output lines:"
         tail -n 30 "$output_file"
     fi

@@ -28,10 +28,39 @@ public actor VADModelCache {
 
     init(
         managerFactory: @escaping @Sendable (Float) async throws -> VadManager = { threshold in
-            try await VadManager(config: VadConfig(defaultThreshold: threshold))
+            let config = VadConfig(defaultThreshold: threshold)
+            let models = try await ModelHub.loadModels(
+                .vad, modelNames: Array(ModelNames.VAD.requiredModels),
+                directory: VADModelCache.modelCacheRoot(), computeUnits: config.computeUnits
+            )
+            guard let model = models[ModelNames.VAD.sileroVadFile] else { throw VadError.modelLoadingFailed }
+            return VadManager(config: config, vadModel: model)
         }
     ) {
         self.managerFactory = managerFactory
+    }
+
+    /// Model loading and test gating use the same cache root. Isolated launches
+    /// never fall back to the installed application's FluidAudio cache.
+    public nonisolated static func modelCacheRoot(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isolation: RuntimeIsolation.Decision = RuntimeIsolation.current,
+        fileManager: FileManager = .default
+    ) -> URL {
+        if let override = environment["SPEAKFLOW_VAD_MODEL_CACHE_ROOT"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        let base: URL
+        if isolation.isIsolated {
+            base = isolation.dataDirectory
+        } else {
+            guard let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+                preconditionFailure("Application Support directory is unavailable")
+            }
+            base = applicationSupport
+        }
+        return base.appendingPathComponent("FluidAudio", isDirectory: true)
+            .appendingPathComponent("Models", isDirectory: true)
     }
 
     /// Pre-load the Silero VAD model in the background.

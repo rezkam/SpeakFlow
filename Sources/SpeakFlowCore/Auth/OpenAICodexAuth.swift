@@ -33,37 +33,37 @@ public actor TokenRefreshCoordinator {
     public static let shared = TokenRefreshCoordinator()
 
     private var inFlightRefresh: Task<OAuthCredentials, Error>?
-    private let refreshFn: @Sendable (OAuthCredentials) async throws -> OAuthCredentials
+    private var inFlightGeneration: UInt64?
+    private var inFlightId: UUID?
+    private let refreshFn: (@Sendable (OAuthCredentials) async throws -> OAuthCredentials)?
 
     /// Create a coordinator.
     /// - Parameter refreshFn: The function used to refresh credentials.
     ///   Defaults to `OpenAICodexAuth.refreshTokens` but can be overridden in tests.
-    public init(refreshFn: @escaping @Sendable (OAuthCredentials) async throws -> OAuthCredentials = { creds in
-        try await OpenAICodexAuth.refreshTokens(creds)
-    }) {
+    public init(refreshFn: (@Sendable (OAuthCredentials) async throws -> OAuthCredentials)? = nil) {
         self.refreshFn = refreshFn
     }
 
     /// Refresh tokens, coalescing concurrent callers into a single network request.
     /// If a refresh is already in flight, all callers await the same result.
-    public func refreshIfNeeded(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
-        try await _refreshCore(credentials, counted: false)
+    public func refreshIfNeeded(_ credentials: OAuthCredentials, generation: UInt64) async throws -> OAuthCredentials {
+        try await _refreshCore(credentials, generation: generation, counted: false)
     }
 
     /// Number of times a fresh refresh task was started (test observability).
     public private(set) var refreshStartCount = 0
 
     /// Variant that also increments the start counter (for tests).
-    public func refreshIfNeededCounted(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
-        try await _refreshCore(credentials, counted: true)
+    public func refreshIfNeededCounted(_ credentials: OAuthCredentials, generation: UInt64) async throws -> OAuthCredentials {
+        try await _refreshCore(credentials, generation: generation, counted: true)
     }
 
     /// Shared refresh implementation. Coalesces concurrent callers into a single
     /// in-flight task. When `counted` is true, increments `refreshStartCount`
     /// each time a *new* refresh is started (for test observability).
-    private func _refreshCore(_ credentials: OAuthCredentials, counted: Bool) async throws -> OAuthCredentials {
-        // If there's already a refresh in flight, join it
-        if let existing = inFlightRefresh {
+    private func _refreshCore(_ credentials: OAuthCredentials, generation: UInt64, counted: Bool) async throws -> OAuthCredentials {
+        // Only callers from the same credential generation may share a result.
+        if let existing = inFlightRefresh, inFlightGeneration == generation {
             return try await existing.value
         }
 
@@ -71,15 +71,22 @@ public actor TokenRefreshCoordinator {
 
         // Start a new refresh
         let refreshFn = self.refreshFn
+        let id = UUID()
         let task = Task<OAuthCredentials, Error> {
-            defer { self.clearInFlight() }
-            return try await refreshFn(credentials)
+            defer { self.clearInFlight(id: id) }
+            if let refreshFn { return try await refreshFn(credentials) }
+            return try await OpenAICodexAuth.refreshTokens(credentials, expectedGeneration: generation)
         }
+        inFlightId = id
+        inFlightGeneration = generation
         inFlightRefresh = task
         return try await task.value
     }
 
-    private func clearInFlight() {
+    private func clearInFlight(id: UUID) {
+        guard inFlightId == id else { return }
+        inFlightId = nil
+        inFlightGeneration = nil
         inFlightRefresh = nil
     }
 }
@@ -126,6 +133,13 @@ public final class OpenAICodexAuth {
     )
     
     private static let storage = UnifiedAuthStorage.shared
+    #if DEBUG
+    private static let refreshHook = OSAllocatedUnfairLock<(@Sendable () throws -> Void)?>(initialState: nil)
+    static var beforeCoordinatedRefreshForTesting: (@Sendable () throws -> Void)? {
+        get { refreshHook.withLock { $0 } }
+        set { refreshHook.withLock { $0 = newValue } }
+    }
+    #endif
     
     // MARK: - PKCE
     
@@ -182,9 +196,11 @@ public final class OpenAICodexAuth {
         public let url: URL
         public let verifier: String
         public let state: String
+        public let credentialGeneration: UInt64
     }
     
     public static func createAuthorizationFlow() throws -> AuthorizationFlow {
+        let generation = storage.beginChatGPTAuthorization()
         let pkce = try generatePKCE()
         let state = try generateState()
 
@@ -209,7 +225,8 @@ public final class OpenAICodexAuth {
         return AuthorizationFlow(
             url: url,
             verifier: pkce.verifier,
-            state: state
+            state: state,
+            credentialGeneration: generation
         )
     }
 
@@ -256,7 +273,9 @@ public final class OpenAICodexAuth {
     // MARK: - Token Exchange
     
     public static func exchangeCodeForTokens(code: String, flow: AuthorizationFlow) async throws -> OAuthCredentials {
-        let generation = storage.chatGPTCredentialGeneration()
+        let generation = flow.credentialGeneration
+        try Task.checkCancellation()
+        guard storage.chatGPTCredentialGeneration() == generation else { throw AuthError.credentialsChanged }
         var request = URLRequest(url: tokenEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -309,6 +328,7 @@ public final class OpenAICodexAuth {
 
         // Save credentials in Codex format, unless a logout or another login
         // happened while this exchange was in flight.
+        try Task.checkCancellation()
         try saveCredentials(credentials, expectedGeneration: generation)
         
         Logger.auth.info("Successfully logged in to OpenAI Codex")
@@ -317,8 +337,8 @@ public final class OpenAICodexAuth {
     
     // MARK: - Token Refresh
     
-    public static func refreshTokens(_ credentials: OAuthCredentials) async throws -> OAuthCredentials {
-        let generation = storage.chatGPTCredentialGeneration()
+    public static func refreshTokens(_ credentials: OAuthCredentials, expectedGeneration generation: UInt64) async throws -> OAuthCredentials {
+        guard storage.chatGPTCredentialGeneration() == generation else { throw AuthError.credentialsChanged }
         var request = URLRequest(url: tokenEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -421,13 +441,17 @@ public final class OpenAICodexAuth {
     /// Get valid access token, refreshing if needed.
     /// Concurrent callers share a single in-flight refresh via `TokenRefreshCoordinator`.
     public static func getValidAccessToken() async throws -> String {
-        guard var credentials = loadCredentials() else {
+        guard let snapshot = storage.loadChatGPTCredentialSnapshot() else {
             throw AuthError.notLoggedIn
         }
         
-        // Refresh if older than 1 hour — coalesced so concurrent callers share one request
+        var credentials = snapshot.credentials
+        // Refresh callers share a request only within the captured generation.
         if credentials.shouldRefresh(after: 3600) {
-            credentials = try await TokenRefreshCoordinator.shared.refreshIfNeeded(credentials)
+            #if DEBUG
+            try beforeCoordinatedRefreshForTesting?()
+            #endif
+            credentials = try await TokenRefreshCoordinator.shared.refreshIfNeeded(credentials, generation: snapshot.generation)
         }
         
         return credentials.accessToken

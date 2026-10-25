@@ -11,6 +11,8 @@
 # the wrapper asked for actually executed, so a run that ignored the request
 # (or skipped an assertion it could not run) cannot pass.
 
+source "$(dirname "${BASH_SOURCE[0]}")/redact-diagnostics.sh"
+
 # e2e_check <output_file> <required assertion>...
 e2e_check() {
     local output_file="$1"
@@ -46,4 +48,36 @@ e2e_auto_end_seconds() {
 
 e2e_transcript() {
     sed -n 's/^E2E_TRANSCRIPT //p' "$1" | tail -n 1
+}
+
+# Fixed scenarios must not inherit unrelated assertions or live inputs.
+e2e_prepare_scenario() {
+    local variable
+    for variable in ${!SPEAKFLOW_E2E_@}; do unset "$variable"; done
+    export SPEAKFLOW_ISOLATED_STORAGE=1
+    export SPEAKFLOW_MUTE_SOUNDS=1
+}
+
+e2e_execute_runner() {
+    swift run --disable-sandbox SpeakFlowLiveE2E
+}
+
+# e2e_run_asserted_case <label> <required assertion>...
+# Call from the repository root. Never collect ambient system logs.
+e2e_run_asserted_case() {
+    local label="$1" output_file rc=0 verdict
+    shift
+    mkdir -p .agents/e2e
+    output_file="$(mktemp .agents/e2e/case.XXXXXX.log)"
+    e2e_execute_runner 2>&1 |
+        redact_diagnostics > "$output_file" || rc=$?
+    if [[ "$rc" != 0 ]]; then
+        echo "FAIL: $label executable exit=$rc ($output_file)"
+        return "$rc"
+    fi
+    if ! verdict="$(e2e_check "$output_file" "$@")"; then
+        echo "FAIL: $label $verdict ($output_file)"
+        return 1
+    fi
+    echo "PASS: $label"
 }

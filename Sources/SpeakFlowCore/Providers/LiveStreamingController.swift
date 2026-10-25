@@ -55,9 +55,15 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         var isShutdown = false
         /// A frame has been dequeued and its send has not returned yet.
         var sendInFlight = false
-        /// Capture time of the first frame sent to the current session. Provider
-        /// timestamps count from that frame.
-        var sessionAudioAnchor: ContinuousClock.Instant?
+        var sampleRate = 16_000
+        var sentAudioSeconds: Double = 0
+        var sentFrameTimings: ArraySlice<SentFrameTiming> = []
+    }
+
+    private struct SentFrameTiming {
+        let start: Double
+        let end: Double
+        let capturedAt: ContinuousClock.Instant
     }
 
     struct CapturedFrame {
@@ -115,15 +121,28 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         state.withLock { $0.isShutdown }
     }
 
-    var sessionAudioAnchor: ContinuousClock.Instant? {
-        state.withLock { $0.sessionAudioAnchor }
+    /// Provider offsets count only sent samples. A dropped frame must not advance
+    /// that clock. Keep bounded history for late finals; never extrapolate a
+    /// timestamp outside retained audio, where capture discontinuities are unknown.
+    func captureTime(at providerSeconds: Double) -> ContinuousClock.Instant? {
+        guard providerSeconds.isFinite, providerSeconds > 0 else { return nil }
+        return state.withLock { state in
+            guard let timing = state.sentFrameTimings.first(where: {
+                providerSeconds > $0.start && providerSeconds <= $0.end + 0.000_001
+            }) else { return nil }
+            return timing.capturedAt + .seconds(min(providerSeconds, timing.end) - timing.start)
+        }
     }
 
-    func set(session: StreamingSession?, active: Bool) {
+    func set(session: StreamingSession?, active: Bool, sampleRate: Int = 16_000) {
         let shouldSignal = state.withLock { state in
             guard !state.isShutdown else { return false }
             // Activating a session starts a new provider audio clock.
-            if session != nil { state.sessionAudioAnchor = nil }
+            if session != nil {
+                state.sentFrameTimings.removeAll()
+                state.sentAudioSeconds = 0
+                state.sampleRate = max(1, sampleRate)
+            }
             state.session = session
             state.active = active
             return active && session != nil && !state.pendingAudio.isEmpty
@@ -133,7 +152,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         }
     }
 
-    func enqueueAudio(_ data: Data) {
+    func enqueueAudio(_ data: Data, capturedAt: ContinuousClock.Instant = .now) {
         guard !data.isEmpty else { return }
         let shouldSignal = state.withLock { state in
             guard !state.isShutdown else { return false }
@@ -149,7 +168,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
                 state.droppedChunks &+= 1
             }
 
-            state.pendingAudio.append(CapturedFrame(data: data, capturedAt: .now))
+            state.pendingAudio.append(CapturedFrame(data: data, capturedAt: capturedAt))
             state.pendingBytes += data.count
             return state.active && state.session != nil
         }
@@ -246,7 +265,14 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
             let frame = state.pendingAudio.removeFirst()
             state.pendingBytes -= frame.data.count
             state.sendInFlight = true
-            if state.sessionAudioAnchor == nil { state.sessionAudioAnchor = frame.capturedAt }
+            // The capture pipeline sends mono PCM16. Record only dequeued audio,
+            // not queued frames that may later be discarded by backpressure.
+            let end = state.sentAudioSeconds + Double(frame.data.count) / (Double(state.sampleRate) * 2)
+            state.sentFrameTimings.append(SentFrameTiming(
+                start: state.sentAudioSeconds, end: end, capturedAt: frame.capturedAt
+            ))
+            state.sentAudioSeconds = end
+            if state.sentFrameTimings.count > 4096 { state.sentFrameTimings.removeFirst() }
             return (session, frame.data)
         }
     }
@@ -897,6 +923,9 @@ public final class LiveStreamingController {
             cancelKeepAliveTimer()
             resetTurnStartState()
 
+            // Stop keeps isActive true while draining captured audio. A close
+            // in that window is deliberate shutdown, not a reconnect request.
+            guard !suppressSessionClosedCallback else { return }
             if isActive {
                 // ── Reconnection attempt ────────────────────────────
                 // On unexpected close (user didn't call stop()), attempt one reconnect
@@ -1075,11 +1104,11 @@ public final class LiveStreamingController {
     /// Reports the time from when the end of the final's audio was captured to
     /// now. Finals without audio timing (duration 0) are skipped, not guessed.
     private func recordFinalLatency(_ result: TranscriptionResult) {
-        guard result.duration > 0, let anchor = audioSessionRef.sessionAudioAnchor else {
+        guard result.start.isFinite, result.start >= 0, result.duration.isFinite, result.duration > 0,
+              let audioEnd = audioSessionRef.captureTime(at: result.start + result.duration) else {
             observabilityEvent("final_latency_unavailable", level: .debug)
             return
         }
-        let audioEnd = anchor + .milliseconds(Int64(((result.start + result.duration) * 1000).rounded()))
         let elapsed = ContinuousClock.now - audioEnd
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
         guard seconds >= 0 else { return }
@@ -1189,7 +1218,7 @@ public final class LiveStreamingController {
     private func activateSession(_ streamSession: StreamingSession) {
         suppressSessionClosedCallback = false
         isActive = true
-        audioSessionRef.set(session: streamSession, active: true)
+        audioSessionRef.set(session: streamSession, active: true, sampleRate: reconnectConfig?.sampleRate ?? 16_000)
         lastInterimText = ""
         lastInterimCharCount = 0
         transcriptionEventSequence = 0
@@ -1266,6 +1295,7 @@ public final class LiveStreamingController {
     ///
 
     private func reconnect(provider: any StreamingTranscriptionProvider, config: StreamingSessionConfig) async -> Bool {
+        let generation = startupGeneration
         do {
             logger.info("Reconnecting to \(provider.displayName)...")
             observabilityEvent("reconnect_attempt_connecting", level: .warning)
@@ -1277,7 +1307,7 @@ public final class LiveStreamingController {
             // the Task is now cancelled but startSession returned normally.
             // Without this check, activateSession would resume streaming
             // against explicit user intent.
-            guard !Task.isCancelled else {
+            guard !Task.isCancelled, startupGeneration == generation, !suppressSessionClosedCallback else {
                 logger.info("Reconnect cancelled after provider.startSession returned — closing new session")
                 try? await newSession.close()
                 return false
@@ -1386,8 +1416,8 @@ extension LiveStreamingController {
         }
     }
 
-    public func _testEnqueueAudioFrame(_ data: Data) {
-        audioSessionRef.enqueueAudio(data)
+    public func _testEnqueueAudioFrame(_ data: Data, capturedAt: ContinuousClock.Instant = .now) {
+        audioSessionRef.enqueueAudio(data, capturedAt: capturedAt)
     }
 
     public var _testPendingAudioChunkCount: Int {

@@ -159,6 +159,12 @@ public actor MockVADBackend {
     public private(set) var maxConcurrentCalls = 0
     private var concurrentCalls = 0
 
+    private var inferenceGate: (@Sendable () async -> Void)?
+
+    public func setInferenceGate(_ gate: (@Sendable () async -> Void)?) {
+        inferenceGate = gate
+    }
+
     public func setInferenceDelay(_ delay: Duration?) {
         inferenceDelay = delay
     }
@@ -170,6 +176,7 @@ public actor MockVADBackend {
         concurrentCalls += 1
         maxConcurrentCalls = max(maxConcurrentCalls, concurrentCalls)
         defer { concurrentCalls -= 1 }
+        await inferenceGate?()
         if let inferenceDelay {
             try? await Task.sleep(for: inferenceDelay)
         }

@@ -22,11 +22,12 @@ final class KeyInterceptor: KeyIntercepting {
 
     private struct EventTapState: @unchecked Sendable {
         var isActive: Bool = false
+        /// Invalidates focus observations made by an earlier registration.
+        var registrationGeneration: UInt64 = 0
         var recordingEventTap: CFMachPort?
         var recordingTapThread: EventTapThread?
-        /// PID of the target app. When non-zero, keys are only intercepted
-        /// if keyboard focus is in this app (prevents swallowing Escape/Enter
-        /// when the user is in Spotlight, password dialogs, etc.).
+        /// PID of the captured app. Enter requires focus in this app;
+        /// plain Escape cancels from any app while this recording is active.
         var targetPid: pid_t = 0
         /// Bundle identifier of the target app, so focus in its helper processes
         /// or in a relaunched instance still counts as the target.
@@ -142,6 +143,7 @@ final class KeyInterceptor: KeyIntercepting {
         // A tap still registered from an earlier recording is reused, but the
         // new recording must own it: its target app and a fresh Enter token.
         let previousTargetPid = state.withLockUnchecked { s -> pid_t? in
+            s.registrationGeneration &+= 1
             guard s.recordingEventTap != nil else { return nil }
             let previous = s.targetPid
             s.targetPid = targetPid
@@ -363,8 +365,8 @@ final class KeyInterceptor: KeyIntercepting {
         guard Self.isInterceptedKey(keyCode) else { return Unmanaged.passRetained(event) }
         guard !isModifiedKey(event, keyCode: keyCode) else { return Unmanaged.passRetained(event) }
 
-        let (isActive, targetPid, targetBundle) = state.withLockUnchecked {
-            ($0.isActive, $0.targetPid, $0.targetBundleIdentifier)
+        let (isActive, targetPid, targetBundle, generation) = state.withLockUnchecked {
+            ($0.isActive, $0.targetPid, $0.targetBundleIdentifier, $0.registrationGeneration)
         }
         guard isActive else {
             HotkeyDiagnostics.record(
@@ -375,15 +377,19 @@ final class KeyInterceptor: KeyIntercepting {
             return Unmanaged.passRetained(event)
         }
 
-        guard isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetBundle: targetBundle) else {
+        // Cancellation is global during a captured recording. Only submission
+        // depends on keyboard focus; an unavailable AX query must not block Escape.
+        guard targetPid != 0 else { return Unmanaged.passRetained(event) }
+        if keyCode != 53,
+           !isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetBundle: targetBundle) {
             return Unmanaged.passRetained(event)
         }
 
         switch keyCode {
         case 53:
             let captured = state.withLockUnchecked { s -> Bool in
-                // Interception may have stopped while focus was being checked.
-                guard s.isActive else { return false }
+                // The registration may have been retired after the event snapshot.
+                guard s.isActive, s.registrationGeneration == generation else { return false }
                 s.pendingKeys.escape = true
                 return true
             }
@@ -395,7 +401,7 @@ final class KeyInterceptor: KeyIntercepting {
             scheduleDelivery()
             return nil
         case 36, 76:
-            guard consumeEnterCaptureToken() else {
+            guard consumeEnterCaptureToken(generation: generation) else {
                 // Enter is one-shot: after the first captured Enter, all subsequent
                 // Enter presses pass through to the app unmodified.
                 HotkeyDiagnostics.record(
@@ -415,7 +421,7 @@ final class KeyInterceptor: KeyIntercepting {
         }
     }
 
-    /// Only intercept Escape/Enter when the target app has keyboard focus.
+    /// Only intercept Enter when the target app has keyboard focus.
     /// If the user is in Spotlight, a password dialog, or another app,
     /// the key passes through so it acts on that UI instead.
     private nonisolated func isFocusInTarget(keyCode: Int64, targetPid: pid_t, targetBundle: String?) -> Bool {
@@ -468,9 +474,10 @@ final class KeyInterceptor: KeyIntercepting {
 
     /// Consumes the one-shot Enter token and marks the Enter pending delivery
     /// in one critical section.
-    private nonisolated func consumeEnterCaptureToken() -> Bool {
+    private nonisolated func consumeEnterCaptureToken(generation: UInt64) -> Bool {
         state.withLockUnchecked { state in
-            guard state.isActive, state.enterCaptureArmed else { return false }
+            guard state.isActive, state.registrationGeneration == generation,
+                  state.enterCaptureArmed else { return false }
             state.enterCaptureArmed = false
             state.pendingKeys.enter = true
             return true
@@ -752,7 +759,8 @@ extension KeyInterceptor {
     // Consumes only the token; the Enter is not left pending for delivery.
     // swiftlint:disable:next identifier_name
     nonisolated func _testConsumeEnterCaptureToken() -> Bool {
-        let consumed = consumeEnterCaptureToken()
+        let generation = state.withLockUnchecked { $0.registrationGeneration }
+        let consumed = consumeEnterCaptureToken(generation: generation)
         state.withLockUnchecked { $0.pendingKeys.enter = false }
         return consumed
     }

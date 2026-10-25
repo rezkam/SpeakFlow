@@ -307,8 +307,12 @@ public final class Settings {
     /// configurator bound to a private store.
     var observabilityConfigurator: ObservabilityConfigurator = .shared
 
-    private init() {
-        defaults = RuntimeIsolation.current.makeDefaults(prefix: "nu.rez.speakflow.tests")
+    private convenience init() {
+        self.init(defaults: RuntimeIsolation.current.makeDefaults(prefix: "nu.rez.speakflow.tests"))
+    }
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
     }
 
     /// The stored value, or nil when the key was never set. Unlike
