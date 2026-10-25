@@ -116,6 +116,7 @@ struct StreamingRecordingTests {
     @Test @MainActor
     func retiredReliabilityCallbacksCannotIncrementReplacementMetrics() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         try await waitUntil { ctx.controller.liveStreamingController?.isActive == true }
         let old = try #require(ctx.controller.liveStreamingController)
@@ -124,7 +125,6 @@ struct StreamingRecordingTests {
         ctx.controller.cancelRecording()
         ctx.provider.mockSession = MockStreamingSession()
         ctx.controller.startRecording()
-        defer { ctx.controller.cancelRecording() }
         try await waitUntil { ctx.controller.liveStreamingController?.isActive == true }
         let replacement = try #require(ctx.controller.testCurrentMetricsSessionId)
         try await waitUntilAsync { await SessionMetricsStore.shared.activeSession(id: replacement) != nil }
@@ -220,6 +220,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func startStreamingRecording_createsLiveController() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         try await waitUntil {
             ctx.provider.startSessionCallCount == 1
@@ -238,10 +239,15 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func startStreamingRecording_signalsCaptureBeforeProviderHandshakeCompletes() async throws {
         let ctx = makeController()
-        ctx.provider.startDelay = 1.0
+        let gate = MockStreamingHandshakeGate()
+        ctx.provider.beforeStartSessionReturns = { await gate.wait() }
+        defer {
+            ctx.controller.cancelRecording()
+            Task { await gate.release() }
+        }
 
         ctx.controller.startRecording()
-        try await waitUntil { ctx.provider.startSessionCallCount == 1 }
+        try await waitUntilAsync { await gate.entered }
 
         #expect(ctx.soundPlayer.count(.start) == 1,
                 "Capture cue must play before the slow provider handshake completes")
@@ -252,6 +258,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func startStreamingRecording_capturesTarget() {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         #expect(ctx.textInserter.captureTargetCalled,
                 "Must capture accessibility target before streaming")
@@ -260,6 +267,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func startStreamingRecording_startsKeyInterceptor() {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         #expect(ctx.keyInterceptor.startCallCount >= 1,
                 "Must start key interceptor for Escape/Enter handling")
@@ -270,6 +278,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_interimText_insertsPartial() {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
 
         guard let lsc = ctx.controller.liveStreamingController else {
@@ -286,6 +295,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_finalText_commitsFinal() {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
 
         guard let lsc = ctx.controller.liveStreamingController else {
@@ -301,6 +311,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_finalUpdatesFullTranscript() {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
 
         guard let lsc = ctx.controller.liveStreamingController else {
@@ -354,6 +365,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_closedEventReconnectsWithoutStoppingRecording() async throws {
         let (controller, provider, _) = makeReconnectController()
+        defer { controller.cancelRecording() }
         controller.startRecording()
 
         try await waitUntil {
@@ -378,6 +390,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_trailingFinalCountsTowardSessionMetrics() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
 
         guard let sessionId = ctx.controller.testCurrentMetricsSessionId else {
@@ -421,6 +434,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_stopDuringInitialHandshakeSkipsTrailingFinalWait() async throws {
         let ctx = makeController(trailingFinalTimeout: 1.0)
+        defer { ctx.controller.cancelRecording() }
         ctx.provider.startDelay = 0.4
 
         ctx.controller.startRecording()
@@ -442,6 +456,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_cancelDuringInitialHandshakeDoesNotActivateLateSession() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.provider.startDelay = 0.4
 
         ctx.controller.startRecording()
@@ -466,6 +481,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_stopDuringInitialHandshakeDoesNotActivateLateSession() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.provider.startDelay = 0.4
 
         ctx.controller.startRecording()
@@ -489,6 +505,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_cancelDuringSessionConfigurationDoesNotActivateLateSession() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         let delayedSession = SuspendingObservabilityStreamingSession()
         ctx.provider.mockSession = delayedSession
 
@@ -514,6 +531,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_stopDuringSessionConfigurationDoesNotActivateLateSession() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         let delayedSession = SuspendingObservabilityStreamingSession()
         ctx.provider.mockSession = delayedSession
 
@@ -538,6 +556,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_stop_setsProcessingFinal() {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         #expect(ctx.controller.isRecording)
 
@@ -549,6 +568,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_cancel_resetsAllState() {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         ctx.controller.cancelRecording()
 
@@ -572,6 +592,7 @@ struct StreamingRecordingTests {
         let (controller, provider, _) = makeReconnectController(
             sessions: [firstSession, secondSession]
         )
+        defer { controller.cancelRecording() }
 
         controller.startRecording()
         try await waitUntil {
@@ -617,6 +638,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_errorEvent_triggersBanner() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
 
         guard let lsc = ctx.controller.liveStreamingController else {
@@ -641,6 +663,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_rejectedHandshakeShowsAuthBanner() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.provider.startError = DeepgramError.handshakeRejected(statusCode: 401)
 
         ctx.controller.startRecording()
@@ -664,6 +687,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_closedWithoutTextUsesActiveProviderBanner() async throws {
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.provider.displayName = "Deepgram"
         ctx.controller.startRecording()
         try await waitUntil {
@@ -690,6 +714,7 @@ struct StreamingRecordingTests {
     @MainActor @Test
     func streamingRecording_noConfiguredProvider_showsBanner() {
         let ctx = makeController(providerConfigured: false)
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
 
         #expect(!ctx.controller.isRecording, "Should not start recording")
@@ -742,6 +767,7 @@ struct StreamingDurationAccountingTests {
         let baselineDeepgramSeconds = stats.providerUsage[ProviderId.deepgram]?.seconds ?? 0
 
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         guard let lsc = ctx.controller.liveStreamingController else {
             Issue.record("LiveStreamingController not created"); return
@@ -769,6 +795,7 @@ struct StreamingDurationAccountingTests {
         let baseline = stats.totalSecondsTranscribed
 
         let ctx = makeController()
+        defer { ctx.controller.cancelRecording() }
         ctx.controller.startRecording()
         guard let lsc = ctx.controller.liveStreamingController else {
             Issue.record("LiveStreamingController not created"); return
