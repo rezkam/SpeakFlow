@@ -50,28 +50,40 @@ enum AuthenticatedSilenceProbe {
                 chunkDuration: .seconds15, expectedMinChunks: 1, expectedMaxChunks: 1,
                 trailingSeconds: 0, rate: nil, validateTranscript: true
             )
-            // Stay above the one-second final-chunk floor even when paced mock
-            // playback runs slightly behind wall time under suite load.
+            // The policy check needs complete nonempty audio, not a real-time
+            // playback speed assertion. Acknowledge every enqueued sample.
             let fixture = AudioFixture(durationSeconds: 2, samples: [Float](repeating: 0.2, count: 32_000))
-            let result = await SpeakFlowLiveE2E.runScenario(scenario: scenario, fixture: fixture)
+            var inputCompleted = false
+            let result = await SpeakFlowLiveE2E.runScenario(
+                scenario: scenario, fixture: fixture,
+                beforeStopForTesting: { recorder in
+                    inputCompleted = await waitForFixture(recorder, samples: fixture.samples.count)
+                }
+            )
             guard await tripwire.requests == 0 else {
                 print("FAIL: authenticated silence mode attempted a request")
                 return 1
             }
-            guard result.success else {
-                print("FAIL: authenticated silence audio assertions failed")
+            guard inputCompleted, result.success else {
+                print("FAIL: authenticated silence audio assertions failed: \(result.error ?? "unknown failure")")
                 return 1
             }
             var configured = LiveE2EScenarioConfig(audio: .file(path: "unused-fixture"))
             configured.expectPhrase = "fixture words"
             configured.recordSeconds = 2.2
             configured.timeoutSeconds = 5
-            let observation = await SpeakFlowLiveE2E.observeConfigured(configured, fixture: fixture)
+            inputCompleted = false
+            let observation = await SpeakFlowLiveE2E.observeConfigured(
+                configured, fixture: fixture,
+                beforeStopForTesting: { recorder in
+                    inputCompleted = await waitForFixture(recorder, samples: fixture.samples.count)
+                }
+            )
             guard await tripwire.requests == 0 else {
                 print("FAIL: authenticated silence mode attempted a request")
                 return 1
             }
-            guard observation.chunks == 1, observation.transcript == nil else {
+            guard inputCompleted, observation.chunks == 1, observation.transcript == nil else {
                 print("FAIL: configured silence audio assertions failed")
                 return 1
             }
@@ -81,6 +93,14 @@ enum AuthenticatedSilenceProbe {
             print("FAIL: synthetic authentication setup failed")
             return 1
         }
+    }
+
+    private static func waitForFixture(_ recorder: StreamingRecorder, samples: Int) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while recorder.mockSamplesFedForTesting < samples && ContinuousClock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
+        }
+        return recorder.mockSamplesFedForTesting == samples
     }
 }
 #endif

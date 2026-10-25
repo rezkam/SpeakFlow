@@ -28,7 +28,7 @@ for mode in storage silence; do
             *'FAIL: authenticated silence mode attempted a request'*)
                 echo 'FAIL: authenticated silence mode attempted a request' ;;
             *'FAIL: authenticated silence audio assertions failed'*)
-                echo 'FAIL: authenticated silence audio assertions failed' ;;
+                printf '%s\n' "$output" | grep '^FAIL: authenticated silence audio assertions failed' ;;
             *'FAIL: configured silence audio assertions failed'*)
                 echo 'FAIL: configured silence audio assertions failed' ;;
             *'FAIL: isolated file contents did not preserve mutations'*)
