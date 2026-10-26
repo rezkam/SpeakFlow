@@ -104,6 +104,38 @@ struct TranscriptionCancellationBehaviorTests {
     }
 
     @MainActor @Test
+    func providerDiagnosticsKeepOriginalSessionAndOneChunkIdentity() async throws {
+        let keys = SpyProviderSettings()
+        try keys.setApiKey("fixture-key", for: ProviderId.mistral)
+        let provider = MistralBatchProvider(
+            providerSettings: keys, settings: SpySettings(), hasAPIKey: { _ in true },
+            logger: SpyProviderLogger(), httpDataProvider: MockHTTPProvider(responseData: Data(#"{"text":"fixture"}"#.utf8))
+        )
+        let transcription = Transcription(statistics: TestStatistics(), service: StubTranscriptionService(mode: .failure))
+        transcription.setActiveBatchProvider(provider)
+        let original = UUID()
+        transcription.setMetricsSession(original)
+        let bridge = transcription.queueBridge
+        defer { transcription.cancelAll(); bridge.stopListening() }
+        let events = TimingEvents()
+        var finished = false
+        transcription.taskFinishedForTesting = { finished = true }
+        let ticket = await bridge.nextSequence()
+        try await ProviderTiming.$sink.withValue({ events.append($0) }) {
+            transcription.transcribe(ticket: ticket, chunk: AudioChunk(wavData: Data([0]), durationSeconds: 0.25))
+            transcription.setMetricsSession(UUID())
+            try await waitUntil { finished }
+        }
+        let finish = try #require(events.values.first { $0.name == "provider_attempt_finished" })
+        #expect(finish.sessionId == original, "Diagnostics must not follow replacement recording state")
+        let requestId = try #require(finish.metadata["requestId"])
+        #expect(events.values.allSatisfy { $0.metadata["requestId"] == requestId && $0.sessionId == original })
+        let phases = events.values.filter { $0.name == "provider_phase_finished" }.compactMap { $0.metadata["phase"] }
+        #expect(phases.contains("scheduling"))
+        #expect(phases.contains("provider_call"))
+    }
+
+    @MainActor @Test
     func e2eCompletionTimeoutCancelsRealPendingTranscription() async throws {
         let service = HeldTranscriptionService(fail: false)
         let transcription = Transcription(statistics: TestStatistics(), service: service)

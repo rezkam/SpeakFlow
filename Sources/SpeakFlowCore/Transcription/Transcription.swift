@@ -90,6 +90,11 @@ public final class Transcription {
         let batchProvider = activeBatchProvider
         let statsContext = statisticsContext()
         let metricsId = metricsSessionId
+        let correlation = ProviderTiming.Correlation(requestId: taskId, sessionId: metricsId)
+        let provider: ProviderTiming.Provider = batchProvider == nil ? .chatgptBatch
+            : (batchProvider?.id == ProviderId.mistralBatch ? .mistralBatch : .otherBatch)
+        let timing = ProviderTiming.Recorder(provider: provider, correlation: correlation)
+        let scheduledAt = ContinuousClock.now
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -100,6 +105,7 @@ public final class Transcription {
             }
 
             guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
+            timing.phaseFinished(.scheduling, since: scheduledAt)
             let effectiveTimeout = TranscriptionService.timeout(forDataSize: chunk.wavData.count)
             let duration = String(format: "%.1f", chunk.durationSeconds)
             let timeout = String(format: "%.1f", effectiveTimeout)
@@ -119,10 +125,13 @@ public final class Transcription {
             do {
                 let text: String
                 guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
-                if let batchProvider {
-                    text = try await batchProvider.transcribe(audio: chunk.wavData)
-                } else {
-                    text = try await service.transcribe(audio: chunk.wavData)
+                text = try await timing.measure(.providerCall) {
+                    try await ProviderTiming.$correlation.withValue(correlation) {
+                        if let batchProvider {
+                            return try await batchProvider.transcribe(audio: chunk.wavData)
+                        }
+                        return try await self.service.transcribe(audio: chunk.wavData)
+                    }
                 }
                 guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
                 let latencySeconds = Self.elapsedSeconds(since: latencyStart)
