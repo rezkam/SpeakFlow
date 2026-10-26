@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 import PackageDescription
 
 let package = Package(
@@ -7,7 +7,8 @@ let package = Package(
         .macOS("26.0")
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.17.7"),
+        // Only VAD is used. The optional text engine contains upstream build paths.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.17.7", traits: []),
         .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.4.3"),
     ],
     targets: [

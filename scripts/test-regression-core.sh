@@ -79,6 +79,8 @@ REGRESSION_SUITES=(
   "ProviderTimingTests"
   "HTTPPhaseMetricsTests"
   "ProviderTimingTransportTests"
+  "RegressionScriptTests"
+  "ReleaseDependencyTests"
   "AuthTests"
   "DeepgramSessionTests"
   "MistralSessionTests"

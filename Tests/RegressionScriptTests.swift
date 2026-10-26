@@ -25,6 +25,23 @@ struct RegressionScriptTests {
     }
     #endif
 
+    @Test(arguments: ["scripts/test-release-resources.sh", "scripts/test-release-privacy.sh", "scripts/test-portable-release.sh"])
+    func releaseArtifactsAreSelfContainedAndPrivate(script: String) throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [script]
+        process.currentDirectoryURL = root
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0, "Release packaging probe failed: \(output)")
+        #expect(output.contains("PASS:"))
+    }
+
     @Test(arguments: ["scripts/test-chunk-wrapper.sh", "scripts/test-noise-wrapper.sh", "scripts/test-modern-e2e-wrappers.sh"], [false, true])
     func legacyWrappersRequireExecutedAssertionsAndSuccessfulExit(script: String, nativeTemporaryFiles: Bool) throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

@@ -430,7 +430,7 @@ fi
 # STAGE 3 — Build
 # =============================================================================
 step "Building release binary"
-build_cmd=(swift build -c release --product SpeakFlow)
+build_cmd=(bash scripts/build-portable-release.sh)
 if [[ -n "$SCRATCH_PATH" ]]; then
     build_cmd+=(--scratch-path "$SCRATCH_PATH")
 fi
@@ -506,11 +506,8 @@ mkdir -p "$APP_NAME.app/Contents/Resources"
 # Binary
 cp "$BUILT_BINARY" "$APP_NAME.app/Contents/MacOS/"
 
-# SPM resource bundle (optional)
-if [ -d "$BUILD_ROOT/release/${APP_NAME}_${APP_NAME}.bundle" ]; then
-    cp -r "$BUILD_ROOT/release/${APP_NAME}_${APP_NAME}.bundle" \
-        "$APP_NAME.app/Contents/Resources/"
-fi
+# Include dependency resources as well as the executable's own resources.
+swift scripts/release-resources.swift package "$BUILD_ROOT/release" "$APP_NAME.app"
 
 # App icon
 ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"

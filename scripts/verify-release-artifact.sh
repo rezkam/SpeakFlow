@@ -143,6 +143,7 @@ verify_app() {
     [ -f "$info_plist" ] || fail "Info.plist not found in app: $app"
     [ -x "$executable" ] || fail "Executable not found or not executable: $executable"
 
+    bash "$(dirname "$0")/verify-artifact-privacy.sh" "$app" || fail "App privacy validation failed"
     info "Verifying app: $app"
 
     codesign --verify --deep --strict --verbose=2 "$app" 2>&1 | sed 's/^/  /' \

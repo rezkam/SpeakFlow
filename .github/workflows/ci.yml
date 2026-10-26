@@ -38,7 +38,7 @@ jobs:
         run: swift package resolve
 
       - name: Validate release scripts
-        run: bash -n scripts/build-release.sh scripts/verify-release-artifact.sh
+        run: bash -n scripts/build-release.sh scripts/verify-release-artifact.sh scripts/build-portable-release.sh scripts/verify-artifact-privacy.sh
 
       - name: Install SwiftLint
         run: brew install swiftlint
@@ -67,4 +67,4 @@ jobs:
         run: swift test --skip-build --no-parallel
 
       - name: Build release
-        run: swift build -c release --product SpeakFlow
+        run: bash scripts/build-portable-release.sh
