@@ -449,8 +449,9 @@ struct RecordingControllerSessionIdentityTests {
         controller.stopRecordingAndSubmit()
         await Task.yield()
         controller.cancelRecording()
-        try await waitUntil(timeout: .seconds(1)) { stream._testAudioSessionRefIsShutdown }
-        #expect(stream._testAudioSessionRefIsShutdown)
+        // Inspect shutdown even on timeout so the ownership failure is explicit.
+        try? await waitUntil(timeout: .seconds(1)) { stream._testAudioSessionRefIsShutdown }
+        #expect(stream._testAudioSessionRefIsShutdown, "Escape must reach the stopping stream and shut down its sender")
         #expect(stream._testPendingAudioChunkCount == 0)
         #expect(await session.uploads == 0)
         #expect(!inserter.operations.contains(.pressEnterKey))
@@ -549,6 +550,26 @@ struct RecordingControllerSessionIdentityTests {
 
         #expect(transcription.transcribeCalls.isEmpty,
                 "Audio from a retired recording must not get a ticket in the new recording's queue session")
+    }
+
+    @MainActor @Test
+    func batchReadinessCueWaitsForCaptureStartup() async throws {
+        let ctx = makeBatch()
+        ctx.controller.startRecording()
+        #expect(ctx.sounds.count(.start) == 0, "Capture has not started in the asynchronous startup task")
+        try await waitUntil(timeout: .seconds(5)) { ctx.sounds.count(.start) == 1 }
+        #expect(ctx.controller.isRecording)
+        ctx.controller.cancelRecording()
+    }
+
+    @MainActor @Test
+    func cancelledBatchStartupNeverPlaysReadinessCue() async throws {
+        let ctx = makeBatch()
+        ctx.controller.startRecording()
+        ctx.controller.cancelRecording()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(ctx.sounds.count(.start) == 0,
+                "A retired startup never announces readiness")
     }
 
     @MainActor @Test

@@ -33,6 +33,7 @@ struct RecordingCrossModeTests {
         let providers: SpyProviderSettings
         let transcription: Transcription
         let inserter: SpyTextInserter
+        let settings: SpySettings
     }
 
     @MainActor private func fixture() -> Fixture {
@@ -59,7 +60,7 @@ struct RecordingCrossModeTests {
         controller.testMode = .live
         controller.setupTranscriptionCallbacks()
         return Fixture(controller: controller, batch: batch, stream: stream,
-                       providers: providers, transcription: transcription, inserter: inserter)
+                       providers: providers, transcription: transcription, inserter: inserter, settings: settings)
     }
 
     @MainActor private func stopBatchWithAudio(_ fixture: Fixture) async throws {
@@ -71,6 +72,38 @@ struct RecordingCrossModeTests {
         recorder._testSetVADActive(false)
         fixture.controller.stopRecordingAndSubmit()
         try await waitUntilAsync { await fixture.batch.started }
+    }
+
+    @Test @MainActor
+    func deadlineRetiresBatchDeliveryBeforePendingSubmitReleasesOwnership() async throws {
+        let f = fixture()
+        let enterGate = AsyncStream<Void>.makeStream()
+        let enterTask = Task { for await _ in enterGate.stream {} }
+        f.inserter.pendingTaskAfterEnter = enterTask
+        defer {
+            enterGate.continuation.finish()
+            f.controller.cancelRecording()
+            Task { await f.batch.release() }
+        }
+        f.settings.batchFinalizationTimeoutBase = 0.01
+        f.settings.batchFinalizationTimeoutPerChunkSecond = 0
+        f.settings.batchFinalizationMaxTimeout = 0.01
+        f.providers.activeProviderId = ProviderId.mistralBatch
+        f.controller.startRecording()
+        try await stopBatchWithAudio(f)
+        try await waitUntil { f.inserter.enterKeyPressed }
+        #expect(f.controller.isProcessingFinal)
+        var responseFinished = false
+        f.transcription.taskFinishedForTesting = { responseFinished = true }
+        await f.batch.release()
+        try await waitUntil { responseFinished }
+        try await waitUntilAsync { await f.transcription.queueBridge.isIdle() }
+
+        #expect(f.inserter.insertedTexts.isEmpty, "Expired batch delivery must not type after its submit has been queued")
+        #expect(f.controller.fullTranscript.isEmpty, "Expired results must not enter session accounting")
+        enterGate.continuation.finish()
+        await enterTask.value
+        try await waitUntil { !f.controller.isProcessingFinal }
     }
 
     @Test @MainActor

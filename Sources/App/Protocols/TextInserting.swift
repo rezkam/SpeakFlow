@@ -16,6 +16,8 @@ protocol TextInserting: AnyObject {
     /// Atomically replaces a tail segment by deleting `replacingChars` from the end
     /// and then typing `text`. Implementations should preserve ordering as one unit.
     func replaceTail(replacingChars: Int, with text: String)
+    /// Reconciles a complete segment against successfully posted recording text.
+    func updateStreamingText(_ text: String, isFinal: Bool)
     func insertText(_ text: String)
     func deleteChars(_ count: Int)
     func pressEnterKey()

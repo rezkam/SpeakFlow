@@ -203,7 +203,9 @@ public actor DeepgramStreamingSession: StreamingSession {
     public func close() async throws {
         if await core.isConnected {
             let msg = #"{"type":"CloseStream"}"#
-            try? await core.send(.string(msg), disconnectedError: DeepgramError.sessionClosed)
+            try? await withControlMessageDeadline(timeout: 0.25) { [core] in
+                try await core.send(.string(msg), disconnectedError: DeepgramError.sessionClosed)
+            }
         }
         await core.close()
         logger.log("WebSocket closed", level: .info, visibility: .public)

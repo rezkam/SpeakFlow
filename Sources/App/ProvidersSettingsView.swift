@@ -200,6 +200,7 @@ struct ProviderCard: View {
     @State private var keyError: String?
     @State private var isEditingKey = false
     @State private var isValidatingKey = false
+    @State private var activeValidation: UUID?
     @State private var showRemoveConfirm = false
 
     private var isConfigured: Bool {
@@ -233,11 +234,16 @@ struct ProviderCard: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
         .alert("Remove \(account.name) API Key?", isPresented: $showRemoveConfirm) {
-            Button("Remove", role: .destructive) { _ = onAuthAction(.removeKey) }
+            Button("Remove", role: .destructive) {
+                retireKeyValidation()
+                _ = onAuthAction(.removeKey)
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will remove the stored API key. You will need to enter it again to use \(account.name).")
         }
+        .onDisappear { retireKeyValidation() }
+        .onChange(of: account.id) { retireKeyValidation() }
     }
 
     private var header: some View {
@@ -332,6 +338,7 @@ struct ProviderCard: View {
                         .controlSize(.small)
                 } else {
                     Button("Update Key...") {
+                        retireKeyValidation()
                         keyDraft = ""
                         keyError = nil
                         isEditingKey.toggle()
@@ -424,16 +431,25 @@ struct ProviderCard: View {
         activeProviderId == model.providerRegistryId && activeModelId == model.id
     }
 
+    private func retireKeyValidation() {
+        activeValidation = nil
+        isValidatingKey = false
+    }
+
     private func validateAndSaveKey() {
         let key = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.count >= 8 else { return }
 
+        let validation = UUID()
+        activeValidation = validation
         isValidatingKey = true
         keyError = nil
 
         Task { @MainActor in
             let validator = ProviderRegistry.shared.provider(for: account.id) as? APIKeyValidatable
             let error = await validator?.validateAPIKey(key)
+            guard activeValidation == validation else { return }
+            activeValidation = nil
             isValidatingKey = false
             if let error {
                 keyError = error

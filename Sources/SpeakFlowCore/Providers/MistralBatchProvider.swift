@@ -241,7 +241,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
 extension MistralBatchProvider: APIKeyValidatable {
     /// Delegates to the same validation as the realtime provider (both use Mistral API keys).
     public nonisolated func validateAPIKey(_ key: String) async -> String? {
-        await MistralProvider.validateMistralAPIKey(key)
+        await MistralProvider.validateMistralAPIKey(key, httpDataProvider: httpDataProvider)
     }
 }
 
