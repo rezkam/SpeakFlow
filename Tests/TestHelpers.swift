@@ -14,6 +14,7 @@ func makeTestRecordingController(
     providerSettings: SpyProviderSettings = SpyProviderSettings(),
     providerRegistry: SpyProviderRegistry = SpyProviderRegistry(),
     settings: SpySettings = SpySettings(),
+    hotkeySettings: SpyHotkeySettings = SpyHotkeySettings(),
     transcription: SpyTranscription = SpyTranscription(),
     playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
 ) -> (RecordingController, SpyKeyInterceptor, SpyTextInserter, SpyBannerPresenter) {
@@ -22,7 +23,7 @@ func makeTestRecordingController(
     let ti = SpyTextInserter()
     let bp = SpyBannerPresenter()
     let c = RecordingController(
-        keyInterceptor: ki, textInserter: ti, appState: bp,
+        keyInterceptor: ki, textInserter: ti, appState: bp, hotkeySettings: hotkeySettings,
         providerSettings: providerSettings, providerRegistry: providerRegistry,
         settings: settings, transcription: transcription,
         playSoundEffect: playSoundEffect
@@ -37,7 +38,7 @@ func makeTestRecordingController(
 @MainActor
 final class SpySoundEffectPlayer {
     enum Effect: Equatable {
-        case error, start, stop, complete
+        case error, start, stop, complete, nudge, warning
     }
 
     private(set) var effects: [Effect] = []
@@ -48,6 +49,8 @@ final class SpySoundEffectPlayer {
         case .start: effects.append(.start)
         case .stop: effects.append(.stop)
         case .complete: effects.append(.complete)
+        case .nudge: effects.append(.nudge)
+        case .warning: effects.append(.warning)
         }
     }
 

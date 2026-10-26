@@ -205,6 +205,70 @@ extension HTTPDataProviderTestabilityTests {
         return "\(header).\(payload).sig"
     }
 
+    @Test(arguments: [400, 401, 403, 429, 503])
+    func transcriptionRetriesOnlyTransientRefreshFailures(status: Int) async throws {
+        let original = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = original }
+        let mock = MockHTTPProvider(responseData: Data(#"{"error":"invalid_grant"}"#.utf8), statusCode: status)
+        OpenAICodexAuth.httpProvider = mock
+        try OpenAICodexAuth.saveCredentials(OAuthCredentials(
+            accessToken: "synthetic-token", refreshToken: "synthetic-refresh", idToken: nil,
+            accountId: "synthetic-account", lastRefresh: .distantPast
+        ))
+        do {
+            _ = try await TranscriptionService().transcribe(audio: Data([0]))
+            Issue.record("Rejected credentials must prevent transcription")
+        } catch {
+            if status == 429 || status >= 500 {
+                #expect(TranscriptionErrorKind.classify(error) != .authentication)
+            } else {
+                #expect((error as? TranscriptionError)?.isRetryable == false)
+                #expect(TranscriptionErrorKind.classify(error) == .authentication)
+                #expect(error.localizedDescription.contains("log in again"))
+            }
+        }
+        #expect(mock.requestCount == (status == 429 || status >= 500 ? Config.maxAttempts : 1),
+                "Terminal OAuth rejection must not spend transcription retries")
+    }
+
+    @Test(arguments: [400, 401, 403])
+    func terminalRefreshRetainsOAuthAndHTTPMetadata(status: Int) async throws {
+        let original = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = original }
+        let mock = MockHTTPProvider(responseData: Data(#"{"error":"invalid_grant"}"#.utf8), statusCode: status)
+        OpenAICodexAuth.httpProvider = mock
+        let credentials = OAuthCredentials(accessToken: "synthetic-token", refreshToken: "synthetic-refresh",
+                                           idToken: nil, accountId: "synthetic-account", lastRefresh: .distantPast)
+        do {
+            _ = try await OpenAICodexAuth.refreshTokens(credentials,
+                expectedGeneration: UnifiedAuthStorage.shared.chatGPTCredentialGeneration())
+            Issue.record("A rejected refresh must fail")
+        } catch {
+            #expect(error as? AuthError == .tokenRefreshRejected(statusCode: status, oauthError: "invalid_grant"))
+            #expect(TranscriptionErrorKind.classify(error) == .authentication)
+        }
+        #expect(mock.requestCount == 1)
+    }
+
+    @Test
+    func tokenAndAccountComeFromTheSameValidatedSnapshot() async throws {
+        let original = OAuthCredentials(accessToken: "synthetic-token-a", refreshToken: "synthetic-refresh-a",
+                                        idToken: nil, accountId: "synthetic-account-a", lastRefresh: Date())
+        let replacement = OAuthCredentials(accessToken: "synthetic-token-b", refreshToken: "synthetic-refresh-b",
+                                           idToken: nil, accountId: "synthetic-account-b", lastRefresh: Date())
+        defer { OpenAICodexAuth.afterCredentialValidationForTesting = nil }
+        try OpenAICodexAuth.saveCredentials(original)
+        OpenAICodexAuth.afterCredentialValidationForTesting = {
+            try OpenAICodexAuth.saveCredentials(replacement)
+        }
+
+        let loaded = try await AuthCredentials.load()
+
+        #expect(OpenAICodexAuth.loadCredentials()?.accountId == replacement.accountId)
+        #expect(loaded.accessToken == original.accessToken)
+        #expect(loaded.accountId == original.accountId, "The account must belong to the validated token, not a later login")
+    }
+
     @Test(arguments: ["logout", "replacement", "cancellation"])
     func heldAuthorizationExchangeCannotCommitAfterRetirement(action: String) async throws {
         let saved = OpenAICodexAuth.httpProvider

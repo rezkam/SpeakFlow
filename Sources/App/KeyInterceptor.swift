@@ -31,7 +31,7 @@ final class KeyInterceptor: KeyIntercepting {
         var targetPid: pid_t = 0
         /// Bundle identifier of the target app, so focus in its helper processes
         /// or in a relaunched instance still counts as the target.
-        var targetBundleIdentifier: String?
+        var targetApplicationURL: URL?
         /// One-shot Enter capture token. Armed at recording start, consumed by the
         /// first intercepted Enter so subsequent Enters pass through normally.
         var enterCaptureArmed: Bool = false
@@ -67,15 +67,7 @@ final class KeyInterceptor: KeyIntercepting {
                 return CGEvent.tapCreate(
                     tap: .cgSessionEventTap, place: .headInsertEventTap,
                     options: .defaultTap, eventsOfInterest: CGEventMask(eventMask),
-                    callback: { (_, eventType, event, refcon) -> Unmanaged<CGEvent>? in
-                        guard let refcon else { return Unmanaged.passRetained(event) }
-                        let interceptor = Unmanaged<KeyInterceptor>.fromOpaque(refcon).takeUnretainedValue()
-                        if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
-                            interceptor.handleEventTapDisabled(eventType: eventType)
-                            return Unmanaged.passRetained(event)
-                        }
-                        return interceptor.handleKeyEvent(event: event)
-                    },
+                    callback: KeyInterceptor.eventTapCallback,
                     userInfo: refcon
                 )
             },
@@ -83,10 +75,21 @@ final class KeyInterceptor: KeyIntercepting {
         )
     }
 
+    nonisolated static let eventTapCallback: CGEventTapCallBack = { @Sendable (_, eventType, event, refcon) in
+        guard let refcon else { return Unmanaged.passUnretained(event) }
+        let interceptor = Unmanaged<KeyInterceptor>.fromOpaque(refcon).takeUnretainedValue()
+        if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
+            interceptor.handleEventTapDisabled(eventType: eventType)
+            return Unmanaged.passUnretained(event)
+        }
+        return interceptor.handleKeyEvent(event: event)
+    }
+
     private let state = OSAllocatedUnfairLock(initialState: EventTapState())
     private let eventTapDriver: EventTapDriver
-    private let keyboardFocusSnapshotProvider: @Sendable (_ targetPid: pid_t, _ targetBundle: String?) -> KeyboardFocusSnapshot
+    private let keyboardFocusSnapshotProvider: @Sendable (_ targetPid: pid_t, _ targetApplicationURL: URL?) -> KeyboardFocusSnapshot
     private let bundleIdentifierLookup: @Sendable (pid_t) -> String?
+    private let applicationURLLookup: @Sendable (pid_t) -> URL?
     private let secureInputOwnerProvider: () -> pid_t?
     private let systemKeyDownCounter: @Sendable () -> UInt32
     private let secureInputPollingInterval: Duration
@@ -104,6 +107,7 @@ final class KeyInterceptor: KeyIntercepting {
         bundleIdentifierLookup: @escaping @Sendable (pid_t) -> String? = {
             NSRunningApplication(processIdentifier: $0)?.bundleIdentifier
         },
+        applicationURLLookup: @escaping @Sendable (pid_t) -> URL? = ApplicationOwnership.applicationURL,
         secureInputOwner: @escaping () -> pid_t? = KeyInterceptor.currentSecureInputOwner,
         secureInputPollingInterval: Duration = .seconds(1),
         systemKeyDownCounter: @escaping @Sendable () -> UInt32 = KeyInterceptor.currentSystemKeyDownCount
@@ -111,12 +115,13 @@ final class KeyInterceptor: KeyIntercepting {
         self.systemKeyDownCounter = systemKeyDownCounter
         self.eventTapDriver = eventTapDriver
         self.bundleIdentifierLookup = bundleIdentifierLookup
-        keyboardFocusSnapshotProvider = { targetPid, targetBundle in
+        self.applicationURLLookup = applicationURLLookup
+        keyboardFocusSnapshotProvider = { targetPid, targetApplicationURL in
             Self.focusSnapshot(
                 focusQuery(),
                 targetPid: targetPid,
-                targetBundle: targetBundle,
-                bundleIdentifierLookup: bundleIdentifierLookup
+                targetApplicationURL: targetApplicationURL,
+                applicationURLLookup: applicationURLLookup
             )
         }
         secureInputOwnerProvider = secureInputOwner
@@ -130,6 +135,7 @@ final class KeyInterceptor: KeyIntercepting {
         eventTapDriver = .system
         keyboardFocusSnapshotProvider = { targetPid, _ in testKeyboardFocusSnapshotProvider(targetPid) }
         bundleIdentifierLookup = { _ in nil }
+        applicationURLLookup = { _ in nil }
         secureInputOwnerProvider = Self.currentSecureInputOwner
         systemKeyDownCounter = Self.currentSystemKeyDownCount
         secureInputPollingInterval = .seconds(1)
@@ -139,7 +145,7 @@ final class KeyInterceptor: KeyIntercepting {
     // MARK: - Start / Stop
 
     func start(targetPid: pid_t) {
-        let targetBundle = targetPid == 0 ? nil : bundleIdentifierLookup(targetPid)
+        let targetApplicationURL = targetPid == 0 ? nil : applicationURLLookup(targetPid)
         // A tap still registered from an earlier recording is reused, but the
         // new recording must own it: its target app and a fresh Enter token.
         let previousTargetPid = state.withLockUnchecked { s -> pid_t? in
@@ -147,7 +153,7 @@ final class KeyInterceptor: KeyIntercepting {
             guard s.recordingEventTap != nil else { return nil }
             let previous = s.targetPid
             s.targetPid = targetPid
-            s.targetBundleIdentifier = targetBundle
+            s.targetApplicationURL = targetApplicationURL
             s.enterCaptureArmed = true
             s.tapKeyDowns = 0
             s.tapSyntheticKeyDowns = 0
@@ -167,7 +173,7 @@ final class KeyInterceptor: KeyIntercepting {
         }
         state.withLockUnchecked {
             $0.targetPid = targetPid
-            $0.targetBundleIdentifier = targetBundle
+            $0.targetApplicationURL = targetApplicationURL
             $0.enterCaptureArmed = true
         }
         let secureInputOwner = secureInputOwnerProvider()
@@ -261,7 +267,7 @@ final class KeyInterceptor: KeyIntercepting {
             s.systemKeyDownsAtStart = nil
             s.isActive = false
             s.targetPid = 0
-            s.targetBundleIdentifier = nil
+            s.targetApplicationURL = nil
             s.enterCaptureArmed = false
             s.pendingKeys = PendingKeys()
             s.recordingEventTap = nil
@@ -349,7 +355,7 @@ final class KeyInterceptor: KeyIntercepting {
         state.withLockUnchecked {
             $0.isActive = false
             $0.targetPid = 0
-            $0.targetBundleIdentifier = nil
+            $0.targetApplicationURL = nil
             $0.enterCaptureArmed = false
             $0.pendingKeys = PendingKeys()
             $0.recordingEventTap = nil
@@ -362,11 +368,11 @@ final class KeyInterceptor: KeyIntercepting {
     private nonisolated func handleKeyEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
         countTapKeyDown(event)
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        guard Self.isInterceptedKey(keyCode) else { return Unmanaged.passRetained(event) }
-        guard !isModifiedKey(event, keyCode: keyCode) else { return Unmanaged.passRetained(event) }
+        guard Self.isInterceptedKey(keyCode) else { return Unmanaged.passUnretained(event) }
+        guard !isModifiedKey(event, keyCode: keyCode) else { return Unmanaged.passUnretained(event) }
 
-        let (isActive, targetPid, targetBundle, generation) = state.withLockUnchecked {
-            ($0.isActive, $0.targetPid, $0.targetBundleIdentifier, $0.registrationGeneration)
+        let (isActive, targetPid, targetApplicationURL, generation) = state.withLockUnchecked {
+            ($0.isActive, $0.targetPid, $0.targetApplicationURL, $0.registrationGeneration)
         }
         guard isActive else {
             HotkeyDiagnostics.record(
@@ -374,15 +380,15 @@ final class KeyInterceptor: KeyIntercepting {
                 level: .debug,
                 metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
             )
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         // Cancellation is global during a captured recording. Only submission
         // depends on keyboard focus; an unavailable AX query must not block Escape.
-        guard targetPid != 0 else { return Unmanaged.passRetained(event) }
+        guard targetPid != 0 else { return Unmanaged.passUnretained(event) }
         if keyCode != 53,
-           !isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetBundle: targetBundle) {
-            return Unmanaged.passRetained(event)
+           !isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetApplicationURL: targetApplicationURL) {
+            return Unmanaged.passUnretained(event)
         }
 
         switch keyCode {
@@ -393,7 +399,7 @@ final class KeyInterceptor: KeyIntercepting {
                 s.pendingKeys.escape = true
                 return true
             }
-            guard captured else { return Unmanaged.passRetained(event) }
+            guard captured else { return Unmanaged.passUnretained(event) }
             HotkeyDiagnostics.record(
                 "key_interceptor_escape_captured",
                 metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
@@ -408,7 +414,7 @@ final class KeyInterceptor: KeyIntercepting {
                     "key_interceptor_enter_passed_capture_not_armed",
                     metadata: Self.keyMetadata(keyCode: keyCode, targetPid: targetPid)
                 )
-                return Unmanaged.passRetained(event)
+                return Unmanaged.passUnretained(event)
             }
             HotkeyDiagnostics.record(
                 "key_interceptor_enter_captured",
@@ -417,14 +423,14 @@ final class KeyInterceptor: KeyIntercepting {
             scheduleDelivery()
             return nil
         default:
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
     }
 
     /// Only intercept Enter when the target app has keyboard focus.
     /// If the user is in Spotlight, a password dialog, or another app,
     /// the key passes through so it acts on that UI instead.
-    private nonisolated func isFocusInTarget(keyCode: Int64, targetPid: pid_t, targetBundle: String?) -> Bool {
+    private nonisolated func isFocusInTarget(keyCode: Int64, targetPid: pid_t, targetApplicationURL: URL?) -> Bool {
         // No target app: there is no recording field to protect, so the key
         // belongs to whatever has focus.
         guard targetPid != 0 else {
@@ -434,7 +440,7 @@ final class KeyInterceptor: KeyIntercepting {
             )
             return false
         }
-        let focus = keyboardFocusSnapshotProvider(targetPid, targetBundle)
+        let focus = keyboardFocusSnapshotProvider(targetPid, targetApplicationURL)
         guard !focus.isInTargetApp else { return true }
         HotkeyDiagnostics.record(
             "key_interceptor_key_passed_focus_mismatch",
@@ -600,11 +606,11 @@ extension KeyInterceptor {
     /// different holder is recorded as context only: capture was observed to
     /// keep working in other apps while a background app held secure input.
     private func recordSecureInputDetected(owner: pid_t, targetPid: pid_t, phase: String) {
-        let targetBundle = state.withLockUnchecked { $0.targetBundleIdentifier }
+        let targetApplicationURL = state.withLockUnchecked { $0.targetApplicationURL }
         let ownerBundle = bundleIdentifierLookup(owner)
         let ownerIsTargetApp = targetPid != 0 && (
             owner == targetPid
-                || TextInserter.bundleIdentifiersLikelySameApp(target: targetBundle, candidate: ownerBundle)
+                || ApplicationOwnership.matches(target: targetApplicationURL, candidate: applicationURLLookup(owner))
         )
         HotkeyDiagnostics.record(
             "key_interceptor_secure_input_detected",
@@ -661,8 +667,8 @@ extension KeyInterceptor {
     nonisolated static func focusSnapshot(
         _ query: FocusQueryResult,
         targetPid: pid_t,
-        targetBundle: String?,
-        bundleIdentifierLookup: (pid_t) -> String?
+        targetApplicationURL: URL?,
+        applicationURLLookup: (pid_t) -> URL?
     ) -> KeyboardFocusSnapshot {
         guard let ownerPid = query.focusedPid ?? query.focusedAppPid else {
             return KeyboardFocusSnapshot(isInTargetApp: false, focusedPid: nil, frontmostPid: nil, source: query.source)
@@ -670,9 +676,9 @@ extension KeyInterceptor {
         // Same rule TextInserter uses before typing: the target app's helper
         // processes and a relaunched instance are still the target app.
         let isInTargetApp = ownerPid == targetPid
-            || TextInserter.bundleIdentifiersLikelySameApp(
-                target: targetBundle,
-                candidate: bundleIdentifierLookup(ownerPid)
+            || ApplicationOwnership.matches(
+                target: targetApplicationURL,
+                candidate: applicationURLLookup(ownerPid)
             )
         return KeyboardFocusSnapshot(
             isInTargetApp: isInTargetApp,
@@ -787,8 +793,8 @@ extension KeyInterceptor {
         event.type = .keyDown
         event.flags = flags
         let result = handleKeyEvent(event: event)
-        if let result {
-            result.release()
+        if result != nil {
+            // Incoming events are borrowed by the callback, not transferred.
             return false
         }
         return true

@@ -303,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HotkeySettings.shared.currentHotkey = .controlOptionD
         }
 
-        let harness = UITestHarnessController()
+        let harness = UITestHarnessController(recording: recording)
         harness.onStartClicked = { recording.startRecording() }
         harness.onStopClicked = { recording.stopRecording(reason: .ui) }
         harness.onSeedStatsClicked = { [weak self] in self?.seedUITestStatistics() }

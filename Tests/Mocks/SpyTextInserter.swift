@@ -23,6 +23,8 @@ final class SpyTextInserter: TextInserting {
     var cancelCalled = false
     var resetCalled = false
     var replaceTailCallCount = 0
+    private var streamingCommittedText = ""
+    private var streamingPostedText = ""
     var pendingTask: Task<Void, Never>?
     var operations: [Operation] = []
     var observabilitySessionId: UUID?
@@ -44,6 +46,14 @@ final class SpyTextInserter: TextInserting {
     func insertText(_ text: String) {
         insertedTexts.append(text)
         operations.append(.insertText(text))
+    }
+
+    func updateStreamingText(_ text: String, isFinal: Bool) {
+        let desired = streamingCommittedText + text + (isFinal && !text.isEmpty ? " " : "")
+        if isFinal { streamingCommittedText = desired }
+        let common = zip(streamingPostedText, desired).prefix { $0 == $1 }.count
+        replaceTail(replacingChars: streamingPostedText.count - common, with: String(desired.dropFirst(common)))
+        streamingPostedText = desired
     }
 
     func replaceTail(replacingChars: Int, with text: String) {
@@ -73,11 +83,15 @@ final class SpyTextInserter: TextInserting {
     }
 
     func cancelAndReset() {
+        streamingCommittedText = ""
+        streamingPostedText = ""
         cancelCalled = true
         operations.append(.cancelAndReset)
     }
 
     func reset() {
+        streamingCommittedText = ""
+        streamingPostedText = ""
         resetCalled = true
         operations.append(.reset)
     }

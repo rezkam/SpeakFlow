@@ -308,7 +308,6 @@ final class RecordingController {
         if let streaming = provider as? any StreamingTranscriptionProvider {
             startStreamingRecording(provider: streaming)
         } else if let batch = provider as? any BatchTranscriptionProvider {
-            signalRecordingStarted(provider: provider)
             startBatchRecording(provider: batch)
         }
         onStateChanged?()
@@ -437,6 +436,7 @@ final class RecordingController {
                     providerId: provider.id,
                     language: self.languageForStats(providerId: provider.id)
                 )
+                self.signalRecordingStarted(provider: provider)
                 self.observabilityEvent("batch_recording_started")
             }
         }
@@ -640,6 +640,9 @@ final class RecordingController {
             #endif
             return
         }
+        // Retire outstanding provider results before waiting on insertion or submit.
+        // A forced deadline must not let a late response type behind its Enter.
+        transcription.queueBridge.invalidateDelivery()
         await textInserter.waitForPendingInsertions()
         guard ownsFinalization(generation) else { return }
 
@@ -899,7 +902,7 @@ extension RecordingController {
             let textForInsertion = self.streamingTextForInsertion(
                 textToType, isFinal: isFinal, fullText: fullText
             )
-            self.textInserter.replaceTail(replacingChars: replacingChars, with: textForInsertion)
+            self.textInserter.updateStreamingText(fullText, isFinal: isFinal)
             self.observabilityEvent(
                 "streaming_text_update",
                 level: .debug,

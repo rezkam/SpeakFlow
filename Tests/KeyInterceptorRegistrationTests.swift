@@ -265,16 +265,31 @@ struct KeyInterceptorRegistrationTests {
     @MainActor
     private func makeFocusInterceptor(
         focusedPid: pid_t,
-        bundles: [pid_t: String]
+        bundles: [pid_t: String],
+        applications: [pid_t: URL] = [:]
     ) -> (KeyInterceptor, FakeEventTapDriver) {
         let fake = FakeEventTapDriver()
         let interceptor = KeyInterceptor(
             eventTapDriver: fake.driver,
             focusQuery: { .init(focusedPid: focusedPid, focusedAppPid: focusedPid, source: "test") },
             bundleIdentifierLookup: { bundles[$0] },
+            applicationURLLookup: { applications[$0] },
             secureInputOwner: { nil }
         )
         return (interceptor, fake)
+    }
+
+    @MainActor @Test(arguments: ["com.vendor.Editor.independent", "com.vendor.Editor"])
+    func bundleNamesAloneCannotAuthorizeAnotherProcess(candidateBundle: String) {
+        let (interceptor, _) = makeFocusInterceptor(
+            focusedPid: 99,
+            bundles: [42: "com.vendor.Editor", 99: candidateBundle]
+        )
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 42)
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Unverified process ownership must pass Enter through regardless of bundle spelling")
+        #expect(interceptor._testIsEnterCaptureArmed)
     }
 
     @MainActor @Test
@@ -283,7 +298,9 @@ struct KeyInterceptorRegistrationTests {
         // target app is still the target app.
         let (interceptor, _) = makeFocusInterceptor(
             focusedPid: 99,
-            bundles: [42: "com.vendor.Editor", 99: "com.vendor.Editor.helper"]
+            bundles: [42: "com.vendor.Editor", 99: "com.vendor.Editor.helper"],
+            applications: [42: URL(fileURLWithPath: "/fixture/Editor.app"),
+                           99: URL(fileURLWithPath: "/fixture/Editor.app/Contents/Helpers/Worker.app")]
         )
         defer { interceptor.stop() }
         interceptor.start(targetPid: 42)
@@ -296,13 +313,15 @@ struct KeyInterceptorRegistrationTests {
     func focusInARelaunchedTargetAppIsTheTarget() {
         let (interceptor, _) = makeFocusInterceptor(
             focusedPid: 77,
-            bundles: [42: "com.vendor.Editor", 77: "com.vendor.Editor"]
+            bundles: [42: "com.vendor.Editor", 77: "com.vendor.Editor"],
+            applications: [42: URL(fileURLWithPath: "/fixture/Editor.app"),
+                           77: URL(fileURLWithPath: "/fixture/Editor.app")]
         )
         defer { interceptor.stop() }
         interceptor.start(targetPid: 42)
 
-        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53),
-                "Escape must be captured when the target app relaunched under a new PID")
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Enter must be captured when the verified target app relaunched under a new PID")
     }
 
     @MainActor @Test

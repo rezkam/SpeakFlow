@@ -48,6 +48,7 @@ import OSLog
 private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
     private struct State {
         var session: StreamingSession?
+        var connectionGeneration: UInt64 = 0
         var active: Bool = false
         var pendingAudio: ArraySlice<CapturedFrame> = []
         var pendingBytes = 0
@@ -137,6 +138,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
     func set(session: StreamingSession?, active: Bool, sampleRate: Int = 16_000) {
         let shouldSignal = state.withLock { state in
             guard !state.isShutdown else { return false }
+            state.connectionGeneration &+= 1
             // Activating a session starts a new provider audio clock.
             if session != nil {
                 state.sentFrameTimings.removeAll()
@@ -237,17 +239,19 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
 
     private func runSenderLoop() async {
         for await _ in sendSignalStream {
-            while let (session, frame) = dequeueFrameIfActive() {
+            while let (session, frame, generation) = dequeueFrameIfActive() {
                 do {
                     try await session.sendAudio(frame)
                     state.withLock { $0.sendInFlight = false }
                 } catch {
                     logger.warning("Audio send failed: \(error.localizedDescription, privacy: .public)")
-                    state.withLock {
-                        $0.sendInFlight = false
-                        $0.active = false
+                    let isCurrent = state.withLock { state in
+                        state.sendInFlight = false
+                        guard state.connectionGeneration == generation else { return false }
+                        state.active = false
+                        return true
                     }
-                    break
+                    if isCurrent { break }
                 }
             }
 
@@ -257,7 +261,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         }
     }
 
-    private func dequeueFrameIfActive() -> (StreamingSession, Data)? {
+    private func dequeueFrameIfActive() -> (StreamingSession, Data, UInt64)? {
         state.withLock { state in
             guard state.active,
                   let session = state.session,
@@ -273,7 +277,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
             ))
             state.sentAudioSeconds = end
             if state.sentFrameTimings.count > 4096 { state.sentFrameTimings.removeFirst() }
-            return (session, frame.data)
+            return (session, frame.data, state.connectionGeneration)
         }
     }
 }
@@ -302,9 +306,12 @@ public final class LiveStreamingController {
     public var onFinalLatency: ((Double) -> Void)?
     /// Longest stop() waits for captured audio to reach the provider.
     var stopDrainTimeout: Duration = .seconds(1)
+    /// Bound graceful control sends even when cancellation is not cooperative.
+    var controlMessageTimeout: TimeInterval = 0.5
 
     // Interim text tracking for replacement
     private var lastInterimText = ""
+    private var deferredFinalSegments: [TranscriptionResult] = []
     private var lastInterimCharCount = 0
     private var transcriptionEventSequence: UInt64 = 0
     private var lastTranscriptionEventAt: ContinuousClock.Instant?
@@ -680,16 +687,26 @@ public final class LiveStreamingController {
         // server-side finals to flush. Do not hold the UI in processing-final
         // for the normal trailing timeout in that case.
         if let activeSession = session {
-            do { try await activeSession.finalize() }
-            catch { logger.debug("Session finalize failed: \(error.localizedDescription)") }
+            let finalizeStarted = ContinuousClock.now
+            do {
+                try await withControlMessageDeadline(timeout: controlMessageTimeout) {
+                    try await activeSession.finalize()
+                }
+            } catch { logger.debug("Session finalize failed: \(error.localizedDescription)") }
 
             // Wait briefly for post-finalize trailing finals, but close early once
             // transcription events have gone quiet.
-            await waitForTrailingFinals(maxWait: trailingFinalTimeout)
+            let finalizeElapsed = finalizeStarted.duration(to: .now)
+            let elapsedSeconds = Double(finalizeElapsed.components.seconds)
+                + Double(finalizeElapsed.components.attoseconds) / 1e18
+            await waitForTrailingFinals(maxWait: max(0, trailingFinalTimeout - elapsedSeconds))
 
             // Close the WebSocket
-            do { try await activeSession.close() }
-            catch { logger.debug("Session close failed: \(error.localizedDescription)") }
+            do {
+                try await withControlMessageDeadline(timeout: controlMessageTimeout) {
+                    try await activeSession.close()
+                }
+            } catch { logger.debug("Session close failed: \(error.localizedDescription)") }
         }
         session = nil
 
@@ -697,6 +714,7 @@ public final class LiveStreamingController {
         eventTask = nil
 
         // Clear interim state
+        deferredFinalSegments.removeAll()
         lastInterimText = ""
         lastInterimCharCount = 0
         transcriptionEventSequence = 0
@@ -729,7 +747,11 @@ public final class LiveStreamingController {
         cancelSilenceTimer(reason: "cancelRequested")
         cancelKeepAliveTimer()
 
-        try? await session?.close()
+        if let closingSession = session {
+            try? await withControlMessageDeadline(timeout: controlMessageTimeout) {
+                try await closingSession.close()
+            }
+        }
         session = nil
 
         eventTask?.cancel()
@@ -739,6 +761,7 @@ public final class LiveStreamingController {
         if lastInterimCharCount > 0 {
             onTextUpdate?("", lastInterimCharCount, true, "")
         }
+        deferredFinalSegments.removeAll()
         lastInterimText = ""
         lastInterimCharCount = 0
         transcriptionEventSequence = 0
@@ -799,32 +822,7 @@ public final class LiveStreamingController {
         switch event {
         case .interim(let result):
             guard !result.transcript.isEmpty else { return }
-            markTranscriptionActivity()
-            observabilityEvent(
-                "event_interim",
-                level: .debug,
-                metadata: ["characters": String(result.transcript.count)]
-            )
-            let newText = result.transcript
-
-            // Treat every interim as fresh activity: restart the silence countdown
-            // from full duration. This guarantees auto-end fires exactly
-            // `autoEndSilenceDuration` after the last text event — even for
-            // providers (e.g. Mistral) that never emit `speechFinal`/`utteranceEnd`
-            // mid-stream.
-            hasSpeechOccurred = true
-            startSilenceTimer(source: "interim")
-
-            // Smart diff: only delete/retype the suffix that changed
-            let (charsToDelete, suffixToType) = diffFromEnd(
-                old: lastInterimText, new: newText
-            )
-            lastInterimText = newText
-            lastInterimCharCount = newText.count
-
-            if charsToDelete > 0 || !suffixToType.isEmpty {
-                onTextUpdate?(suffixToType, charsToDelete, false, newText)
-            }
+            updateInterimText(textIncludingDeferredSegments(result))
 
         case .finalResult(let result):
             recordFinalLatency(result)
@@ -838,21 +836,13 @@ public final class LiveStreamingController {
             )
             if shouldTreatFinalAsInterim(result) {
                 logger.debug("Short non-terminal final treated as interim: '\(result.transcript, privacy: .private(mask: .hash))'")
-                let downgraded = TranscriptionResult(
-                    transcript: result.transcript,
-                    confidence: result.confidence,
-                    start: result.start,
-                    duration: result.duration,
-                    words: result.words,
-                    isFinal: false,
-                    speechFinal: false
-                )
-                handleEvent(.interim(downgraded))
+                updateInterimText(textIncludingDeferredSegments(result, retainFinal: true))
                 return
             }
 
             markTranscriptionActivity()
-            let newText = result.transcript
+            let newText = textIncludingDeferredSegments(result)
+            deferredFinalSegments.removeAll()
             let previousInterimCount = lastInterimCharCount
 
             // Speech activity — restart silence timer so it counts down from this
@@ -1133,6 +1123,34 @@ public final class LiveStreamingController {
     ///
     /// This prevents one-word fillers from being committed prematurely while preserving
     /// intentional short commands/sentences that are punctuated or speech-final.
+    /// Only positively non-overlapping provider intervals can accumulate. Missing
+    /// timing or an overlapping revision keeps the existing replacement semantics.
+    private func textIncludingDeferredSegments(_ result: TranscriptionResult, retainFinal: Bool = false) -> String {
+        guard result.start.isFinite, result.start >= 0,
+              result.duration.isFinite, result.duration > 0 else {
+            deferredFinalSegments.removeAll()
+            return result.transcript
+        }
+        deferredFinalSegments.removeAll { $0.start + $0.duration > result.start + 0.000_001 }
+        let prefix = deferredFinalSegments.map(\.transcript)
+        if retainFinal { deferredFinalSegments.append(result) }
+        guard !prefix.isEmpty else { return result.transcript }
+        return (prefix + [result.transcript]).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    private func updateInterimText(_ newText: String) {
+        markTranscriptionActivity()
+        observabilityEvent("event_interim", level: .debug, metadata: ["characters": String(newText.count)])
+        hasSpeechOccurred = true
+        startSilenceTimer(source: "interim")
+        let (charsToDelete, suffixToType) = diffFromEnd(old: lastInterimText, new: newText)
+        lastInterimText = newText
+        lastInterimCharCount = newText.count
+        if charsToDelete > 0 || !suffixToType.isEmpty {
+            onTextUpdate?(suffixToType, charsToDelete, false, newText)
+        }
+    }
+
     private func shouldTreatFinalAsInterim(_ result: TranscriptionResult) -> Bool {
         guard minimumFinalWordCount > 1 else { return false }
         guard !result.speechFinal else { return false }
@@ -1219,6 +1237,7 @@ public final class LiveStreamingController {
         suppressSessionClosedCallback = false
         isActive = true
         audioSessionRef.set(session: streamSession, active: true, sampleRate: reconnectConfig?.sampleRate ?? 16_000)
+        deferredFinalSegments.removeAll()
         lastInterimText = ""
         lastInterimCharCount = 0
         transcriptionEventSequence = 0
@@ -1418,6 +1437,10 @@ extension LiveStreamingController {
 
     public func _testEnqueueAudioFrame(_ data: Data, capturedAt: ContinuousClock.Instant = .now) {
         audioSessionRef.enqueueAudio(data, capturedAt: capturedAt)
+    }
+
+    public func _testDrainAudio(timeout: Duration) async -> Bool {
+        await audioSessionRef.drain(timeout: timeout)
     }
 
     public var _testPendingAudioChunkCount: Int {
