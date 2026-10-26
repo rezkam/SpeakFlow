@@ -21,6 +21,7 @@ public final class HotkeyListener {
         var eventTap: CFMachPort?
         var runLoopSource: CFRunLoopSource?
         var globalMonitor: Any?
+        var localMonitor: Any?
         var activeHotkeyType: HotkeyType?
     }
 
@@ -54,7 +55,35 @@ public final class HotkeyListener {
         )
     }
 
+    static let eventTapCallback: CGEventTapCallBack = { (_, eventType, event, refcon) in
+        guard let refcon else { return Unmanaged.passUnretained(event) }
+        let listener = Unmanaged<HotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
+        if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
+            listener.handleEventTapDisabled(eventType: eventType)
+            return Unmanaged.passUnretained(event)
+        }
+        if eventType == .keyDown {
+            listener.handleTapKeyDown(event: event)
+        } else {
+            listener.handleFlagsChanged(event: event)
+        }
+        return Unmanaged.passUnretained(event)
+    }
+
+    struct EventMonitorDriver: Sendable {
+        let addGlobal: @MainActor @Sendable (@escaping (NSEvent) -> Void) -> Any?
+        let addLocal: @MainActor @Sendable (@escaping (NSEvent) -> NSEvent?) -> Any?
+        let remove: @Sendable (Any) -> Void
+
+        static let system = EventMonitorDriver(
+            addGlobal: { NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: $0) },
+            addLocal: { NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: $0) },
+            remove: { NSEvent.removeMonitor($0) }
+        )
+    }
+
     private let eventTapDriver: EventTapDriver
+    private let eventMonitorDriver: EventMonitorDriver
 
     #if DEBUG
     // swiftlint:disable:next identifier_name
@@ -67,10 +96,12 @@ public final class HotkeyListener {
 
     public init() {
         eventTapDriver = .system
+        eventMonitorDriver = .system
     }
 
-    init(eventTapDriver: EventTapDriver) {
+    init(eventTapDriver: EventTapDriver, eventMonitorDriver: EventMonitorDriver = .system) {
         self.eventTapDriver = eventTapDriver
+        self.eventMonitorDriver = eventMonitorDriver
     }
 
     deinit {
@@ -81,17 +112,19 @@ public final class HotkeyListener {
         // Clean up event tap and monitors directly without calling the
         // @MainActor-isolated stop() method.  The lock-protected state
         // is safe to access from any isolation context.
-        let (tap, source, monitor) = tapState.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?) in
-            let result = (s.eventTap, s.runLoopSource, s.globalMonitor)
+        let (tap, source, monitor, local) = tapState.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?, Any?) in
+            let result = (s.eventTap, s.runLoopSource, s.globalMonitor, s.localMonitor)
             s.eventTap = nil
             s.runLoopSource = nil
             s.globalMonitor = nil
+            s.localMonitor = nil
             return result
         }
         if let tap { eventTapDriver.setTapEnabled(tap, false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         if let tap { CFMachPortInvalidate(tap) }
-        if let monitor { NSEvent.removeMonitor(monitor) }
+        if let monitor { eventMonitorDriver.remove(monitor) }
+        if let local { eventMonitorDriver.remove(local) }
     }
 
     public func start(type: HotkeyType) {
@@ -116,11 +149,12 @@ public final class HotkeyListener {
         Self._testStopHook?()
         #endif
 
-        let (tap, source, monitor) = tapState.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?) in
-            let result = (s.eventTap, s.runLoopSource, s.globalMonitor)
+        let (tap, source, monitor, local) = tapState.withLockUnchecked { s -> (CFMachPort?, CFRunLoopSource?, Any?, Any?) in
+            let result = (s.eventTap, s.runLoopSource, s.globalMonitor, s.localMonitor)
             s.eventTap = nil
             s.runLoopSource = nil
             s.globalMonitor = nil
+            s.localMonitor = nil
             s.activeHotkeyType = nil
             s.lastControlReleaseTime = nil
             s.controlWasDown = false
@@ -130,14 +164,16 @@ public final class HotkeyListener {
         if let tap { eventTapDriver.setTapEnabled(tap, false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
         if let tap { CFMachPortInvalidate(tap) }
-        if let monitor { NSEvent.removeMonitor(monitor) }
+        if let monitor { eventMonitorDriver.remove(monitor) }
+        if let local { eventMonitorDriver.remove(local) }
 
         let metadata = [
             "hadEventTap": tap == nil ? "false" : "true",
             "hadRunLoopSource": source == nil ? "false" : "true",
-            "hadGlobalMonitor": monitor == nil ? "false" : "true"
+            "hadGlobalMonitor": monitor == nil ? "false" : "true",
+            "hadLocalMonitor": local == nil ? "false" : "true"
         ]
-        if tap != nil || source != nil || monitor != nil {
+        if tap != nil || source != nil || monitor != nil || local != nil {
             HotkeyDiagnostics.record("hotkey_registration_stopped", metadata: metadata)
         } else {
             HotkeyDiagnostics.record("hotkey_registration_stop_noop", level: .debug, metadata: metadata)
@@ -159,20 +195,7 @@ public final class HotkeyListener {
 
         let tap = eventTapDriver.createTap(
             Unmanaged.passUnretained(self).toOpaque(),
-            { (_, eventType, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon else { return Unmanaged.passRetained(event) }
-                let listener = Unmanaged<HotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
-                if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
-                    listener.handleEventTapDisabled(eventType: eventType)
-                    return Unmanaged.passRetained(event)
-                }
-                if eventType == .keyDown {
-                    listener.handleTapKeyDown(event: event)
-                } else {
-                    listener.handleFlagsChanged(event: event)
-                }
-                return Unmanaged.passRetained(event)
-            }
+            Self.eventTapCallback
         )
 
         guard let tap else {
@@ -284,19 +307,24 @@ public final class HotkeyListener {
     // MARK: - Key Combo Detection (using NSEvent monitor)
 
     private func startKeyComboDetection(type: HotkeyType) {
-        let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        let monitor = eventMonitorDriver.addGlobal { [weak self] event in
             self?.handleKeyDown(event: event, type: type)
+        }
+        let local = eventMonitorDriver.addLocal { [weak self] event in
+            self?.handleKeyDown(event: event, type: type)
+            return event
         }
         tapState.withLockUnchecked {
             $0.globalMonitor = monitor
+            $0.localMonitor = local
             $0.activeHotkeyType = type
         }
 
-        if monitor != nil {
+        if monitor != nil && local != nil {
             HotkeyDiagnostics.record(
                 "hotkey_registration_succeeded",
                 metadata: registrationMetadata(for: type).merging([
-                    "eventMonitor": "NSEventGlobalKeyDown",
+                    "eventMonitor": "NSEventGlobalAndLocalKeyDown",
                     "exclusiveRegistration": "false",
                     "accessibilityTrusted": accessibilityTrustedValue()
                 ]) { _, new in new }
@@ -306,7 +334,7 @@ public final class HotkeyListener {
                 "hotkey_registration_failed",
                 level: .error,
                 metadata: registrationMetadata(for: type).merging([
-                    "reason": "globalMonitorCreateReturnedNil",
+                    "reason": monitor == nil ? "globalMonitorCreateReturnedNil" : "localMonitorCreateReturnedNil",
                     "accessibilityTrusted": accessibilityTrustedValue()
                 ]) { _, new in new }
             )

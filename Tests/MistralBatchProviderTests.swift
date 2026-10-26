@@ -367,12 +367,14 @@ struct MistralSharedValidationTests {
     /// Both providers must reject the same invalid key identically.
     @Test @MainActor
     func bothProvidersRejectInvalidKeyConsistently() async {
-        let realtimeProvider = MistralProvider()
-        let batchProvider = MistralBatchProvider()
+        let http = MockHTTPProvider(responseData: Data(), statusCode: 401)
+        let realtimeProvider = MistralProvider(httpDataProvider: http)
+        let batchProvider = MistralBatchProvider(hasAPIKey: { _ in false }, httpDataProvider: http)
 
         let realtimeError = await realtimeProvider.validateAPIKey("invalid-key-xyz")
         let batchError = await batchProvider.validateAPIKey("invalid-key-xyz")
 
+        #expect(http.requestCount == 2, "Both providers must validate through the injected HTTP boundary")
         #expect(realtimeError != nil, "Realtime provider must reject invalid key")
         #expect(batchError != nil, "Batch provider must reject invalid key")
         #expect(realtimeError == batchError,
@@ -382,7 +384,9 @@ struct MistralSharedValidationTests {
     /// The shared static method must be accessible and reject invalid keys.
     @Test
     func sharedValidationRejectsInvalidKey() async {
-        let error = await MistralProvider.validateMistralAPIKey("bad-key-123")
+        let http = MockHTTPProvider(responseData: Data(), statusCode: 401)
+        let error = await MistralProvider.validateMistralAPIKey("bad-key-123", httpDataProvider: http)
+        #expect(http.requestCount == 1, "Validation must use the injected transport")
         #expect(error != nil, "Shared validation must reject invalid key")
         #expect(error?.contains("authentication") == true || error?.contains("Invalid") == true,
                 "Error should mention auth failure, got: \(error ?? "nil")")

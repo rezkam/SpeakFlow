@@ -12,10 +12,12 @@ struct TextInserterCancellationTests {
     @MainActor
     final class PostRecorder {
         private(set) var keyDowns: [String] = []
+        private(set) var keyCodes: [Int64] = []
         private(set) var keyUps = 0
 
         func record(_ event: CGEvent) {
             if event.type == .keyDown {
+                keyCodes.append(event.getIntegerValueField(.keyboardEventKeycode))
                 var length = 0
                 var buffer = [UniChar](repeating: 0, count: 4)
                 event.keyboardGetUnicodeString(
@@ -147,11 +149,11 @@ struct TextInserterFieldIdentityTests {
     }
 
     @Test
-    func unknownFocusFallsBackToWindowIdentity() {
+    func matchingWindowDoesNotProveMatchingField() {
         #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .unknown, windowsMatch: false) == .different)
-        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .unknown, windowsMatch: true) == .same)
+        #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .unknown, windowsMatch: true) == .unknown)
         #expect(TextInserter.fieldIdentity(elementsEqual: false, capturedReportsFocused: .unknown, windowsMatch: nil) == .unknown,
-                "With no evidence either way, keep the app-level decision")
+                "Missing field evidence must not authorize input based on app or window identity")
     }
 
     @MainActor @Test
@@ -176,19 +178,31 @@ struct TextInserterFieldIdentityTests {
         #expect(recorder.keyDowns == ["h", "i"])
     }
 
-    @MainActor @Test
-    func unknownFieldIdentityKeepsTheAppLevelDecision() async throws {
+    @MainActor @Test(arguments: [Field.unknown, Field.different, nil])
+    func uncertainDestinationPausesEveryActionUntilOriginalFieldReturns(initialField: Field?) async throws {
         let recorder = TextInserterCancellationTests.PostRecorder()
         let inserter = TextInserter._testMakeIsolatedInstance()
+        defer { inserter.cancelAndReset() }
+        var field = initialField
         inserter.targetElement = AXUIElementCreateApplication(42_424)
         inserter.targetPid = 42_424
         inserter._testSetTargetProcessLiveness { $0 == 42_424 }
         inserter._testSetFlagsProvider { [] }
         inserter._testSetEventPoster { recorder.record($0) }
-        inserter._testSetFocusObserver { .init(focusedPid: 42_424, field: .unknown) }
+        inserter._testSetFocusObserver { field.map { .init(focusedPid: 42_424, field: $0) } }
 
         inserter.insertText("ok")
-        try await waitUntil(timeout: .seconds(2)) { recorder.keyDowns.count == 2 }
-        #expect(recorder.keyDowns == ["o", "k"])
+        inserter.deleteChars(1)
+        inserter.pressEnterKey()
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(recorder.keyDowns.isEmpty, "Unproven destination must pause text, deletion, and Enter")
+
+        // Only the user returning to the captured field authorizes queued input.
+        field = .same
+        await inserter.waitForPendingInsertions()
+        #expect(recorder.keyDowns.count == 4)
+        #expect(Array(recorder.keyDowns.prefix(2)) == ["o", "k"])
+        #expect(Array(recorder.keyCodes.suffix(2)) == [51, 36])
+        #expect(recorder.keyUps == 4)
     }
 }

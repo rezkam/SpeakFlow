@@ -26,6 +26,7 @@ public final class MistralProvider: StreamingTranscriptionProvider, @unchecked S
     private let settings: any MistralSettingsProviding
     private let providerSettings: any ProviderSettingsProviding
     private let hasAPIKey: @Sendable (String) -> Bool
+    private let httpDataProvider: any HTTPDataProvider
 
     @MainActor
     public convenience init(
@@ -43,11 +44,13 @@ public final class MistralProvider: StreamingTranscriptionProvider, @unchecked S
     init(
         settings: any MistralSettingsProviding = Settings.shared,
         providerSettings: any ProviderSettingsProviding = ProviderSettings.shared,
-        hasAPIKey: @escaping @Sendable (String) -> Bool
+        hasAPIKey: @escaping @Sendable (String) -> Bool = { ProviderAPIKeys.hasAPIKey(for: $0) },
+        httpDataProvider: any HTTPDataProvider = URLSession.shared
     ) {
         self.settings = settings
         self.providerSettings = providerSettings
         self.hasAPIKey = hasAPIKey
+        self.httpDataProvider = httpDataProvider
     }
 
     @MainActor
@@ -88,12 +91,12 @@ extension MistralProvider: APIKeyValidatable {
     }()
 
     public nonisolated func validateAPIKey(_ key: String) async -> String? {
-        await Self.validateMistralAPIKey(key)
+        await Self.validateMistralAPIKey(key, httpDataProvider: httpDataProvider)
     }
 
     /// Shared validation implementation used by both MistralProvider and MistralBatchProvider.
     /// Validates a Mistral API key by calling the /v1/models endpoint.
-    static func validateMistralAPIKey(_ key: String) async -> String? {
+    static func validateMistralAPIKey(_ key: String, httpDataProvider: any HTTPDataProvider = URLSession.shared) async -> String? {
         let url = Self.validationEndpoint
         var request = URLRequest(url: url)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -101,7 +104,7 @@ extension MistralProvider: APIKeyValidatable {
         request.timeoutInterval = 10
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await httpDataProvider.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return "Invalid response from Mistral"
             }

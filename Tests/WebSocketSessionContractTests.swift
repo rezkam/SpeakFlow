@@ -117,12 +117,17 @@ private enum ContractTestError: Error {
 
 private actor ContractWebSocketTransport {
     private var messages: [URLSessionWebSocketTask.Message]
+    private let holdCloseStream: Bool
+    private var heldControlSend: CheckedContinuation<Void, Never>?
     private(set) var sentMessages: [URLSessionWebSocketTask.Message] = []
     private(set) var cancelled = false
     private(set) var invalidated = false
+    private(set) var cancelCount = 0
+    private(set) var invalidateCount = 0
 
-    init(messages: [URLSessionWebSocketTask.Message]) {
+    init(messages: [URLSessionWebSocketTask.Message], holdCloseStream: Bool = false) {
         self.messages = messages
+        self.holdCloseStream = holdCloseStream
     }
 
     func connection() -> WebSocketConnection {
@@ -142,8 +147,16 @@ private actor ContractWebSocketTransport {
         )
     }
 
-    private func record(_ message: URLSessionWebSocketTask.Message) {
+    private func record(_ message: URLSessionWebSocketTask.Message) async {
         sentMessages.append(message)
+        if holdCloseStream, case .string(let text) = message, text.contains("CloseStream") {
+            await withCheckedContinuation { heldControlSend = $0 }
+        }
+    }
+
+    func resumeControlSend() {
+        heldControlSend?.resume()
+        heldControlSend = nil
     }
 
     private func receive() async throws -> URLSessionWebSocketTask.Message {
@@ -155,10 +168,13 @@ private actor ContractWebSocketTransport {
     }
 
     private func cancel() {
+        cancelCount += 1
         cancelled = true
+        resumeControlSend()
     }
 
     private func invalidate() {
+        invalidateCount += 1
         invalidated = true
     }
 }
@@ -327,6 +343,44 @@ struct WebSocketSessionContractTests {
             Issue.record("A genuine transport failure must finish with .closed")
             return
         }
+    }
+
+    @Test
+    func deepgramCloseDisposesTransportWhenCloseStreamSendStalls() async throws {
+        let transport = ContractWebSocketTransport(messages: [], holdCloseStream: true)
+        let connection = await transport.connection()
+        let session = DeepgramStreamingSession(apiKey: "synthetic-key", config: .default,
+                                               connectionFactory: { _, _ in connection })
+        try await session.connect()
+        let watchdog = Task {
+            try? await Task.sleep(for: .milliseconds(1500))
+            await transport.resumeControlSend()
+        }
+        let started = ContinuousClock.now
+        try await session.close()
+        let elapsed = ContinuousClock.now - started
+        watchdog.cancel()
+        #expect(elapsed < .seconds(1), "CloseStream must have a deadline before transport teardown")
+        #expect(await transport.cancelCount == 1)
+        #expect(await transport.invalidateCount == 1)
+    }
+
+    @Test(arguments: WebSocketProviderContractCase.allCases)
+    func terminalReceiveFailureDisposesTransportExactlyOnce(provider: WebSocketProviderContractCase) async throws {
+        let transport = ContractWebSocketTransport(messages: [
+            .string(#"{"type":"session.created","session":{"request_id":"fixture","audio_format":{"encoding":"pcm_s16le","sample_rate":16000}}}"#)
+        ])
+        let connection = await transport.connection()
+        let session = provider.makeSession(connectionFactory: { _, _ in connection })
+        try await provider.connect(session)
+
+        try await provider.finishReceiveLoop(session, after: URLError(.timedOut))
+
+        #expect(await transport.cancelCount == 1, "Terminal receive failure owns socket cancellation")
+        #expect(await transport.invalidateCount == 1, "Terminal receive failure owns URLSession disposal")
+        try await session.close()
+        #expect(await transport.cancelCount == 1, "Later explicit close must be idempotent")
+        #expect(await transport.invalidateCount == 1)
     }
 
     @Test(arguments: WebSocketProviderContractCase.allCases)

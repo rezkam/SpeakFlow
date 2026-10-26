@@ -44,6 +44,8 @@ final class RecordingController {
         /// before batch finalization may complete.
         var stoppingRecorder: StreamingRecorder?
         var finalizationReason = StopReason.unknown.rawValue
+        /// One caller owns insertion, submit, and cleanup across suspensions.
+        var batchFinalizerActive = false
         /// Wall-clock anchor for the next streaming segment. Each final
         /// contributes its own elapsed segment duration to the stats time
         /// totals (streaming providers do not emit a server-side duration).
@@ -52,9 +54,13 @@ final class RecordingController {
     }
 
     private var session = RecordingSession(generation: 0)
+    #if DEBUG
+    var batchFinalizationDeferredForTesting: (() -> Void)?
+    #endif
 
     /// Retires the current recording and starts a fresh session for the next.
     private func replaceSession() {
+        transcription.queueBridge.invalidateDelivery()
         session = RecordingSession(generation: session.generation &+ 1)
     }
 
@@ -302,7 +308,6 @@ final class RecordingController {
         if let streaming = provider as? any StreamingTranscriptionProvider {
             startStreamingRecording(provider: streaming)
         } else if let batch = provider as? any BatchTranscriptionProvider {
-            signalRecordingStarted(provider: provider)
             startBatchRecording(provider: batch)
         }
         onStateChanged?()
@@ -375,28 +380,25 @@ final class RecordingController {
         let startingRecorder = StreamingRecorder()
         recorder = startingRecorder
         startingRecorder.onChunkReady = { [weak self] chunk in
-            Task { @MainActor in
-                // Audio from a retired recording must not get a ticket in the
-                // current queue session, or it would be typed into the next one.
-                guard let self, self.owns(generation) else {
-                    self?.observabilityEvent("batch_chunk_dropped_stale", level: .debug)
-                    return
-                }
-                let ticket = await self.transcription.queueBridge.nextSequence()
-                guard self.owns(generation) else { return }
-                self.observabilityEvent(
-                    "batch_chunk_ready",
-                    level: .debug,
-                    metadata: [
-                        "ticketSeq": String(ticket.seq),
-                        "ticketSession": String(ticket.session),
-                        "durationSeconds": String(format: "%.3f", chunk.durationSeconds),
-                        "bytes": String(chunk.wavData.count),
-                        "speechProbability": String(format: "%.3f", chunk.speechProbability)
-                    ]
-                )
-                self.transcription.transcribe(ticket: ticket, chunk: chunk)
+            // The recorder awaits acceptance, including final ticket allocation.
+            guard let self, self.owns(generation) else {
+                self?.observabilityEvent("batch_chunk_dropped_stale", level: .debug)
+                return
             }
+            let ticket = await self.transcription.queueBridge.nextSequence()
+            guard self.owns(generation) else { return }
+            self.observabilityEvent(
+                "batch_chunk_ready",
+                level: .debug,
+                metadata: [
+                    "ticketSeq": String(ticket.seq),
+                    "ticketSession": String(ticket.session),
+                    "durationSeconds": String(format: "%.3f", chunk.durationSeconds),
+                    "bytes": String(chunk.wavData.count),
+                    "speechProbability": String(format: "%.3f", chunk.speechProbability)
+                ]
+            )
+            self.transcription.transcribe(ticket: ticket, chunk: chunk)
         }
         startingRecorder.onAutoEnd = { [weak self] in
             self?.observabilityEvent("batch_auto_end_triggered")
@@ -434,6 +436,7 @@ final class RecordingController {
                     providerId: provider.id,
                     language: self.languageForStats(providerId: provider.id)
                 )
+                self.signalRecordingStarted(provider: provider)
                 self.observabilityEvent("batch_recording_started")
             }
         }
@@ -474,8 +477,8 @@ final class RecordingController {
             isProcessingFinal = true
             playSoundEffect(.stop)
             hasPlayedCompletionSound = true
+            // Keep the stopping stream owned so Escape can cancel its queued uploads.
             let controller = liveStreamingController
-            liveStreamingController = nil
             let trailingTimeout = settings.streamingTrailingFinalTimeout
             let generation = session.generation
             Task { @MainActor in
@@ -505,6 +508,9 @@ final class RecordingController {
                 // A delivered Escape cancels the recording; nothing is left to finish.
                 guard self.ownsFinalization(generation) else { return }
                 await self.finishFinalization(generation: generation, playCompletion: false)
+                if self.liveStreamingController === controller {
+                    self.liveStreamingController = nil
+                }
             }
         } else {
             isProcessingFinal = true; playSoundEffect(.stop)
@@ -583,19 +589,6 @@ final class RecordingController {
             // is even enqueued, which can complete finalization too early.
             await stoppingRecorder?.waitForStopCompletion()
 
-            // Grace period before the first poll.
-            //
-            // StreamingRecorder.stop() performs final-chunk flush in an async Task
-            // (drain sampleQueue → emit WAV → enqueue to TranscriptionQueueBridge).
-            // Without this sleep the first getPendingCount() call can fire before that
-            // Task runs, sees 0 pending, and fires completeBatchFinalization() early —
-            // dropping the tail text because onTextReady only inserts while
-            // isRecording || isProcessingFinal.
-            //
-            // One poll interval (500 ms) is more than enough for the in-process flush;
-            // real network latency for the chunk comes later and is covered by the loop.
-            try? await Task.sleep(for: .milliseconds(500))
-
             while ContinuousClock.now < deadline {
                 if Task.isCancelled { return }
                 guard self.ownsFinalization(generation) else { return } // completed or cancelled
@@ -605,7 +598,12 @@ final class RecordingController {
                     level: .debug,
                     metadata: ["pending": String(pending)]
                 )
-                if pending == 0 { break }
+                if pending == 0 {
+                    // Zero outstanding tickets does not mean buffered text has
+                    // reached the inserter. Keep polling if completion defers.
+                    await self.completeBatchFinalization(generation: generation, force: false)
+                    guard self.ownsFinalization(generation) else { return }
+                }
                 try? await Task.sleep(for: .milliseconds(500))
             }
             // At the deadline, finish with whatever arrived rather than hang.
@@ -625,7 +623,11 @@ final class RecordingController {
     /// has been typed. `force` skips the transcription wait at the deadline.
     /// Idempotent: ownership is re-checked after every suspension.
     private func completeBatchFinalization(generation: UInt64, force: Bool) async {
-        guard ownsFinalization(generation) else { return }
+        guard ownsFinalization(generation), !session.batchFinalizerActive else { return }
+        session.batchFinalizerActive = true
+        defer {
+            if owns(generation) { session.batchFinalizerActive = false }
+        }
 
         // Final-audio barrier: the stopping recorder must have enqueued its last chunk.
         await session.stoppingRecorder?.waitForStopCompletion()
@@ -633,8 +635,14 @@ final class RecordingController {
         if !force, await !transcription.queueBridge.isIdle() {
             // A later onAllComplete or the polling deadline finishes the job.
             observabilityEvent("batch_finalization_deferred_pending", level: .debug)
+            #if DEBUG
+            batchFinalizationDeferredForTesting?()
+            #endif
             return
         }
+        // Retire outstanding provider results before waiting on insertion or submit.
+        // A forced deadline must not let a late response type behind its Enter.
+        transcription.queueBridge.invalidateDelivery()
         await textInserter.waitForPendingInsertions()
         guard ownsFinalization(generation) else { return }
 
@@ -849,6 +857,12 @@ final class RecordingController {
 // MARK: - Streaming Recording
 
 extension RecordingController {
+    private func streamingTextForInsertion(_ text: String, isFinal: Bool, fullText: String) -> String {
+        if !text.isEmpty { return isFinal ? text + " " : text }
+        if isFinal && !fullText.isEmpty { return " " }
+        return ""
+    }
+
     func startStreamingRecording(provider: any StreamingTranscriptionProvider) {
         let config = provider.buildSessionConfig()
         observabilityEvent(
@@ -867,7 +881,8 @@ extension RecordingController {
         let controller = LiveStreamingController(skipAudioEngineForTesting: testMode == .live)
         self.liveStreamingController = controller
         let generation = session.generation
-        controller.sessionId = currentMetricsSessionId
+        let metricsSessionId = currentMetricsSessionId
+        controller.sessionId = metricsSessionId
         self.session.streamingSegmentStart = ContinuousClock.now
         controller.onAudioCaptureStarted = { [weak self, weak controller] in
             guard let self,
@@ -884,15 +899,10 @@ extension RecordingController {
             // must never touch the current recording's field.
             guard let self, self.owns(generation) else { return }
 
-            let textForInsertion: String
-            if !textToType.isEmpty {
-                textForInsertion = isFinal ? textToType + " " : textToType
-            } else if isFinal && !fullText.isEmpty {
-                textForInsertion = " "
-            } else {
-                textForInsertion = ""
-            }
-            self.textInserter.replaceTail(replacingChars: replacingChars, with: textForInsertion)
+            let textForInsertion = self.streamingTextForInsertion(
+                textToType, isFinal: isFinal, fullText: fullText
+            )
+            self.textInserter.updateStreamingText(fullText, isFinal: isFinal)
             self.observabilityEvent(
                 "streaming_text_update",
                 level: .debug,
@@ -938,36 +948,39 @@ extension RecordingController {
             self.recordStreamingLatency(seconds: seconds, providerId: provider.id)
         }
         controller.onAutoEnd = { [weak self] in
-            self?.observabilityEvent("streaming_auto_end_triggered")
+            guard let self, self.owns(generation) else { return }
+            self.observabilityEvent("streaming_auto_end_triggered")
             Task { @MainActor in
-                guard let self, self.owns(generation), self.isRecording else { return }
+                guard self.owns(generation), self.isRecording else { return }
                 self.stopRecording(reason: .autoEnd)
             }
         }
         controller.onUtteranceEnd = { [weak self] in
+            guard let self, self.owns(generation) else { return }
             Logger.audio.info("Streaming: utterance end")
-            self?.observabilityEvent("streaming_utterance_end", level: .debug)
+            self.observabilityEvent("streaming_utterance_end", level: .debug)
         }
         controller.onSpeechStarted = { [weak self] in
+            guard let self, self.owns(generation) else { return }
             Logger.audio.info("Streaming: speech started")
-            self?.observabilityEvent("streaming_speech_started", level: .debug)
+            self.observabilityEvent("streaming_speech_started", level: .debug)
         }
         controller.onKeepAliveSent = { [weak self] in
-            guard let self, let sessionId = self.currentMetricsSessionId else { return }
+            guard let self, self.owns(generation), let sessionId = metricsSessionId else { return }
             Task {
                 await SessionMetricsStore.shared.incrementKeepAlive(sessionId: sessionId)
             }
             self.observabilityEvent("streaming_keep_alive_sent", level: .debug, sessionId: sessionId)
         }
         controller.onReconnected = { [weak self] in
-            guard let self, let sessionId = self.currentMetricsSessionId else { return }
+            guard let self, self.owns(generation), let sessionId = metricsSessionId else { return }
             Task {
                 await SessionMetricsStore.shared.incrementReconnection(sessionId: sessionId)
             }
             self.observabilityEvent("streaming_reconnected", level: .warning, sessionId: sessionId)
         }
         controller.onError = { [weak self, weak controller] error in
-            guard let self, let controller,
+            guard let self, let controller, self.owns(generation), self.isRecording,
                   self.liveStreamingController === controller else { return }
             Logger.audio.error("Streaming error: \(error.localizedDescription)")
             self.session.latestStreamingError = error
@@ -977,7 +990,11 @@ extension RecordingController {
                 metadata: ["error": error.localizedDescription]
             )
             self.presentRecordingError(error, providerId: provider.id)
-            Task { @MainActor [weak self] in self?.stopRecording(reason: .autoEnd) }
+            Task { @MainActor [weak self, weak controller] in
+                guard let self, let controller, self.owns(generation),
+                      self.liveStreamingController === controller else { return }
+                self.stopRecording(reason: .autoEnd)
+            }
         }
         controller.onSessionClosed = { [weak self] in
             Task { @MainActor in

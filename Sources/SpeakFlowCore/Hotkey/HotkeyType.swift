@@ -1,7 +1,7 @@
 import Foundation
 
 /// Available hotkey activation methods
-public enum HotkeyType: String, CaseIterable {
+public enum HotkeyType: String, CaseIterable, Sendable {
     case doubleTapControl
     case controlOptionD
     case controlOptionSpace

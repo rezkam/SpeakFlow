@@ -1011,6 +1011,40 @@ struct IntegrationRecorderToQueueTests {
 @Suite("StreamingRecorder — sendChunkIfReady & periodicCheck", .serialized)
 struct StreamingRecorderSendChunkIfReadyPeriodicCheckTests {
 
+    @Test @MainActor func continuousSpeechIsDrainedAtTheByteCeiling() async throws {
+        let settings = SpySettings()
+        settings.chunkDuration = .minute10
+        settings.skipSilentChunks = false
+        let recorder = StreamingRecorder(settings: settings)
+        let session = SessionController(maxChunkDuration: 600)
+        await session.startSession()
+        await session.onSpeechEvent(.started(at: 0))
+        let vad = VADProcessor()
+        await vad._testInjectBackend(MockVADBackend(repeating: .speech(), count: 10))
+        for _ in 0..<10 {
+            _ = try await vad.processChunk([Float](repeating: 0.3, count: 800))
+        }
+        #expect(await vad.isSpeaking, "Precondition: continuous speech blocks silence-based drains")
+        recorder._testInjectSessionController(session)
+        recorder._testInjectVADProcessor(vad)
+        recorder._testSetVADActive(true)
+        recorder._testSetIsRecording(true)
+        let buffer = AudioBuffer(sampleRate: 16000)
+        await buffer.append(frames: [Float](repeating: 0.3, count: (Config.maxAudioSizeBytes - 44) / 2))
+        recorder._testInjectAudioBuffer(buffer)
+        var chunks: [AudioChunk] = []
+        recorder.onChunkReady = { chunks.append($0) }
+
+        await recorder._testInvokePeriodicCheck()
+
+        #expect(chunks.count == 1, "The byte ceiling must override the 1200-second speech limit")
+        // AudioBuffer exposes a sample count, not a collection isEmpty property.
+        // swiftlint:disable:next empty_count
+        #expect(await buffer.count == 0)
+        recorder.cancel()
+        await recorder.waitForStopCompletion()
+    }
+
     @Test @MainActor func testSendChunkIfReadyReturnsFalseWhenBufferTooShort() async {
         let origChunkDuration = Settings.shared.chunkDuration
         defer { Settings.shared.chunkDuration = origChunkDuration }
@@ -1713,6 +1747,43 @@ struct EventHandlingTests {
         #expect(col.entries[1].isFinal == true)
         #expect(col.screenText == "much higher ",
                 "Expanded final should replace the provisional word instead of duplicating it")
+    }
+
+    @MainActor @Test(arguments: [false, true])
+    func distinctSegmentsPreserveDeferredFinals(interimBetweenSegments: Bool) {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+        c.minimumFinalWordCount = 3
+        c.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "turn", confidence: 0.9, start: 0, duration: 0.8, words: [])))
+        if interimBetweenSegments {
+            c.handleEvent(.interim(TranscriptionResult(
+                transcript: "left", confidence: 0.9, start: 1, duration: 0.6, words: [])))
+            #expect(col.screenText == "turn left")
+        }
+        c.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "left", confidence: 0.9, start: 1, duration: 0.6, words: [])))
+        #expect(col.entries.allSatisfy { !$0.isFinal }, "Accumulation must not prematurely commit short finals")
+        c.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "now.", confidence: 0.9, start: 2, duration: 0.8, words: [], speechFinal: true)))
+        #expect(col.screenText == "turn left now. ", "Distinct finalized segments must accumulate rather than replace")
+        #expect(col.entries.last?.isFinal == true)
+    }
+
+    @MainActor @Test
+    func overlappingFinalRevisesInsteadOfDuplicatingTheDeferredSegment() {
+        let c = LiveStreamingController()
+        let col = TextUpdateCollector()
+        col.wire(c)
+        c.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "turn", confidence: 0.9, start: 0, duration: 1, words: [])))
+        c.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "turned left.", confidence: 0.9, start: 0, duration: 2, words: [], speechFinal: true)))
+        #expect(col.screenText == "turned left. ", "Overlapping finalized text revises the same segment")
+        c.handleEvent(.finalResult(TranscriptionResult(
+            transcript: "Again.", confidence: 0.9, start: 3, duration: 1, words: [], speechFinal: true)))
+        #expect(col.screenText == "turned left. Again. ", "A committed deferred segment must not leak into later utterances")
     }
 
     @MainActor @Test func testShortPunctuatedNonSpeechFinalStillCommits() {

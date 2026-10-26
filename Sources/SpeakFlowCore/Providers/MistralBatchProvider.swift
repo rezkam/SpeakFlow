@@ -38,7 +38,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
             settings: settings,
             hasAPIKey: { ProviderAPIKeys.hasAPIKey(for: $0) },
             logger: OSLogProviderLogger(category: "MistralBatch"),
-            httpDataProvider: URLSession.shared
+            httpDataProvider: TimedHTTPDataProvider(provider: .mistralBatch)
         )
     }
 
@@ -48,7 +48,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         settings: any MistralSettingsProviding = Settings.shared,
         hasAPIKey: @escaping @Sendable (String) -> Bool,
         logger: any ProviderLogging = OSLogProviderLogger(category: "MistralBatch"),
-        httpDataProvider: any HTTPDataProvider = URLSession.shared
+        httpDataProvider: any HTTPDataProvider = TimedHTTPDataProvider(provider: .mistralBatch)
     ) {
         self.logger = logger
         self.httpDataProvider = httpDataProvider
@@ -58,30 +58,31 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
     }
 
     public func transcribe(audio: Data) async throws -> String {
-        // Read MainActor-isolated state in one hop
-        let (apiKey, model, language, temperature, diarize, contextBias) = await MainActor.run {
-            (
-                providerSettings.apiKey(for: ProviderId.mistral),
-                settings.mistralBatchModel,
-                settings.mistralLanguage,
-                settings.mistralTemperature,
-                settings.mistralDiarize,
-                settings.mistralContextBias
-            )
+        let timing = ProviderTiming.Recorder(provider: .mistralBatch)
+        // Read MainActor-isolated state in one hop.
+        let (apiKey, model, language, temperature, diarize, contextBias) = await timing.measure(.configuration) {
+            await MainActor.run {
+                (
+                    providerSettings.apiKey(for: ProviderId.mistral),
+                    settings.mistralBatchModel,
+                    settings.mistralLanguage,
+                    settings.mistralTemperature,
+                    settings.mistralDiarize,
+                    settings.mistralContextBias
+                )
+            }
         }
         guard let apiKey, !apiKey.isEmpty else {
             throw MistralBatchError.missingApiKey
         }
 
-        return try await performRequest(
-            audio: audio,
-            apiKey: apiKey,
-            model: model,
-            language: language,
-            temperature: temperature,
-            diarize: diarize,
-            contextBias: contextBias
-        )
+        return try await timing.withAttempt(1) { attempt in
+            try await self.performRequest(
+                audio: audio, apiKey: apiKey, model: model, language: language,
+                temperature: temperature, diarize: diarize, contextBias: contextBias,
+                attempt: attempt
+            )
+        }
     }
 
     // MARK: - Network
@@ -176,30 +177,34 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
         language: String,
         temperature: Float = 0.0,
         diarize: Bool = false,
-        contextBias: String = ""
+        contextBias: String = "",
+        attempt: ProviderTiming.Attempt
     ) async throws -> String {
-        let request = try buildRequest(
-            audio: audio,
-            apiKey: apiKey,
-            model: model,
-            language: language,
-            temperature: temperature,
-            diarize: diarize,
-            contextBias: contextBias
-        )
+        let timing = attempt.recorder
+        let request = try timing.measureSync(.requestBuild) {
+            try buildRequest(
+                audio: audio, apiKey: apiKey, model: model, language: language,
+                temperature: temperature, diarize: diarize, contextBias: contextBias
+            )
+        }
 
         let dataSize = String(format: "%.1f", Double(audio.count) / 1000.0)
         logger.log("Sending \(dataSize)KB to Mistral batch transcription (model: \(model))", level: .info, visibility: .public)
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await httpDataProvider.data(for: request)
+            (data, response) = try await timing.measure(.transport) {
+                try await self.httpDataProvider.data(for: request)
+            }
+            attempt.received(response)
         } catch is CancellationError {
             // Cancellation is not a network failure; let callers recognize it.
             throw CancellationError()
         } catch let urlError as URLError where urlError.code == .cancelled {
+            attempt.transportFailed(urlError)
             throw CancellationError()
         } catch let urlError as URLError {
+            attempt.transportFailed(urlError)
             throw MistralBatchError.networkError(urlError.localizedDescription)
         } catch {
             throw MistralBatchError.networkError(error.localizedDescription)
@@ -220,18 +225,20 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
             throw MistralBatchError.httpError(statusCode: http.statusCode, body: bodyText)
         }
 
-        // Parse response — Python SDK model: TranscriptionResponse { text, model, usage, language }
-        do {
-            let result = try JSONDecoder().decode(MistralTranscriptionResponse.self, from: data)
-            logger.log("Transcription complete: \(result.text.prefix(80))...", level: .info, visibility: .privateHash)
-            return result.text
-        } catch {
-            // Fallback: try extracting "text" from raw JSON
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let text = json["text"] as? String {
-                return text
+        // Parse response: TranscriptionResponse { text, model, usage, language }.
+        return try timing.measureSync(.decode) {
+            do {
+                let result = try JSONDecoder().decode(MistralTranscriptionResponse.self, from: data)
+                logger.log("Transcription complete: \(result.text.prefix(80))...", level: .info, visibility: .privateHash)
+                return result.text
+            } catch {
+                // Fallback: try extracting "text" from raw JSON
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let text = json["text"] as? String {
+                    return text
+                }
+                throw MistralBatchError.invalidResponse("Failed to decode response: \(error.localizedDescription)")
             }
-            throw MistralBatchError.invalidResponse("Failed to decode response: \(error.localizedDescription)")
         }
     }
 }
@@ -241,7 +248,7 @@ public final class MistralBatchProvider: BatchTranscriptionProvider, @unchecked 
 extension MistralBatchProvider: APIKeyValidatable {
     /// Delegates to the same validation as the realtime provider (both use Mistral API keys).
     public nonisolated func validateAPIKey(_ key: String) async -> String? {
-        await MistralProvider.validateMistralAPIKey(key)
+        await MistralProvider.validateMistralAPIKey(key, httpDataProvider: httpDataProvider)
     }
 }
 

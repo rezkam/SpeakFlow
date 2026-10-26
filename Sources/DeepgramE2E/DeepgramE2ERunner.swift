@@ -1341,7 +1341,14 @@ enum DeepgramE2EEntry {
         // A test executable must never write the user's credentials or settings:
         // isolate every store before any singleton is touched.
         RuntimeIsolation.isolateThisProcess()
-        print("Isolated storage: \(RuntimeIsolation.current.dataDirectory.path)")
+        SoundEffect.isMuted = true
+        #if DEBUG
+        if CommandLine.arguments.contains("--runtime-policy-probe") {
+            print("E2E_RUNTIME isolated=\(RuntimeIsolation.current.isIsolated) muted=\(SoundEffect.isMuted)")
+            return
+        }
+        #endif
+        print("Isolated storage enabled")
         Task { @MainActor in
             await DeepgramE2ERunner.run()
         }

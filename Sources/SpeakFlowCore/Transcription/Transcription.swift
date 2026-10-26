@@ -10,6 +10,7 @@ public final class Transcription {
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
     private let statistics: any StatisticsProviding
     private let service: any TranscriptionServiceProviding
+    private let metricsStore: SessionMetricsStore
     /// When set, batch transcription dispatches through this provider instead of the
     /// default `service` (which is ChatGPT-only). Set by RecordingController at the
     /// start of each batch session and cleared on stop/cancel.
@@ -57,12 +58,18 @@ public final class Transcription {
 
     public init(
         statistics: any StatisticsProviding = Statistics.shared,
-        service: any TranscriptionServiceProviding = TranscriptionService.shared
+        service: any TranscriptionServiceProviding = TranscriptionService.shared,
+        metricsStore: SessionMetricsStore = .shared
     ) {
         self.statistics = statistics
         self.service = service
+        self.metricsStore = metricsStore
         queueBridge.startListening()
     }
+
+    #if DEBUG
+    var taskFinishedForTesting: (() -> Void)?
+    #endif
 
     public func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk) {
         // Use stable task IDs so each async task is removed from tracking on completion.
@@ -78,12 +85,27 @@ public final class Transcription {
                 "durationSeconds": String(format: "%.3f", chunk.durationSeconds)
             ]
         )
+        // Capture provenance before scheduling: a later recording may replace
+        // provider and metrics configuration before the task first runs.
+        let batchProvider = activeBatchProvider
+        let statsContext = statisticsContext()
+        let metricsId = metricsSessionId
+        let correlation = ProviderTiming.Correlation(requestId: taskId, sessionId: metricsId)
+        let provider: ProviderTiming.Provider = batchProvider == nil ? .chatgptBatch
+            : (batchProvider?.id == ProviderId.mistralBatch ? .mistralBatch : .otherBatch)
+        let timing = ProviderTiming.Recorder(provider: provider, correlation: correlation)
+        let scheduledAt = ContinuousClock.now
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
                 self.processingTasks.removeValue(forKey: taskId)
+                #if DEBUG
+                self.taskFinishedForTesting?()
+                #endif
             }
 
+            guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
+            timing.phaseFinished(.scheduling, since: scheduledAt)
             let effectiveTimeout = TranscriptionService.timeout(forDataSize: chunk.wavData.count)
             let duration = String(format: "%.1f", chunk.durationSeconds)
             let timeout = String(format: "%.1f", effectiveTimeout)
@@ -93,22 +115,25 @@ public final class Transcription {
             // Each chunk send is one provider request, so totalApiCalls grows
             // per chunk. The user-recording count is tracked separately by the
             // caller via `recordRecording(...)` when the recording starts.
-            let statsContext = statisticsContext()
             statistics.recordApiCall()
-            let metricsId = metricsSessionId
             if let metricsId {
-                await SessionMetricsStore.shared.incrementChunkSubmitted(sessionId: metricsId)
+                await metricsStore.incrementChunkSubmitted(sessionId: metricsId)
             }
 
             let latencyStart = ContinuousClock.now
 
             do {
                 let text: String
-                if let batchProvider = self.activeBatchProvider {
-                    text = try await batchProvider.transcribe(audio: chunk.wavData)
-                } else {
-                    text = try await service.transcribe(audio: chunk.wavData)
+                guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
+                text = try await timing.measure(.providerCall) {
+                    try await ProviderTiming.$correlation.withValue(correlation) {
+                        if let batchProvider {
+                            return try await batchProvider.transcribe(audio: chunk.wavData)
+                        }
+                        return try await self.service.transcribe(audio: chunk.wavData)
+                    }
                 }
+                guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
                 let latencySeconds = Self.elapsedSeconds(since: latencyStart)
                 statistics.recordSTTLatency(
                     seconds: latencySeconds,
@@ -116,11 +141,11 @@ public final class Transcription {
                     language: statsContext.language
                 )
                 if let metricsId {
-                    await SessionMetricsStore.shared.recordSTTLatency(
+                    await metricsStore.recordSTTLatency(
                         sessionId: metricsId,
                         milliseconds: latencySeconds * 1000
                     )
-                    await SessionMetricsStore.shared.incrementChunkSucceeded(sessionId: metricsId)
+                    await metricsStore.incrementChunkSucceeded(sessionId: metricsId)
                 }
                 self.observabilityEvent(
                     "chunk_succeeded",
@@ -134,6 +159,8 @@ public final class Transcription {
                 )
                 Logger.transcription.info("Chunk #\(ticket.seq) success: \(text, privacy: .private)")
 
+                // Metrics-store writes above suspend; retirement may happen there too.
+                guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
                 // Track successful transcription statistics
                 statistics.recordTranscription(
                     text: text,
@@ -147,6 +174,7 @@ public final class Transcription {
                 // AFTER onTextReady delivers the text, ensuring the completion sound
                 // only plays after all text has been queued for insertion.
             } catch {
+                guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
                 if Self.isCancellation(error) {
                     Logger.transcription.debug("Chunk #\(ticket.seq) cancelled")
                     self.observabilityEvent(
@@ -170,11 +198,11 @@ public final class Transcription {
                     language: statsContext.language
                 )
                 if let metricsId {
-                    await SessionMetricsStore.shared.recordSTTLatency(
+                    await metricsStore.recordSTTLatency(
                         sessionId: metricsId,
                         milliseconds: latencySeconds * 1000
                     )
-                    await SessionMetricsStore.shared.incrementChunkFailed(sessionId: metricsId)
+                    await metricsStore.incrementChunkFailed(sessionId: metricsId)
                 }
 
                 Logger.transcription.error("Chunk #\(ticket.seq) failed: \(error.localizedDescription)")
@@ -191,6 +219,7 @@ public final class Transcription {
                 )
                 await queueBridge.markFailed(ticket: ticket)
 
+                guard !Task.isCancelled, queueBridge.accepts(ticket) else { return }
                 // Play error sound to notify user that transcription failed
 #if DEBUG
                 testErrorSoundPlayCount &+= 1
@@ -209,6 +238,7 @@ public final class Transcription {
     }
 
     public func cancelAll() {
+        queueBridge.invalidateDelivery()
         observabilityEvent(
             "cancel_all_requested",
             level: .warning,

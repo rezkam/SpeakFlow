@@ -63,6 +63,11 @@ public actor TranscriptionQueue {
         sessionGeneration &+= 1
     }
 
+    func resetForDelivery() -> UInt64 {
+        reset()
+        return sessionGeneration
+    }
+
     /// Get the next sequence number for a new chunk, bound to the current session.
     /// Returns a `TranscriptionTicket` that must be passed back on submit/markFailed.
     public func nextSequence() -> TranscriptionTicket {
@@ -71,6 +76,14 @@ public actor TranscriptionQueue {
         // UInt64.max = 18,446,744,073,709,551,615 chunks
         currentSeq &+= 1
         return ticket
+    }
+
+    /// A retired caller receives a retired ticket without consuming current work.
+    func nextSequence(in requestedSession: UInt64) -> TranscriptionTicket {
+        guard requestedSession == sessionGeneration else {
+            return TranscriptionTicket(session: requestedSession, seq: 0)
+        }
+        return nextSequence()
     }
 
     public func getPendingCount() -> Int {
@@ -146,9 +159,13 @@ public final class TranscriptionQueueBridge {
     let queue = TranscriptionQueue()
     private var streamTask: Task<Void, Never>?
     
-    /// Guard to prevent onAllComplete from firing multiple times per session.
-    /// Reset to false when a new session starts (via reset() or first nextSequence()).
+    /// Signal once per idle transition, rearming whenever new work is allocated.
     private var hasSignaledCompletion = false
+    private var workRevision: UInt64 = 0
+    private var pendingAllocations = 0
+    private var deliveryRevision: UInt64 = 0
+    private var acceptedQueueSession: UInt64? = 0
+    private var allocationSession: UInt64 = 0
 
     /// Track whether a session has started (at least one sequence requested)
     private var sessionStarted = false
@@ -165,12 +182,22 @@ public final class TranscriptionQueueBridge {
 
     public init() {}
 
+    #if DEBUG
+    var beforeTextDeliveryForTesting: (@MainActor () async -> Void)?
+    var beforeSequenceAllocationForTesting: (@MainActor () async -> Void)?
+    #endif
+
     func startListening() {
         streamTask = Task {
             for await item in await queue.textStream {
                 // Text buffered before a reset belongs to a finished session;
                 // delivering it would type it into the next recording.
-                guard item.session == (await queue.currentSessionGeneration()) else { continue }
+                #if DEBUG
+                await beforeTextDeliveryForTesting?()
+                #endif
+                // Validation and callback are one synchronous MainActor operation.
+                // No actor-hop snapshot may authorize text after cancellation/reset.
+                guard !Task.isCancelled, item.session == acceptedQueueSession else { continue }
                 self.consumedCount &+= 1
                 onTextReady?(item.text)
                 // Check completion AFTER delivering text, ensuring onAllComplete
@@ -180,25 +207,50 @@ public final class TranscriptionQueueBridge {
         }
     }
 
+    /// Synchronous consumer-side ownership check, including cancellation.
+    func accepts(_ ticket: TranscriptionTicket) -> Bool {
+        acceptedQueueSession == ticket.session
+    }
+
     public func stopListening() {
         streamTask?.cancel()
         streamTask = nil
     }
 
-    public func reset() async {
-        await queue.reset()
+    /// Immediately retires buffered delivery, even before actor reset can run.
+    public func invalidateDelivery() {
+        acceptedQueueSession = nil
+        deliveryRevision &+= 1
+        pendingAllocations = 0
+        workRevision &+= 1
         hasSignaledCompletion = false
         sessionStarted = false
         consumedCount = 0
     }
 
+    public func reset() async {
+        invalidateDelivery()
+        let revision = deliveryRevision
+        let generation = await queue.resetForDelivery()
+        guard deliveryRevision == revision else { return }
+        acceptedQueueSession = generation
+        allocationSession = generation
+    }
+
     public func nextSequence() async -> TranscriptionTicket {
-        // Mark session as started and reset completion flag for new chunks
-        if !sessionStarted {
-            sessionStarted = true
-            hasSignaledCompletion = false
+        let requestedSession = allocationSession
+        let revision = deliveryRevision
+        workRevision &+= 1
+        sessionStarted = true
+        hasSignaledCompletion = false
+        pendingAllocations += 1
+        defer {
+            if deliveryRevision == revision { pendingAllocations -= 1 }
         }
-        return await queue.nextSequence()
+        #if DEBUG
+        await beforeSequenceAllocationForTesting?()
+        #endif
+        return await queue.nextSequence(in: requestedSession)
     }
 
     public func getPendingCount() async -> Int {
@@ -208,7 +260,13 @@ public final class TranscriptionQueueBridge {
     /// True when every ticket of this session is transcribed and its text
     /// has been delivered through `onTextReady`.
     public func isIdle() async -> Bool {
-        await queue.isIdle(consumedCount: consumedCount)
+        guard pendingAllocations == 0 else { return false }
+        // Retired delivery has no work in the current recording. In particular,
+        // stop-before-start need not wait for an actor reset that never began.
+        guard acceptedQueueSession != nil else { return true }
+        let revision = workRevision
+        let idle = await queue.isIdle(consumedCount: consumedCount)
+        return idle && workRevision == revision && pendingAllocations == 0
     }
 
     public func submitResult(ticket: TranscriptionTicket, text: String) async {
@@ -220,14 +278,13 @@ public final class TranscriptionQueueBridge {
     }
 
     public func checkCompletion() async {
-        // Guard: only fire completion once per session
-        guard !hasSignaledCompletion else { return }
-        guard sessionStarted else { return }
-
+        guard acceptedQueueSession != nil, !hasSignaledCompletion,
+              sessionStarted, pendingAllocations == 0 else { return }
+        let revision = workRevision
         let delivered = await queue.isFullyDelivered(consumedCount: consumedCount)
         if delivered {
-            // Double-check after await (another task may have set it during suspension)
-            guard !hasSignaledCompletion else { return }
+            // New allocations or resets invalidate a suspended completion check.
+            guard !hasSignaledCompletion, workRevision == revision, pendingAllocations == 0 else { return }
             hasSignaledCompletion = true
             onAllComplete?()
         }

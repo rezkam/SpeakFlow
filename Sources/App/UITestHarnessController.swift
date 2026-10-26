@@ -18,7 +18,11 @@ final class UITestHarnessController: NSWindowController, NSWindowDelegate {
     private let statsWordsValueLabel = NSTextField(labelWithString: "0")
     private var localKeyMonitor: Any?
 
-    init() {
+    init(recording: RecordingController) {
+        onHotkeyTriggered = { hotkey in
+            guard hotkey == nil || hotkey == recording.hotkeySettings.currentHotkey else { return }
+            recording.toggle()
+        }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 240),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -189,12 +193,16 @@ final class UITestHarnessController: NSWindowController, NSWindowDelegate {
     private func setupLocalHotkeyMonitor() {
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
-            if let hotkey = self.mappedHarnessHotkey(event) {
-                self.onHotkeyTriggered?(hotkey)
-                return nil
-            }
-            return event
+            return self.handleLocalHotkey(event)
         }
+    }
+
+    func handleLocalHotkey(_ event: NSEvent) -> NSEvent? {
+        if let hotkey = mappedHarnessHotkey(event) {
+            onHotkeyTriggered?(hotkey)
+            return nil
+        }
+        return event
     }
 
     private func mappedHarnessHotkey(_ event: NSEvent) -> HotkeyType? {

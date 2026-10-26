@@ -2,12 +2,30 @@ import Foundation
 import Testing
 @testable import SpeakFlowCore
 
+private func observabilityTestDirectory() -> URL {
+    URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent(".agents/tests/observability/\(UUID().uuidString)", isDirectory: true)
+}
+
+private func makeObservabilityTestStore(
+    baseDirectory: URL,
+    maxFileBytes: UInt64 = Config.observabilityMaxLogBytes,
+    maxRotatedFiles: Int = Config.observabilityMaxRotatedLogFiles
+) -> ObservabilityStore {
+    ObservabilityStore(
+        baseDirectory: baseDirectory, maxFileBytes: maxFileBytes, maxRotatedFiles: maxRotatedFiles,
+        runtimeContext: ObservabilityRuntimeContext(
+            profile: "test-fixture", processId: 0, processName: "fixture",
+            systemContext: ["osVersion": "fixture", "bundlePath": "<BUNDLE>", "fixture": "true"]
+        )
+    )
+}
+
 @Suite("Observability")
 struct ObservabilityTests {
     @Test func writesStructuredEventsToJSONL() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(baseDirectory: base)
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
 
         await store.applyConfiguration(
             enabled: true,
@@ -26,6 +44,7 @@ struct ObservabilityTests {
         let events = try await loadEvents(from: store)
         #expect(events.contains { $0.component == "Test" && $0.name == "event_written" })
         #expect(events.contains { $0.metadata["key"] == "value" })
+        #expect(events.allSatisfy { $0.processId == 0 && $0.processName == "fixture" && $0.profile == "test-fixture" })
         #expect(events.allSatisfy { !$0.buildGitDescribe.isEmpty })
         #expect(events.allSatisfy { !$0.buildGitCommit.isEmpty })
         #expect(events.allSatisfy { !$0.buildDisplayVersion.isEmpty })
@@ -33,9 +52,8 @@ struct ObservabilityTests {
     }
 
     @Test func timestampsIncludeMilliseconds() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(baseDirectory: base)
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
 
         await store.applyConfiguration(
             enabled: true,
@@ -56,9 +74,8 @@ struct ObservabilityTests {
     }
 
     @Test func minimalVerbosityFiltersInfoAndDebug() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(baseDirectory: base)
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
 
         await store.applyConfiguration(
             enabled: true,
@@ -79,9 +96,8 @@ struct ObservabilityTests {
     }
 
     @Test func settingsSnapshotDisabledSkipsSnapshotEvent() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(baseDirectory: base)
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
 
         await store.applyConfiguration(
             enabled: true,
@@ -107,9 +123,8 @@ struct ObservabilityTests {
     }
 
     @Test func sessionScopedEventsReceiveMonotonicSessionSequence() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(baseDirectory: base)
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
         let sessionA = UUID()
         let sessionB = UUID()
 
@@ -138,9 +153,8 @@ struct ObservabilityTests {
     }
 
     @Test func rotatesEventLogWithoutChangingVerbosity() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(
             baseDirectory: base,
             maxFileBytes: 900,
             maxRotatedFiles: 2
@@ -181,9 +195,8 @@ struct ObservabilityTests {
     }
 
     @Test func eventsFileAndBaseDirectoryAreOwnerOnly() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(baseDirectory: base)
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
 
         await store.applyConfiguration(
             enabled: true,
@@ -203,8 +216,7 @@ struct ObservabilityTests {
     }
 
     @Test func migratesPreExistingWorldReadableStorageToOwnerOnly() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
+        let base = observabilityTestDirectory()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: base, withIntermediateDirectories: true)
         let eventsPath = base.appendingPathComponent("events.jsonl").path
@@ -213,7 +225,7 @@ struct ObservabilityTests {
         // Precondition: the pre-existing artifacts really were created with looser permissions.
         #expect(try posixPermissions(atPath: eventsPath) == 0o644)
 
-        let store = ObservabilityStore(baseDirectory: base)
+        let store = makeObservabilityTestStore(baseDirectory: base)
         let pathInfo = await store.pathInfoValue()
 
         #expect(try posixPermissions(atPath: pathInfo.eventsFile.path) == 0o600)
@@ -221,9 +233,8 @@ struct ObservabilityTests {
     }
 
     @Test func rotatedEventsFilesRemainOwnerOnly() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("observability-tests-\(UUID().uuidString)", isDirectory: true)
-        let store = ObservabilityStore(
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(
             baseDirectory: base,
             maxFileBytes: 900,
             maxRotatedFiles: 2
@@ -294,16 +305,14 @@ struct ObservabilityTests {
     }
 }
 
-/// Turning diagnostics off must stop writing immediately, not at the next
-/// recording or app launch.
+/// Diagnostic settings propagate without another recording or app launch.
+/// The awaited application is the persistence cutoff, not the setter return.
 @Suite("Observability — Settings Apply Immediately", .serialized)
 struct ObservabilitySettingsPropagationTests {
     @MainActor @Test
     func changingTheDiagnosticsSettingAppliesItToTheStoreRightAway() async {
         // A private store: the shared one is reconfigured by other suites.
-        let store = ObservabilityStore(
-            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("obs-optout-\(UUID().uuidString)")
-        )
+        let store = makeObservabilityTestStore(baseDirectory: observabilityTestDirectory())
         let configurator = ObservabilityConfigurator(store: store)
         let settings = Settings.shared
         let original = (settings.observabilityEnabled, settings.observabilityConfigurator)
@@ -324,9 +333,50 @@ struct ObservabilitySettingsPropagationTests {
     }
 
     @MainActor @Test
+    func appliedOptOutIsAPersistenceBarrierAndReenableResumesWrites() async throws {
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
+        let configurator = ObservabilityConfigurator(store: store)
+        let settings = SpySettings()
+        settings.observabilityEnabled = true
+        settings.observabilityCaptureSystemContext = true
+        configurator.apply(from: settings)
+        await configurator.waitUntilApplied()
+        await store.record(component: "Fixture", name: "accepted_before_optout")
+
+        settings.observabilityEnabled = false
+        configurator.apply(from: settings)
+        // The asynchronous application barrier, not the setter's return, is
+        // the cutoff for writes already queued on the store actor.
+        await configurator.waitUntilApplied()
+        let file = await store.pathInfoValue().eventsFile
+        let atCutoff = try Data(contentsOf: file)
+        await withTaskGroup(of: Void.self) { group in
+            for index in 0..<20 {
+                group.addTask {
+                    await store.record(component: "Fixture", name: "rejected_after_optout_\(index)")
+                }
+            }
+        }
+        #expect(try Data(contentsOf: file) == atCutoff)
+        let before = try #require(String(data: atCutoff, encoding: .utf8))
+        #expect(before.contains("accepted_before_optout"))
+        #expect(before.contains("<BUNDLE>"))
+        #expect(!before.contains("rejected_after_optout"))
+
+        settings.observabilityEnabled = true
+        configurator.apply(from: settings)
+        await configurator.waitUntilApplied()
+        await store.record(component: "Fixture", name: "accepted_after_reenable")
+        let resumed = try String(contentsOf: file, encoding: .utf8)
+        #expect(resumed.contains("accepted_after_reenable"))
+        #expect(!resumed.contains("rejected_after_optout"))
+    }
+
+    @MainActor @Test
     func rapidChangesApplyInTheOrderTheyWereMade() async throws {
-        let base = FileManager.default.temporaryDirectory.appendingPathComponent("obs-order-\(UUID().uuidString)")
-        let store = ObservabilityStore(baseDirectory: base)
+        let base = observabilityTestDirectory()
+        let store = makeObservabilityTestStore(baseDirectory: base)
         let configurator = ObservabilityConfigurator(store: store)
         let settings = SpySettings()
 

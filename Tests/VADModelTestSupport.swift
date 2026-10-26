@@ -17,25 +17,14 @@ enum VADModelTestSupport {
     static func defaultCacheRoot(
         fileManager: FileManager = .default
     ) -> URL {
-        guard let applicationSupport = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
-            preconditionFailure("Application Support directory is unavailable")
-        }
-        return applicationSupport
-            .appendingPathComponent("FluidAudio", isDirectory: true)
-            .appendingPathComponent("Models", isDirectory: true)
+        VADModelCache.modelCacheRoot(environment: [:], fileManager: fileManager)
     }
 
     static func configuredCacheRoot(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) -> URL {
-        guard let override = environment[cacheRootOverrideEnvironmentKey], !override.isEmpty else {
-            return defaultCacheRoot(fileManager: fileManager)
-        }
-        return URL(fileURLWithPath: override, isDirectory: true)
+        VADModelCache.modelCacheRoot(environment: environment, fileManager: fileManager)
     }
 
     static func modelURL(cacheRoot: URL) -> URL {
@@ -81,6 +70,14 @@ enum VADModelTestSupport {
 
 @Suite("VAD model cache location")
 struct VADModelCacheLocationTests {
+    @Test func isolatedProcessModelRootNeverUsesInstalledApplicationSupport() {
+        let expected = RuntimeIsolation.current.dataDirectory
+            .appendingPathComponent("FluidAudio", isDirectory: true)
+            .appendingPathComponent("Models", isDirectory: true)
+        let root = VADModelTestSupport.configuredCacheRoot(environment: [:])
+        #expect(root == expected)
+    }
+
     @Test func modelPathUsesFluidAudioPublicNames() throws {
         let root = URL(fileURLWithPath: "/cache-root", isDirectory: true)
         let expected = root

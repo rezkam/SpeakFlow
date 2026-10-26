@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import LiveE2EKit
 import SpeakFlowCore
+import os
 
 // MARK: - Test Scenario Definition
 
@@ -730,20 +731,33 @@ struct SpeakFlowLiveE2E {
 
     // ── Entry point ──────────────────────────────────────────────────
 
-    static func main() async {
+    static var allowsTranscription: Bool { !CommandLine.arguments.contains("--silence-only") }
+
+    static func main() async -> Int32 {
+        let activity: LiveE2EActivity
+        do {
+            activity = try LiveE2EActivity()
+        } catch {
+            return fail("Unable to prevent idle sleep during audio timing checks: \(error)")
+        }
+        defer { activity.finish() }
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SPEAKFLOW_E2E_DEBUG_TIMING"] == "1" {
+            FileHandle.standardOutput.write(Data("E2E_DEBUG_TIMING idle_sleep_protection=active\n".utf8))
+        }
+        #endif
         // A wrapper script requests one scenario through SPEAKFLOW_E2E_*.
         do {
             if let config = try LiveE2EScenarioConfig.fromEnvironment(ProcessInfo.processInfo.environment) {
-                await runConfigured(config)
-                return
+                return await runConfigured(config)
             }
         } catch {
-            fail("Invalid SPEAKFLOW_E2E_* configuration: \(error)")
+            return fail("Invalid SPEAKFLOW_E2E_* configuration: \(error)")
         }
 
         let args = CommandLine.arguments
         let silenceOnly = args.contains("--silence-only")
-        let isLoggedIn = OpenAICodexAuth.isLoggedIn
+        let isLoggedIn = allowsTranscription && OpenAICodexAuth.isLoggedIn
 
         let activeScenarios: [TestScenario]
         if silenceOnly {
@@ -759,12 +773,12 @@ struct SpeakFlowLiveE2E {
         } else {
             // Skipping the transcription scenarios and exiting 0 would report a
             // full-suite success that never transcribed anything.
-            fail("Transcription scenarios need a ChatGPT login. Log in, or pass --silence-only "
+            return fail("Transcription scenarios need a ChatGPT login. Log in, or pass --silence-only "
                 + "to run only the silence and auto-end scenarios.")
         }
 
         guard !activeScenarios.isEmpty else {
-            fail("No scenarios to run. Login for transcription tests or use --silence-only.")
+            return fail("No scenarios to run. Login for transcription tests or use --silence-only.")
         }
 
         // ── Generate fixtures ────────────────────────────────────────
@@ -779,7 +793,7 @@ struct SpeakFlowLiveE2E {
             print("  [\(i+1)/\(activeScenarios.count)] \(s.name)")
             guard let f = generateFixture(segments: s.segments, rate: s.rate,
                                           fixturesDir: fixturesDir, index: i) else {
-                fail("Fixture generation failed for: \(s.name)")
+                return fail("Fixture generation failed for: \(s.name)")
             }
             print("    → total: \(String(format: "%.1f", f.durationSeconds))s")
             fixtures.append(f)
@@ -805,7 +819,7 @@ struct SpeakFlowLiveE2E {
         print("  Results: \(passed) passed, \(failed) failed")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("E2E_SUMMARY ran=\(passed + failed) passed=\(passed) failed=\(failed)")
-        if failed > 0 { Foundation.exit(1) }
+        return failed > 0 ? 1 : 0
     }
 
     // MARK: - Scenario Execution
@@ -816,7 +830,12 @@ struct SpeakFlowLiveE2E {
         static func fail(_ m: String) -> ScenarioResult { .init(success: false, error: m) }
     }
 
-    static func runScenario(scenario: TestScenario, fixture: AudioFixture) async -> ScenarioResult {
+    static func runScenario(
+        scenario: TestScenario,
+        fixture: AudioFixture,
+        beforeStopForTesting: (@MainActor (StreamingRecorder) async -> Void)? = nil,
+        beforeChunkDeliveryForTesting: (@MainActor () async -> Void)? = nil
+    ) async -> ScenarioResult {
         // Configure settings
         let settings = Settings.shared
         let savedChunk = settings.chunkDuration
@@ -829,7 +848,7 @@ struct SpeakFlowLiveE2E {
         }
 
         // Only use transcription API if logged in AND scenario needs it
-        let needsTranscription = scenario.validateTranscript && OpenAICodexAuth.isLoggedIn
+        let needsTranscription = allowsTranscription && scenario.validateTranscript && OpenAICodexAuth.isLoggedIn
 
         let bridge = Transcription.shared.queueBridge
         if needsTranscription { await bridge.reset() }
@@ -839,7 +858,7 @@ struct SpeakFlowLiveE2E {
 
         // ── Auto-end tracking ────────────────────────────────────────
         var autoEndFired = false
-        var autoEndTime: Date?
+        var autoEndElapsed: Double?
 
         if needsTranscription {
             bridge.onTextReady = { text in
@@ -851,6 +870,7 @@ struct SpeakFlowLiveE2E {
 
         let recorder = StreamingRecorder()
         recorder.onChunkReady = { chunk in
+            await beforeChunkDeliveryForTesting?()
             chunksSubmitted += 1
             let dur = String(format: "%.1f", chunk.durationSeconds)
             let sp  = String(format: "%.0f", chunk.speechProbability * 100)
@@ -861,33 +881,34 @@ struct SpeakFlowLiveE2E {
                 speechPercent: Int((chunk.speechProbability * 100).rounded())
             ))
             if needsTranscription {
-                Task { @MainActor in
-                    let ticket = await bridge.nextSequence()
-                    Transcription.shared.transcribe(ticket: ticket, chunk: chunk)
-                }
+                let ticket = await bridge.nextSequence()
+                Transcription.shared.transcribe(ticket: ticket, chunk: chunk)
             }
         }
 
-        let recordingStartTime = Date()
+        let clock = ContinuousClock()
+        var recordingStartTime = clock.now
         recorder.onAutoEnd = {
             autoEndFired = true
-            autoEndTime = Date()
-            let elapsed = String(format: "%.1f", Date().timeIntervalSince(recordingStartTime))
+            let seconds = elapsedSeconds(since: recordingStartTime, clock: clock)
+            autoEndElapsed = seconds
+            let elapsed = String(format: "%.1f", seconds)
             print("    🛑 AUTO-END fired at \(elapsed)s into recording")
-            print(LiveE2EOutput.autoEndLine(seconds: Date().timeIntervalSince(recordingStartTime)))
+            print(LiveE2EOutput.autoEndLine(seconds: seconds))
             recorder.stop()
         }
 
         // Feed pre-recorded audio via mock input (no mic/speaker needed)
         await recorder.startMock(audioData: fixture.samples)
+        recordingStartTime = clock.now
 
         if scenario.expectAutoEnd == true {
             // ── Wait for auto-end to fire ────────────────────────────
             // Give enough time: audio duration + generous margin for VAD + auto-end timer
             let maxWait = fixture.durationSeconds + 15.0
             print("    ⏱ Waiting up to \(String(format: "%.0f", maxWait))s for auto-end…")
-            let deadline = Date().addingTimeInterval(maxWait)
-            while !autoEndFired && Date() < deadline {
+            let deadline = recordingStartTime.advanced(by: .seconds(maxWait))
+            while !autoEndFired && clock.now < deadline {
                 try? await Task.sleep(for: .milliseconds(200))
             }
 
@@ -895,24 +916,25 @@ struct SpeakFlowLiveE2E {
                 recorder.stop()
                 return .fail("Auto-end did NOT fire within \(String(format: "%.0f", maxWait))s — expected it to trigger")
             }
-            let elapsed = autoEndTime!.timeIntervalSince(recordingStartTime)
+            let elapsed = autoEndElapsed!
             print("    ✓ Auto-end fired at \(String(format: "%.1f", elapsed))s")
         } else {
             // ── Normal flow: feed audio + trailing wait, then stop ───
             let totalWait = fixture.durationSeconds + scenario.trailingSeconds
             print("    ⏱ Feeding \(String(format: "%.1f", fixture.durationSeconds))s + \(String(format: "%.0f", scenario.trailingSeconds))s trailing…")
             try? await Task.sleep(nanoseconds: UInt64(totalWait * 1_000_000_000))
+            await beforeStopForTesting?(recorder)
             recorder.stop()
 
             // ── Validate auto-end did NOT fire (if expected) ─────────
             if scenario.expectAutoEnd == false && autoEndFired {
-                let elapsed = autoEndTime.map { String(format: "%.1f", $0.timeIntervalSince(recordingStartTime)) } ?? "?"
+                let elapsed = autoEndElapsed.map { String(format: "%.1f", $0) } ?? "?"
                 return .fail("Auto-end FIRED at \(elapsed)s — should NOT have triggered (silence was too short)")
             }
         }
 
-        // Grace period for stop()'s async final-chunk Task to fire
-        try? await Task.sleep(for: .seconds(2))
+        // Stop completion includes final-chunk delivery, not just scheduling it.
+        await recorder.waitForStopCompletion()
 
         if needsTranscription {
             // Drain transcription responses (up to 30 s)
@@ -969,7 +991,7 @@ struct SpeakFlowLiveE2E {
 
     /// Runs the one scenario a wrapper requested, then prints E2E_RESULT with
     /// the assertions that actually executed. Exits non-zero unless all pass.
-    static func runConfigured(_ config: LiveE2EScenarioConfig) async {
+    static func runConfigured(_ config: LiveE2EScenarioConfig) async -> Int32 {
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("  SpeakFlow Live E2E — Configured Scenario")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -986,11 +1008,11 @@ struct SpeakFlowLiveE2E {
             var segments = [TextSegment(text: text, silenceAfterSeconds: secondText == nil ? trailing : gapSeconds)]
             if let secondText { segments.append(TextSegment(text: secondText, silenceAfterSeconds: trailing)) }
             guard let generated = generateFixture(segments: segments, rate: rate, fixturesDir: fixturesDir, index: 0) else {
-                fail("Fixture generation failed")
+                return fail("Fixture generation failed")
             }
             fixture = generated
         case let .file(path):
-            guard let samples = resampleToMono16k(path: path) else { fail("Could not read audio file \(path)") }
+            guard let samples = resampleToMono16k(path: path) else { return fail("Could not read audio fixture") }
             fixture = AudioFixture(durationSeconds: Double(samples.count) / 16_000, samples: samples)
         }
 
@@ -999,25 +1021,29 @@ struct SpeakFlowLiveE2E {
         if let transcript = observation.transcript { print(LiveE2EOutput.transcriptLine(transcript)) }
         for failure in verdict.failures { print("  ❌ \(failure)") }
         print(verdict.resultLine)
-        Foundation.exit(verdict.passed ? 0 : 1)
+        return verdict.passed ? 0 : 1
     }
 
-    private static func observeConfigured(
+    static func observeConfigured(
         _ config: LiveE2EScenarioConfig,
-        fixture: AudioFixture
+        fixture: AudioFixture,
+        beforeStopForTesting: (@MainActor (StreamingRecorder) async -> Void)? = nil
     ) async -> LiveE2EObservation {
         let settings = Settings.shared
         let savedChunk = settings.chunkDuration
         let savedSkip = settings.skipSilentChunks
+        let savedSilence = settings.autoEndSilenceDuration
+        settings.autoEndSilenceDuration = config.autoEndSilenceSeconds ?? savedSilence
         settings.chunkDuration = config.chunkSeconds.map(chunkDuration(atLeast:)) ?? savedChunk
         // Noise rejection exercises the silent-chunk filter; other scenarios count every chunk.
         settings.skipSilentChunks = config.noiseRejection
         defer {
             settings.chunkDuration = savedChunk
             settings.skipSilentChunks = savedSkip
+            settings.autoEndSilenceDuration = savedSilence
         }
 
-        let transcribe = config.needsTranscription && OpenAICodexAuth.isLoggedIn
+        let transcribe = allowsTranscription && config.needsTranscription && OpenAICodexAuth.isLoggedIn
         let bridge = Transcription.shared.queueBridge
         if transcribe { await bridge.reset() }
         var transcriptParts: [String] = []
@@ -1026,7 +1052,30 @@ struct SpeakFlowLiveE2E {
         var chunks = 0
         var autoEndSeconds: Double?
         let recorder = StreamingRecorder()
-        let startedAt = Date()
+        #if DEBUG
+        let debugTiming = ProcessInfo.processInfo.environment["SPEAKFLOW_E2E_DEBUG_TIMING"] == "1"
+        let timerTicks = OSAllocatedUnfairLock(initialState: (processing: 0, check: 0))
+        if debugTiming {
+            recorder.nativeTimerTickForTesting = { kind in
+                timerTicks.withLock {
+                    switch kind {
+                    case .processing: $0.processing += 1
+                    case .check: $0.check += 1
+                    }
+                }
+            }
+        }
+        func timingDiagnostic(_ message: String) {
+            if debugTiming {
+                FileHandle.standardOutput.write(Data("E2E_DEBUG_TIMING \(message)\n".utf8))
+            }
+        }
+        #endif
+        let clock = ContinuousClock()
+        #if DEBUG
+        let preparationStartedAt = clock.now
+        #endif
+        var startedAt = clock.now
         recorder.onChunkReady = { chunk in
             chunks += 1
             print(LiveE2EOutput.chunkLine(
@@ -1035,44 +1084,70 @@ struct SpeakFlowLiveE2E {
                 speechPercent: Int((chunk.speechProbability * 100).rounded())
             ))
             if transcribe {
-                Task { @MainActor in
-                    let ticket = await bridge.nextSequence()
-                    Transcription.shared.transcribe(ticket: ticket, chunk: chunk)
-                }
+                let ticket = await bridge.nextSequence()
+                Transcription.shared.transcribe(ticket: ticket, chunk: chunk)
             }
         }
         recorder.onAutoEnd = {
-            let seconds = Date().timeIntervalSince(startedAt)
+            let seconds = elapsedSeconds(since: startedAt, clock: clock)
             autoEndSeconds = seconds
             print(LiveE2EOutput.autoEndLine(seconds: seconds))
             recorder.stop()
         }
 
+        #if DEBUG
+        timingDiagnostic("phase=starting")
+        // Exercise slow model preparation without network or microphone access.
+        if let delay = ProcessInfo.processInfo.environment["SPEAKFLOW_E2E_STARTUP_DELAY_SECONDS"]
+            .flatMap(Double.init), delay.isFinite, delay > 0 {
+            try? await Task.sleep(for: .seconds(min(delay, 30)))
+        }
+        #endif
         await recorder.startMock(audioData: fixture.samples)
+        #if DEBUG
+        timingDiagnostic("phase=ready startup_seconds=\(elapsedSeconds(since: preparationStartedAt, clock: clock))")
+        #endif
+        // Preparation (including cold model loading) is not recorded audio.
+        // Start both the verdict clock and timeout only once playback is ready.
+        startedAt = clock.now
         let limit = config.timeoutSeconds ?? (fixture.durationSeconds + 15)
         if config.autoEnd != nil {
-            let deadline = startedAt.addingTimeInterval(limit)
-            while autoEndSeconds == nil && Date() < deadline {
+            let deadline = startedAt.advanced(by: .seconds(limit))
+            while autoEndSeconds == nil && clock.now < deadline {
                 try? await Task.sleep(for: .milliseconds(200))
             }
             if autoEndSeconds == nil { recorder.stop() }
         } else {
             let record = min(config.recordSeconds ?? (fixture.durationSeconds + 3), limit)
             try? await Task.sleep(for: .seconds(record))
+            await beforeStopForTesting?(recorder)
             recorder.stop()
         }
         await recorder.waitForStopCompletion()
+        #if DEBUG
+        let ticks = timerTicks.withLock { $0 }
+        timingDiagnostic("phase=stopped elapsed_seconds=\(elapsedSeconds(since: startedAt, clock: clock)) "
+            + "processing_ticks=\(ticks.processing) check_ticks=\(ticks.check) "
+            + "fed_samples=\(recorder.mockSamplesFedForTesting) fixture_samples=\(fixture.samples.count)")
+        #endif
 
+        let transcriptionCompleted: Bool
         if transcribe {
-            let deadline = Date().addingTimeInterval(30)
-            while Date() < deadline, await !bridge.isIdle() {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
+            transcriptionCompleted = await LiveE2ECompletion.wait(
+                timeout: .seconds(30),
+                isIdle: { await bridge.isIdle() },
+                cancel: { Transcription.shared.cancelAll() }
+            )
+        } else {
+            transcriptionCompleted = false
         }
         let transcript = transcribe
             ? transcriptParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             : nil
-        return LiveE2EObservation(chunks: chunks, autoEndSeconds: autoEndSeconds, transcript: transcript)
+        return LiveE2EObservation(
+            chunks: chunks, autoEndSeconds: autoEndSeconds, transcript: transcript,
+            transcriptionCompleted: transcriptionCompleted
+        )
     }
 
     /// The smallest supported chunk duration that is at least `seconds`.
@@ -1081,6 +1156,11 @@ struct SpeakFlowLiveE2E {
     }
 
     // MARK: - Helpers
+
+    private static func elapsedSeconds(since start: ContinuousClock.Instant, clock: ContinuousClock) -> Double {
+        let duration = start.duration(to: clock.now).components
+        return Double(duration.seconds) + Double(duration.attoseconds) / 1e18
+    }
 
     /// Loose match: at least 1/3 of expected words must appear in actual.
     static func looselyMatches(expected: String, actual: String) -> Bool {
@@ -1093,9 +1173,9 @@ struct SpeakFlowLiveE2E {
         Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
     }
 
-    static func fail(_ message: String) -> Never {
+    static func fail(_ message: String) -> Int32 {
         fputs("ERROR: \(message)\n", stderr)
-        Foundation.exit(1)
+        return 1
     }
 }
 
@@ -1106,9 +1186,32 @@ struct SpeakFlowLiveE2E {
 @main
 enum LiveE2EEntry {
     static func main() {
-        Task {
-            await SpeakFlowLiveE2E.main()
+        // This must precede every settings, statistics, credential, or metrics singleton.
+        RuntimeIsolation.isolateThisProcess()
+        SoundEffect.isMuted = true
+        #if DEBUG
+        // Inspect entry policy without touching any persistent singleton.
+        if CommandLine.arguments.contains("--fixture-root-probe") {
+            print(NSTemporaryDirectory())
             exit(0)
+        }
+        if CommandLine.arguments.contains("--runtime-policy-probe") {
+            print("E2E_RUNTIME isolated=\(RuntimeIsolation.current.isIsolated) "
+                + "transcription_allowed=\(SpeakFlowLiveE2E.allowsTranscription) muted=\(SoundEffect.isMuted)")
+            exit(RuntimeIsolation.current.isIsolated ? 0 : 1)
+        }
+        #endif
+        Task {
+            #if DEBUG
+            if CommandLine.arguments.contains("--authenticated-silence-probe") {
+                exit(await AuthenticatedSilenceProbe.run())
+            }
+            if CommandLine.arguments.contains("--storage-isolation-probe") {
+                exit(await StorageIsolationProbe.run())
+            }
+            #endif
+            let status = await SpeakFlowLiveE2E.main()
+            exit(status)
         }
         RunLoop.main.run()
     }

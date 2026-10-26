@@ -1,4 +1,5 @@
 import Foundation
+import FluidAudio
 import Testing
 @testable import SpeakFlowCore
 
@@ -57,6 +58,66 @@ private func sineChunk(frequency: Float = 300.0, amplitude: Float = 0.1, samples
 
 @Suite("VAD Integration — Volume Gate + Smoothing + State Reset", .serialized, .enabled(if: VADModelTestSupport.integrationTestsEnabled()))
 struct VADIntegrationTests {
+    @Test
+    func productionOnsetRollbackPreservesRecurrentStateAndCanRecover() async throws {
+        var config = VADConfiguration.default
+        config.threshold = 0
+        config.minSpeechDuration = 0
+        config.volumeGateEnabled = true
+        config.minVolumeForSpeech = 0.1
+        config.volumeSmoothingFactor = 1
+        config.stateResetInterval = 3600 // Keep periodic resets outside this short state-continuity probe.
+        let processor = VADProcessor(config: config)
+        try await processor.initialize()
+        let manager = try await VADModelCache.shared.getManager(threshold: config.threshold)
+        var expectedState = await manager.makeStreamState()
+        var segmentation = VadSegmentationConfig.default
+        segmentation.minSpeechDuration = TimeInterval(config.minSpeechDuration)
+        segmentation.minSilenceDuration = TimeInterval(config.minSilenceAfterSpeech)
+
+        for amplitude: Float in [0.01, 0.01, 0.5] {
+            let samples = sineChunk(frequency: 220, amplitude: amplitude, samples: 4096)
+            let reference = try await manager.processStreamingChunk(
+                samples, state: expectedState, config: segmentation,
+                returnSeconds: true, timeResolution: 2
+            )
+            try #require(reference.event?.kind == .speechStart,
+                         "The real model must produce an onset before testing its suppression")
+            #expect(reference.state.modelState.hiddenState.contains { $0 != 0 },
+                    "This test must execute recurrent inference, not an empty buffered window")
+            let result = try await processor.processChunk(samples)
+            let actualState = try #require(await processor._testStreamState)
+            #expect(abs(result.probability - reference.probability) < 0.000_01)
+            #expect(actualState.processedSamples == reference.state.processedSamples)
+            let contextMatches = actualState.modelState.context == reference.state.modelState.context
+            #expect(contextMatches)
+            #expect(actualState.modelState.hiddenState.count == reference.state.modelState.hiddenState.count)
+            #expect(actualState.modelState.cellState.count == reference.state.modelState.cellState.count)
+            let triggered = actualState.triggered
+            let hiddenError = zip(actualState.modelState.hiddenState, reference.state.modelState.hiddenState)
+                .map { abs($0 - $1) }.max() ?? 0
+            let cellError = zip(actualState.modelState.cellState, reference.state.modelState.cellState)
+                .map { abs($0 - $1) }.max() ?? 0
+            #expect(hiddenError < 0.000_01)
+            #expect(cellError < 0.000_01)
+
+            if amplitude < config.minVolumeForSpeech {
+                #expect(result.event == nil)
+                #expect(!result.isSpeaking)
+                #expect(!triggered)
+                #expect(actualState.tempEndSample == nil)
+                expectedState = VadStreamState(
+                    modelState: reference.state.modelState, triggered: false, tempEndSample: nil,
+                    processedSamples: reference.state.processedSamples
+                )
+            } else {
+                if case .started? = result.event {} else { Issue.record("Loud input must recover a speech onset") }
+                #expect(result.isSpeaking)
+                #expect(triggered)
+            }
+        }
+    }
+
 
     // MARK: Feature 1: Periodic State Reset
 

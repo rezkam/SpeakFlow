@@ -96,6 +96,21 @@ public struct ObservabilityPathInfo: Sendable {
     public let eventsFile: URL
 }
 
+/// Explicit context for isolated diagnostic stores, without inspecting the host.
+public struct ObservabilityRuntimeContext: Sendable {
+    public let profile: String
+    public let processId: Int32
+    public let processName: String
+    public let systemContext: [String: String]
+
+    public init(profile: String, processId: Int32, processName: String, systemContext: [String: String]) {
+        self.profile = profile
+        self.processId = processId
+        self.processName = processName
+        self.systemContext = systemContext
+    }
+}
+
 public actor ObservabilityStore {
     public static let shared = ObservabilityStore()
 
@@ -147,6 +162,7 @@ public actor ObservabilityStore {
         }
     }
 
+    private let runtimeContext: ObservabilityRuntimeContext?
     private let pathInfo: ObservabilityPathInfo
     private let maxFileBytes: UInt64
     private let maxRotatedFiles: Int
@@ -159,8 +175,10 @@ public actor ObservabilityStore {
     public init(
         baseDirectory: URL? = nil,
         maxFileBytes: UInt64 = Config.observabilityMaxLogBytes,
-        maxRotatedFiles: Int = Config.observabilityMaxRotatedLogFiles
+        maxRotatedFiles: Int = Config.observabilityMaxRotatedLogFiles,
+        runtimeContext: ObservabilityRuntimeContext? = nil
     ) {
+        self.runtimeContext = runtimeContext
         let base = baseDirectory ?? RuntimePaths.defaultBaseDirectory
         self.pathInfo = ObservabilityPathInfo(
             baseDirectory: base,
@@ -240,9 +258,9 @@ public actor ObservabilityStore {
             sequence: sequence,
             sessionSequence: sessionSequence,
             timestamp: Date(),
-            profile: RuntimePaths.profileName,
-            processId: ProcessInfo.processInfo.processIdentifier,
-            processName: ProcessInfo.processInfo.processName,
+            profile: runtimeContext?.profile ?? RuntimePaths.profileName,
+            processId: runtimeContext?.processId ?? ProcessInfo.processInfo.processIdentifier,
+            processName: runtimeContext?.processName ?? ProcessInfo.processInfo.processName,
             buildGitDescribe: ObservabilityBuildMetadata.current.gitDescribe,
             buildGitCommit: ObservabilityBuildMetadata.current.gitCommit,
             buildDisplayVersion: ObservabilityBuildMetadata.current.displayVersion,
@@ -330,7 +348,7 @@ public actor ObservabilityStore {
         guard config.captureSystemContext, !didRecordSystemContext else { return }
         didRecordSystemContext = true
         let env = ProcessInfo.processInfo.environment
-        let context: [String: String] = [
+        let context: [String: String] = runtimeContext?.systemContext ?? [
             "osVersion": ProcessInfo.processInfo.operatingSystemVersionString,
             "bundlePath": Bundle.main.bundlePath,
             "bundleId": Bundle.main.bundleIdentifier ?? "unknown",

@@ -137,6 +137,48 @@ struct KeyInterceptorRegistrationTests {
                 "The new recording's first Enter must be captured in the new target app")
     }
 
+    @MainActor @Test(arguments: [CGKeyCode(36), 76], [false, true])
+    func staleFocusQueryCannotCaptureForReplacementRegistration(keyCode: CGKeyCode, cancelBeforeRestart: Bool) async throws {
+        let fake = FakeEventTapDriver()
+        let entered = OSAllocatedUnfairLock(initialState: false)
+        let release = DispatchSemaphore(value: 0)
+        let interceptor = KeyInterceptor(
+            eventTapDriver: fake.driver,
+            focusQuery: {
+                let shouldWait = entered.withLock { value in
+                    let first = !value
+                    value = true
+                    return first
+                }
+                if shouldWait { _ = release.wait(timeout: .now() + 10) }
+                return .init(focusedPid: 42, focusedAppPid: 42, source: "test")
+            },
+            bundleIdentifierLookup: { _ in nil },
+            secureInputOwner: { nil }
+        )
+        defer {
+            release.signal()
+            interceptor.cancel()
+        }
+        var callbacks = 0
+        interceptor.onEnterPressed = { callbacks += 1 }
+        interceptor.onEscapePressed = { callbacks += 1 }
+        interceptor.start(targetPid: 42)
+        let oldEvent = Task.detached {
+            interceptor._testHandleKeyEventForTests(keyCode: keyCode)
+        }
+        try await waitUntil { entered.withLock { $0 } }
+        if cancelBeforeRestart { interceptor.cancel() }
+        interceptor.start(targetPid: 42)
+        release.signal()
+
+        let wasCaptured = await oldEvent.value
+        #expect(!wasCaptured, "A retired focus query must pass through, not claim the replacement registration")
+        #expect(interceptor._testIsEnterCaptureArmed)
+        interceptor.stop()
+        #expect(callbacks == 0, "No stale pending action may be delivered by stop or the scheduled handler")
+    }
+
     @MainActor @Test
     func stopDeliversACapturedEnterBeforeReturning() {
         let fake = FakeEventTapDriver()
@@ -223,16 +265,31 @@ struct KeyInterceptorRegistrationTests {
     @MainActor
     private func makeFocusInterceptor(
         focusedPid: pid_t,
-        bundles: [pid_t: String]
+        bundles: [pid_t: String],
+        applications: [pid_t: URL] = [:]
     ) -> (KeyInterceptor, FakeEventTapDriver) {
         let fake = FakeEventTapDriver()
         let interceptor = KeyInterceptor(
             eventTapDriver: fake.driver,
             focusQuery: { .init(focusedPid: focusedPid, focusedAppPid: focusedPid, source: "test") },
             bundleIdentifierLookup: { bundles[$0] },
+            applicationURLLookup: { applications[$0] },
             secureInputOwner: { nil }
         )
         return (interceptor, fake)
+    }
+
+    @MainActor @Test(arguments: ["com.vendor.Editor.independent", "com.vendor.Editor"])
+    func bundleNamesAloneCannotAuthorizeAnotherProcess(candidateBundle: String) {
+        let (interceptor, _) = makeFocusInterceptor(
+            focusedPid: 99,
+            bundles: [42: "com.vendor.Editor", 99: candidateBundle]
+        )
+        defer { interceptor.stop() }
+        interceptor.start(targetPid: 42)
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Unverified process ownership must pass Enter through regardless of bundle spelling")
+        #expect(interceptor._testIsEnterCaptureArmed)
     }
 
     @MainActor @Test
@@ -241,7 +298,9 @@ struct KeyInterceptorRegistrationTests {
         // target app is still the target app.
         let (interceptor, _) = makeFocusInterceptor(
             focusedPid: 99,
-            bundles: [42: "com.vendor.Editor", 99: "com.vendor.Editor.helper"]
+            bundles: [42: "com.vendor.Editor", 99: "com.vendor.Editor.helper"],
+            applications: [42: URL(fileURLWithPath: "/fixture/Editor.app"),
+                           99: URL(fileURLWithPath: "/fixture/Editor.app/Contents/Helpers/Worker.app")]
         )
         defer { interceptor.stop() }
         interceptor.start(targetPid: 42)
@@ -254,17 +313,19 @@ struct KeyInterceptorRegistrationTests {
     func focusInARelaunchedTargetAppIsTheTarget() {
         let (interceptor, _) = makeFocusInterceptor(
             focusedPid: 77,
-            bundles: [42: "com.vendor.Editor", 77: "com.vendor.Editor"]
+            bundles: [42: "com.vendor.Editor", 77: "com.vendor.Editor"],
+            applications: [42: URL(fileURLWithPath: "/fixture/Editor.app"),
+                           77: URL(fileURLWithPath: "/fixture/Editor.app")]
         )
         defer { interceptor.stop() }
         interceptor.start(targetPid: 42)
 
-        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53),
-                "Escape must be captured when the target app relaunched under a new PID")
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 36),
+                "Enter must be captured when the verified target app relaunched under a new PID")
     }
 
     @MainActor @Test
-    func focusInAnUnrelatedAppPassesEnterThrough() {
+    func focusInAnUnrelatedAppPassesEnterButCapturesCancel() {
         let (interceptor, _) = makeFocusInterceptor(
             focusedPid: 99,
             bundles: [42: "com.vendor.Editor", 99: "com.other.Chat"]
@@ -273,7 +334,33 @@ struct KeyInterceptorRegistrationTests {
         interceptor.start(targetPid: 42)
 
         #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36), "Enter in another app must pass through")
+        var cancels = 0
+        interceptor.onEscapePressed = { cancels += 1 }
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53), "Plain Escape cancels recording from any app")
         #expect(interceptor._testIsEnterCaptureArmed, "A passed-through Enter must not consume the token")
+        interceptor.stop()
+        #expect(cancels == 1)
+    }
+
+    @MainActor @Test
+    func escapeDoesNotDependOnAccessibleFocusObservation() {
+        let fake = FakeEventTapDriver()
+        let queries = OSAllocatedUnfairLock(initialState: 0)
+        let interceptor = KeyInterceptor(
+            eventTapDriver: fake.driver,
+            focusQuery: {
+                queries.withLock { $0 += 1 }
+                return .init(focusedPid: nil, focusedAppPid: nil, source: "unavailable")
+            },
+            bundleIdentifierLookup: { _ in nil }, secureInputOwner: { nil }
+        )
+        var cancels = 0
+        interceptor.onEscapePressed = { cancels += 1 }
+        interceptor.start(targetPid: 42)
+        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53))
+        interceptor.stop()
+        #expect(cancels == 1)
+        #expect(queries.withLock { $0 } == 0, "Cancel must not wait for an AX focus query")
     }
 
     /// Every non-empty combination of Shift, Option, Command, and Control.
@@ -465,15 +552,15 @@ struct KeyInterceptorRegistrationTests {
     }
 
     @MainActor @Test
-    func noTargetAppMeansEnterIsNotIntercepted() {
+    func noTargetAppMeansNothingIsIntercepted() {
         let interceptor = KeyInterceptor(eventTapDriver: FakeEventTapDriver().driver, secureInputOwner: { nil })
         defer { interceptor.stop() }
         interceptor.start(targetPid: 0)
 
         #expect(!interceptor._testHandleKeyEventForTests(keyCode: 36),
                 "Without a target app, Enter must reach whatever app has focus")
-        // Escape still cancels: it never needs a destination.
-        #expect(interceptor._testHandleKeyEventForTests(keyCode: 53))
+        #expect(!interceptor._testHandleKeyEventForTests(keyCode: 53),
+                "Without a captured recording target, Escape must pass through")
     }
 
     /// Escape cancels the active recording from whichever app has focus:
@@ -484,7 +571,7 @@ struct KeyInterceptorRegistrationTests {
         let interceptor = KeyInterceptor(
             eventTapDriver: FakeEventTapDriver().driver,
             focusQuery: { .init(focusedPid: 938, focusedAppPid: 938, source: "test") },
-            bundleIdentifierLookup: { [42: "com.mitchellh.ghostty", 938: "com.google.Chrome"][$0] },
+            bundleIdentifierLookup: { [42: "com.vendor.Editor", 938: "com.other.Chat"][$0] },
             secureInputOwner: { nil }
         )
         var escapes = 0

@@ -14,6 +14,7 @@ func makeTestRecordingController(
     providerSettings: SpyProviderSettings = SpyProviderSettings(),
     providerRegistry: SpyProviderRegistry = SpyProviderRegistry(),
     settings: SpySettings = SpySettings(),
+    hotkeySettings: SpyHotkeySettings = SpyHotkeySettings(),
     transcription: SpyTranscription = SpyTranscription(),
     playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
 ) -> (RecordingController, SpyKeyInterceptor, SpyTextInserter, SpyBannerPresenter) {
@@ -22,7 +23,7 @@ func makeTestRecordingController(
     let ti = SpyTextInserter()
     let bp = SpyBannerPresenter()
     let c = RecordingController(
-        keyInterceptor: ki, textInserter: ti, appState: bp,
+        keyInterceptor: ki, textInserter: ti, appState: bp, hotkeySettings: hotkeySettings,
         providerSettings: providerSettings, providerRegistry: providerRegistry,
         settings: settings, transcription: transcription,
         playSoundEffect: playSoundEffect
@@ -37,7 +38,7 @@ func makeTestRecordingController(
 @MainActor
 final class SpySoundEffectPlayer {
     enum Effect: Equatable {
-        case error, start, stop, complete
+        case error, start, stop, complete, nudge, warning
     }
 
     private(set) var effects: [Effect] = []
@@ -48,6 +49,8 @@ final class SpySoundEffectPlayer {
         case .start: effects.append(.start)
         case .stop: effects.append(.stop)
         case .complete: effects.append(.complete)
+        case .nudge: effects.append(.nudge)
+        case .warning: effects.append(.warning)
         }
     }
 
@@ -322,7 +325,11 @@ final class TextUpdateCollector {
 
 // MARK: - Polling Assertion
 
-/// Polls a condition until it becomes true, or times out.
+enum PollingError: Error {
+    case timedOut
+}
+
+/// Polls a condition until it becomes true, throwing on timeout or cancellation.
 /// Use this instead of direct `Task.sleep` for timer-based assertions
 /// where main-actor contention can delay Task continuations.
 @MainActor
@@ -332,9 +339,12 @@ func waitUntil(
     condition: @MainActor () -> Bool
 ) async throws {
     let deadline = ContinuousClock.now + timeout
-    while ContinuousClock.now < deadline {
+    while true {
+        try Task.checkCancellation()
         if condition() { return }
-        try await Task.sleep(for: interval)
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        guard remaining > .zero else { throw PollingError.timedOut }
+        try await Task.sleep(for: min(interval, remaining))
     }
 }
 
@@ -345,8 +355,13 @@ func waitUntilAsync(
     condition: @escaping @Sendable () async -> Bool
 ) async throws {
     let deadline = ContinuousClock.now + timeout
-    while ContinuousClock.now < deadline {
-        if await condition() { return }
-        try await Task.sleep(for: interval)
+    while true {
+        try Task.checkCancellation()
+        let satisfied = await condition()
+        try Task.checkCancellation()
+        if satisfied { return }
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        guard remaining > .zero else { throw PollingError.timedOut }
+        try await Task.sleep(for: min(interval, remaining))
     }
 }

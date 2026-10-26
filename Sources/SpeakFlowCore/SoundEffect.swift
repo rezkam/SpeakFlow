@@ -5,7 +5,7 @@ import AppKit
 /// Centralizes system sound references so call sites express intent
 /// (`.error`, `.start`) rather than magic strings (`"Basso"`, `"Blow"`).
 public enum SoundEffect {
-    case error, start, stop, complete
+    case error, start, stop, complete, nudge, warning
 
     /// Suppresses all sound playback when `true` (set during tests).
     @MainActor public static var isMuted = false
@@ -45,6 +45,8 @@ public enum SoundEffect {
         case .start: "Blow"
         case .stop: "Pop"
         case .complete: "Glass"
+        case .nudge: "Tink"
+        case .warning: "Sosumi"
         }
         NSSound(named: name)?.play()
     }
