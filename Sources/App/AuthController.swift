@@ -19,6 +19,8 @@ final class AuthController {
     static let shared = AuthController()
 
     private(set) var oauthCallbackServer: (any OAuthCallbackServing)?
+    private(set) var loginTask: Task<Void, Never>?
+    private var loginGeneration: UInt64 = 0
 
     let appState: any BannerPresenting
     let providerSettings: any ProviderSettingsProviding
@@ -64,6 +66,7 @@ final class AuthController {
     }
 
     func handleLogout() {
+        retireLoginFlow()
         do {
             try deleteChatGPTCredentials()
         } catch {
@@ -80,6 +83,8 @@ final class AuthController {
     }
 
     func startLoginFlow() {
+        retireLoginFlow()
+        let generation = loginGeneration
         let flow: OpenAICodexAuth.AuthorizationFlow
         do {
             flow = try OpenAICodexAuth.createAuthorizationFlow()
@@ -100,21 +105,21 @@ final class AuthController {
         oauthCallbackServer = server
         openAuthorizationURL(flow.url)
 
-        Task { [weak self] in
+        loginTask = Task { [weak self] in
             let code = await server.waitForPreparedCallback(timeout: 120)
-            await MainActor.run {
-                guard let self else { return }
-                self.oauthCallbackServer = nil
-                if let code {
-                    self.exchangeCodeForTokens(code: code, flow: flow)
-                } else {
-                    Logger.auth.error("OAuth callback failed or timed out")
-                    self.appState.showBanner(
-                        "Login failed or timed out. Please try again.",
-                        style: .error,
-                        duration: 8
-                    )
-                }
+            guard let self, self.loginGeneration == generation, !Task.isCancelled else { return }
+            defer {
+                if self.loginGeneration == generation { self.loginTask = nil }
+            }
+            server.stop()
+            self.oauthCallbackServer = nil
+            if let code {
+                await self.exchangeCodeForTokens(code: code, flow: flow, generation: generation)
+            } else {
+                Logger.auth.error("OAuth callback failed or timed out")
+                self.appState.showBanner(
+                    "Login failed or timed out. Please try again.", style: .error, duration: 8
+                )
             }
         }
     }
@@ -145,27 +150,32 @@ final class AuthController {
     // MARK: - Cleanup
 
     func shutdown() {
+        retireLoginFlow()
+    }
+
+    private func retireLoginFlow() {
+        loginGeneration &+= 1
+        loginTask?.cancel()
+        loginTask = nil
         oauthCallbackServer?.stop()
         oauthCallbackServer = nil
     }
 
     // MARK: - Private
 
-    private func exchangeCodeForTokens(code: String, flow: OpenAICodexAuth.AuthorizationFlow) {
-        let exchangeAuthorizationCode = self.exchangeAuthorizationCode
-        Task {
-            do {
-                try await exchangeAuthorizationCode(code, flow)
-                await MainActor.run {
-                    appState.refresh()
-                    appState.showBanner("Login successful — ChatGPT transcription ready", style: .success)
-                }
-            } catch {
-                Logger.auth.error("OAuth token exchange failed: \(error)")
-                await MainActor.run {
-                    appState.showBanner("Login failed — please try again", style: .error)
-                }
-            }
+    private func exchangeCodeForTokens(
+        code: String, flow: OpenAICodexAuth.AuthorizationFlow, generation: UInt64
+    ) async {
+        guard loginGeneration == generation, !Task.isCancelled else { return }
+        do {
+            try await exchangeAuthorizationCode(code, flow)
+            guard loginGeneration == generation, !Task.isCancelled else { return }
+            appState.refresh()
+            appState.showBanner("Login successful: ChatGPT transcription ready", style: .success)
+        } catch {
+            guard loginGeneration == generation, !Task.isCancelled else { return }
+            Logger.auth.error("OAuth token exchange failed: \(error)")
+            appState.showBanner("Login failed: please try again", style: .error)
         }
     }
 }

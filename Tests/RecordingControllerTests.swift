@@ -385,11 +385,11 @@ struct RecordingControllerTargetCaptureTests {
 @Suite("RecordingController — Session Identity", .serialized)
 struct RecordingControllerSessionIdentityTests {
     @MainActor
-    private func makeStreaming() -> (RecordingController, SpyTextInserter, SpyBannerPresenter, SpySoundEffectPlayer) {
+    private func makeStreaming(session: any StreamingSession = MockStreamingSession()) -> (RecordingController, SpyTextInserter, SpyBannerPresenter, SpySoundEffectPlayer) {
         let providerSettings = SpyProviderSettings()
         let registry = SpyProviderRegistry()
         let provider = MockStreamingProvider()
-        provider.mockSession = MockStreamingSession()
+        provider.mockSession = session
         providerSettings.activeProviderId = ProviderId.deepgram
         providerSettings.storedKeys[ProviderId.deepgram] = "test-key"
         registry.register(provider)
@@ -432,6 +432,33 @@ struct RecordingControllerSessionIdentityTests {
     }
 
     @MainActor @Test
+    func cancelDuringStreamingStopDiscardsPendingUploads() async throws {
+        let session = SuspendedUploadSession()
+        let (controller, inserter, _, _) = makeStreaming(session: session)
+        controller.startRecording()
+        let stream = try #require(controller.liveStreamingController)
+        defer { Task { @MainActor in await stream.cancel() } }
+        try await waitUntil { stream.isActive }
+        try #require(stream.isActive)
+        stream.stopDrainTimeout = .seconds(10)
+        for byte in UInt8(1)...3 { stream._testEnqueueAudioFrame(Data([byte])) }
+        try await waitUntilAsync { await session.sendStarted }
+        try #require(await session.sendStarted)
+        try #require(stream._testPendingAudioChunkCount == 2)
+
+        controller.stopRecordingAndSubmit()
+        await Task.yield()
+        controller.cancelRecording()
+        // Inspect shutdown even on timeout so the ownership failure is explicit.
+        try? await waitUntil(timeout: .seconds(1)) { stream._testAudioSessionRefIsShutdown }
+        #expect(stream._testAudioSessionRefIsShutdown, "Escape must reach the stopping stream and shut down its sender")
+        #expect(stream._testPendingAudioChunkCount == 0)
+        #expect(await session.uploads == 0)
+        #expect(!inserter.operations.contains(.pressEnterKey))
+        #expect(!controller.isRecording && !controller.isProcessingFinal)
+    }
+
+    @MainActor @Test
     func streamingTextFromARetiredRecordingIsNotTypedIntoTheNextOne() async throws {
         let (controller, inserter, _, _) = makeStreaming()
         controller.startRecording()
@@ -448,6 +475,24 @@ struct RecordingControllerSessionIdentityTests {
                 "A retired recording's trailing final must not be typed into the new recording")
         #expect(!inserter.operations.contains(.deleteChars(5)),
                 "A retired recording's interim deletion must not erase the new recording's text")
+    }
+
+    @MainActor @Test
+    func deferredStreamingErrorCannotStopReplacementRecording() async throws {
+        let (controller, _, _, _) = makeStreaming()
+        controller.startRecording()
+        let first = try #require(controller.liveStreamingController)
+        try await waitUntil { first.isActive }
+        try #require(first.isActive)
+        first.onError?(DeepgramError.connectionFailed("test failure"))
+        // Retire the accepted error before its deferred stop can execute.
+        controller.cancelRecording()
+        controller.startRecording()
+        let replacement = try #require(controller.liveStreamingController)
+        defer { controller.cancelRecording() }
+        try await waitUntil { replacement.isActive || !controller.isRecording }
+        #expect(controller.isRecording, "The old error's deferred stop must not stop its replacement")
+        #expect(controller.liveStreamingController === replacement)
     }
 
     @MainActor @Test
@@ -500,11 +545,31 @@ struct RecordingControllerSessionIdentityTests {
         controller.startRecording()
         #expect(controller.isRecording)
 
-        first.onChunkReady?(AudioChunk(wavData: Data([1, 2, 3]), durationSeconds: 1))
+        await first.onChunkReady?(AudioChunk(wavData: Data([1, 2, 3]), durationSeconds: 1))
         try await Task.sleep(for: .milliseconds(100))
 
         #expect(transcription.transcribeCalls.isEmpty,
                 "Audio from a retired recording must not get a ticket in the new recording's queue session")
+    }
+
+    @MainActor @Test
+    func batchReadinessCueWaitsForCaptureStartup() async throws {
+        let ctx = makeBatch()
+        ctx.controller.startRecording()
+        #expect(ctx.sounds.count(.start) == 0, "Capture has not started in the asynchronous startup task")
+        try await waitUntil(timeout: .seconds(5)) { ctx.sounds.count(.start) == 1 }
+        #expect(ctx.controller.isRecording)
+        ctx.controller.cancelRecording()
+    }
+
+    @MainActor @Test
+    func cancelledBatchStartupNeverPlaysReadinessCue() async throws {
+        let ctx = makeBatch()
+        ctx.controller.startRecording()
+        ctx.controller.cancelRecording()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(ctx.sounds.count(.start) == 0,
+                "A retired startup never announces readiness")
     }
 
     @MainActor @Test
@@ -524,6 +589,142 @@ struct RecordingControllerSessionIdentityTests {
     }
 
     @MainActor @Test
+    func pollingSurvivesZeroTicketsWhileTextDeliveryIsHeld() async throws {
+        let ctx = makeBatch()
+        let (controller, inserter) = (ctx.controller, ctx.inserter)
+        let bridge = ctx.transcription.queueBridge
+        let gate = AsyncStream<Void>.makeStream()
+        var deliveryHeld = false
+        var finalizationDeferred = false
+        bridge.startListening()
+        bridge.beforeTextDeliveryForTesting = {
+            deliveryHeld = true
+            for await _ in gate.stream {}
+        }
+        // Exercise the fallback poller independently of the completion wakeup.
+        bridge.onAllComplete = nil
+        controller.batchFinalizationDeferredForTesting = { finalizationDeferred = true }
+        defer {
+            gate.continuation.finish()
+            bridge.stopListening()
+            controller.cancelRecording()
+        }
+        controller.startRecording()
+        let recorder = try #require(controller.recorder)
+        try await waitUntil { recorder._testIsRecording }
+        try #require(recorder._testIsRecording)
+        let ticket = await bridge.nextSequence()
+        await bridge.submitResult(ticket: ticket, text: "tail")
+        try await waitUntil { deliveryHeld }
+        try #require(deliveryHeld)
+        controller.stopRecordingAndSubmit()
+        try await waitUntil { finalizationDeferred }
+        try #require(finalizationDeferred)
+        #expect(await bridge.getPendingCount() == 0)
+        #expect(!inserter.operations.contains(.pressEnterKey))
+        gate.continuation.finish()
+        try await waitUntil(timeout: .seconds(2)) { inserter.operations.contains(.pressEnterKey) }
+        #expect(inserter.operations.contains(.insertText("tail ")))
+        #expect(inserter.operations.contains(.pressEnterKey))
+        #expect(!controller.isProcessingFinal)
+        if let text = inserter.operations.firstIndex(of: .insertText("tail ")),
+           let enter = inserter.operations.firstIndex(of: .pressEnterKey) {
+            #expect(text < enter)
+        }
+    }
+
+    @MainActor @Test
+    func stopCompletionAcknowledgesFinalChunkTicketAllocation() async throws {
+        let ctx = makeBatch()
+        let bridge = ctx.transcription.queueBridge
+        let gate = AsyncStream<Void>.makeStream()
+        var allocationEntered = false
+        bridge.beforeSequenceAllocationForTesting = {
+            allocationEntered = true
+            for await _ in gate.stream {}
+        }
+        defer {
+            gate.continuation.finish()
+            ctx.controller.cancelRecording()
+        }
+        ctx.controller.startRecording()
+        let recorder = try #require(ctx.controller.recorder)
+        try await waitUntil { recorder._testIsRecording }
+        try #require(recorder._testIsRecording)
+        let buffer = AudioBuffer(sampleRate: 16000)
+        await buffer.append(frames: [Float](repeating: 0.2, count: 32_000))
+        recorder._testInjectAudioBuffer(buffer)
+        recorder._testSetVADActive(false)
+        ctx.controller.stopRecordingAndSubmit()
+        var stopCompleted = false
+        let stopObserver = Task { @MainActor in
+            await recorder.waitForStopCompletion()
+            stopCompleted = true
+        }
+        try await waitUntil { allocationEntered }
+        try #require(allocationEntered)
+        // A bounded negative assertion while the allocation gate remains held.
+        await #expect(throws: PollingError.self) {
+            try await waitUntil(timeout: .milliseconds(150)) { stopCompleted }
+        }
+        #expect(!stopCompleted, "Stop must acknowledge final ticket allocation, not callback invocation")
+        #expect(ctx.transcription.transcribeCalls.isEmpty)
+        gate.continuation.finish()
+        await stopObserver.value
+        try await waitUntil { ctx.transcription.transcribeCalls.count == 1 }
+        #expect(ctx.transcription.transcribeCalls.count == 1)
+    }
+
+    @MainActor @Test
+    func competingBatchFinalizersCannotResetPendingSubmit() async throws {
+        let ctx = makeBatch()
+        let (controller, inserter) = (ctx.controller, ctx.inserter)
+        let insertionGate = AsyncStream<Void>.makeStream()
+        let enterGate = AsyncStream<Void>.makeStream()
+        let completions = AsyncStream<Int>.makeStream()
+        let insertionTask = Task { for await _ in insertionGate.stream {} }
+        let enterTask = Task { for await _ in enterGate.stream {} }
+        defer {
+            insertionGate.continuation.finish()
+            enterGate.continuation.finish()
+            completions.continuation.finish()
+            controller.cancelRecording()
+        }
+        inserter.pendingTask = insertionTask
+        inserter.pendingTaskAfterEnter = enterTask
+        controller.startRecording()
+        controller.stopRecordingAndSubmit()
+        let first = Task { @MainActor in
+            await controller.completeBatchFinalization()
+            completions.continuation.yield(1)
+        }
+        try await waitUntil { inserter.operations.contains(.waitForPendingInsertions) }
+        try #require(inserter.operations.contains(.waitForPendingInsertions))
+        var secondCompleted = false
+        let second = Task { @MainActor in
+            await controller.completeBatchFinalization()
+            secondCompleted = true
+            completions.continuation.yield(2)
+        }
+        try await waitUntil {
+            secondCompleted || inserter.operations.filter { $0 == .waitForPendingInsertions }.count >= 2
+        }
+        try #require(secondCompleted || inserter.operations.filter { $0 == .waitForPendingInsertions }.count >= 2)
+        insertionGate.continuation.finish()
+        try await waitUntil { inserter.operations.contains(.pressEnterKey) }
+        try #require(inserter.operations.contains(.pressEnterKey))
+        var iterator = completions.stream.makeAsyncIterator()
+        _ = await iterator.next()
+        #expect(!inserter.operations.contains(.reset), "No finalizer may reset while submit is still pending")
+        #expect(controller.isProcessingFinal)
+        enterGate.continuation.finish()
+        await first.value
+        await second.value
+        #expect(inserter.operations.filter { $0 == .pressEnterKey }.count == 1)
+        #expect(inserter.operations.filter { $0 == .reset }.count == 1)
+    }
+
+    @MainActor @Test
     func batchCompletionWaitsForOutstandingTickets() async throws {
         let ctx = makeBatch()
         let (controller, inserter, transcription) = (ctx.controller, ctx.inserter, ctx.transcription)
@@ -531,7 +732,7 @@ struct RecordingControllerSessionIdentityTests {
         defer { transcription.queueBridge.stopListening() }
         controller.startRecording()
         try await Task.sleep(for: .milliseconds(100))
-        controller.recorder?.onChunkReady?(AudioChunk(wavData: Data([1]), durationSeconds: 1))
+        await controller.recorder?.onChunkReady?(AudioChunk(wavData: Data([1]), durationSeconds: 1))
         try await waitUntil { transcription.transcribeCalls.count == 1 }
         controller.stopRecordingAndSubmit()
 

@@ -54,6 +54,8 @@ public actor SessionController {
 
     private var isUserSpeaking = false
     private var lastSpeechEndTime: Date?
+    /// Only a chunk containing new speech may receive speech-boundary protection.
+    private var hasSpeechSinceLastChunk = false
     private var chunkStartTime: Date?
     private var sessionStartTime: Date?
     private var hasSpeechOccurredInSession = false
@@ -123,6 +125,7 @@ public actor SessionController {
         hasSpeechOccurredInSession = false
         isUserSpeaking = false
         lastSpeechEndTime = nil
+        hasSpeechSinceLastChunk = false
         speakingStartTime = nil
         lastTranscript = ""
         lastTurnCompletionProbability = nil
@@ -155,6 +158,7 @@ public actor SessionController {
         case .started:
             isUserSpeaking = true
             hasSpeechOccurredInSession = true
+            hasSpeechSinceLastChunk = true
             speakingStartTime = dateProvider()                  // ← Safety timeout tracking
             lastPotentialSpeechActivityTime = speakingStartTime
             lastTurnCompletionProbability = nil
@@ -166,6 +170,7 @@ public actor SessionController {
             isUserSpeaking = false
             speakingStartTime = nil                            // ← Clear safety timeout tracker
             lastSpeechEndTime = dateProvider()
+            hasSpeechSinceLastChunk = true
             lastPotentialSpeechActivityTime = nil
             lastTurnCompletionProbability = nil
             lastTurnCompletionEvaluatedSpeechEnd = nil
@@ -186,6 +191,7 @@ public actor SessionController {
     public func onPotentialSpeechActivity() {
         let now = dateProvider()
         lastPotentialSpeechActivityTime = now
+        hasSpeechSinceLastChunk = true
         if hasSpeechOccurredInSession && !isUserSpeaking {
             lastSpeechEndTime = now
         }
@@ -228,8 +234,8 @@ public actor SessionController {
     /// Called after an intermediate audio chunk is drained and sent to the API.
     ///
     /// Resets the chunk start time so the next chunk duration window begins fresh.
-    /// Also restarts `lastSpeechEndTime` from "now" so the auto-end silence clock
-    /// is measured from the chunk boundary.
+    /// A chunk containing new speech restarts the silence clock at its boundary.
+    /// Subsequent silence-only chunks preserve that clock so auto-end can fire.
     ///
     /// Without this, the silence that triggered the chunk send (required by
     /// `shouldSendChunk` — it only sends on `!isUserSpeaking`) persists into the
@@ -246,11 +252,10 @@ public actor SessionController {
     public func chunkSent() {
         let now = dateProvider()
         chunkStartTime = now
-        // Restart silence timing from the chunk boundary.
-        // If the user stays silent, auto-end now measures silence from this moment.
-        // If speech resumes, `speechStart`/potential-speech activity will block
-        // auto-end until the next real `speechEnd`.
-        lastSpeechEndTime = now
+        if hasSpeechSinceLastChunk {
+            lastSpeechEndTime = now
+        }
+        hasSpeechSinceLastChunk = isUserSpeaking
     }
 
     // MARK: - Auto-end decision

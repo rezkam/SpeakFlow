@@ -194,7 +194,21 @@ public actor SessionMetricsStore {
         activeSessions[sessionId] = metrics
     }
 
-    public func recordSTTLatency(sessionId: UUID, milliseconds: Double) {
+    #if DEBUG
+    private var latencyGateForTesting: (@Sendable () async -> Void)?
+    private(set) var latencyWriteWaitingForTesting = false
+
+    func setLatencyGateForTesting(_ gate: (@Sendable () async -> Void)?) {
+        latencyGateForTesting = gate
+    }
+    #endif
+
+    public func recordSTTLatency(sessionId: UUID, milliseconds: Double) async {
+        #if DEBUG
+        latencyWriteWaitingForTesting = true
+        await latencyGateForTesting?()
+        latencyWriteWaitingForTesting = false
+        #endif
         guard milliseconds.isFinite, milliseconds >= 0,
               var metrics = activeSessions[sessionId] else { return }
 

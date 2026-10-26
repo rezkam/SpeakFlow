@@ -1,4 +1,5 @@
 import os
+import Foundation
 import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
@@ -149,11 +150,13 @@ struct KeyInterceptorEnterCaptureTests {
     private func makeSecureInputInterceptor(
         owner: @escaping () -> pid_t?,
         bundles: [pid_t: String] = [:],
+        applications: [pid_t: URL] = [:],
         pollingInterval: Duration = .seconds(1)
     ) -> KeyInterceptor {
         KeyInterceptor(
             eventTapDriver: FakeEventTapDriver().driver,
             bundleIdentifierLookup: { bundles[$0] },
+            applicationURLLookup: { applications[$0] },
             secureInputOwner: owner,
             secureInputPollingInterval: pollingInterval
         )
@@ -184,7 +187,9 @@ struct KeyInterceptorEnterCaptureTests {
     func secureInputHeldByTheTargetAppsHelperIsAWarning() {
         let interceptor = makeSecureInputInterceptor(
             owner: { 99 },
-            bundles: [42: "com.vendor.Terminal", 99: "com.vendor.Terminal.helper"]
+            bundles: [42: "com.vendor.Terminal", 99: "com.vendor.Terminal.helper"],
+            applications: [42: URL(fileURLWithPath: "/fixture/Terminal.app"),
+                           99: URL(fileURLWithPath: "/fixture/Terminal.app/Contents/Helpers/Worker.app")]
         )
         var events: [HotkeyDiagnosticEvent] = []
         HotkeyDiagnostics._testEventHook = { events.append($0) }

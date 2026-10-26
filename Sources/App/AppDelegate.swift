@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let terminationReasonProvider: @MainActor () -> OSType?
     private let terminationRequester: @MainActor () -> Void
     private var explicitTerminationRequested = false
+    private let launchDefaults = RuntimeIsolation.current.makeDefaults(prefix: "app.launch.tests")
     private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
     private let useMockRecordingInUITests = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MOCK_RECORDING"] != "0"
     private let resetUITestState = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_RESET_STATE"] == "1"
@@ -121,7 +122,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Bring settings window to front on launch
         NSApp.activate(ignoringOtherApps: true)
 
-        UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+        recordSuccessfulLaunch()
+    }
+
+    func recordSuccessfulLaunch() {
+        launchDefaults.set(true, forKey: "hasLaunchedBefore")
     }
 
     /// Keep the app alive when the settings window is closed — it runs in the menu bar.
@@ -298,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HotkeySettings.shared.currentHotkey = .controlOptionD
         }
 
-        let harness = UITestHarnessController()
+        let harness = UITestHarnessController(recording: recording)
         harness.onStartClicked = { recording.startRecording() }
         harness.onStopClicked = { recording.stopRecording(reason: .ui) }
         harness.onSeedStatsClicked = { [weak self] in self?.seedUITestStatistics() }

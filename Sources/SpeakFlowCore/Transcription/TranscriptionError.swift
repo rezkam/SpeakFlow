@@ -81,6 +81,8 @@ public enum TranscriptionErrorKind: Sendable {
 
     /// Classify an arbitrary error from any transcription provider.
     public static func classify(_ error: Error) -> TranscriptionErrorKind {
+        if let auth = error as? AuthError, auth.isAuthenticationError { return .authentication }
+
         // TranscriptionError (ChatGPT batch provider)
         if let te = error as? TranscriptionError {
             if te.isAuthenticationError { return .authentication }

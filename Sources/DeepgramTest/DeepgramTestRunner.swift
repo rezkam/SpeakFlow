@@ -8,7 +8,8 @@ import AVFoundation
 // These tests exercise the ACTUAL recording pipeline with a real microphone
 // and live Deepgram WebSocket connection, exactly as the app uses it.
 //
-// Requires: DEEPGRAM_API_KEY env var + microphone permission
+// Requires: --allow-microphone, DEEPGRAM_API_KEY, and microphone permission.
+// Example: swift run DeepgramTest --allow-microphone
 // ============================================================================
 
 // Counters stored in enum to avoid top-level code (required for @main)
@@ -345,11 +346,24 @@ func runAllTests() async {
 
 @main
 enum DeepgramTestEntry {
+    static var allowsMicrophone: Bool { CommandLine.arguments.contains("--allow-microphone") }
     static func main() {
         // A test executable must never write the user's credentials or settings:
         // isolate every store before any singleton is touched.
         RuntimeIsolation.isolateThisProcess()
-        print("Isolated storage: \(RuntimeIsolation.current.dataDirectory.path)")
+        SoundEffect.isMuted = true
+        #if DEBUG
+        if CommandLine.arguments.contains("--runtime-policy-probe") {
+            print("E2E_RUNTIME isolated=\(RuntimeIsolation.current.isIsolated) muted=\(SoundEffect.isMuted) "
+                + "microphone_allowed=\(allowsMicrophone)")
+            return
+        }
+        #endif
+        guard allowsMicrophone else {
+            print("Microphone capture requires --allow-microphone")
+            exit(1)
+        }
+        print("Isolated storage enabled")
         // Schedule async work, then pump main dispatch queue for MainActor + URLSession
         Task { @MainActor in
             await runAllTests()

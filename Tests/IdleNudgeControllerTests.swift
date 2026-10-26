@@ -2,6 +2,28 @@ import Foundation
 import Testing
 @testable import SpeakFlowCore
 
+@Suite("Recorder idle feedback", .serialized)
+struct RecorderIdleFeedbackTests {
+    @Test @MainActor
+    func recorderPlaysNudgeAndWarningBeforeAutoEnd() async throws {
+        let settings = SpySettings()
+        settings.idleNudgeEnabled = true
+        settings.idleNudgeInterval = 0.01
+        settings.idleNudgeMaxCount = 2
+        let sounds = SpySoundEffectPlayer()
+        let recorder = StreamingRecorder(settings: settings, playSoundEffect: { sounds.play($0) })
+        var expired = false
+        recorder.onAutoEnd = { expired = true }
+        defer { recorder._testStopIdleMonitoring() }
+
+        recorder._testBeginIdleMonitoring()
+        try await waitUntil { expired }
+
+        #expect(sounds.effects == [.nudge, .warning],
+                "Idle feedback must be audible through the mute-aware sound policy before auto-end")
+    }
+}
+
 @Suite("IdleNudgeController")
 struct IdleNudgeControllerTests {
     @MainActor

@@ -1,10 +1,25 @@
 import AppKit
 import CoreServices
 import Testing
+import SpeakFlowCore
 @testable import SpeakFlow
 
 @Suite("App lifecycle")
 struct AppLifecycleTests {
+    @MainActor @Test
+    func successfulLaunchWritesIsolatedMarkerWithoutChangingStandardDefaults() throws {
+        let original = UserDefaults.standard.object(forKey: "hasLaunchedBefore") as? Bool
+        let delegate = AppDelegate()
+        let suite = try #require(RuntimeIsolation.current.defaultsSuiteName(prefix: "app.launch.tests"))
+        let isolated = try #require(UserDefaults(suiteName: suite))
+        #expect(isolated.object(forKey: "hasLaunchedBefore") == nil)
+
+        delegate.recordSuccessfulLaunch()
+
+        #expect(isolated.bool(forKey: "hasLaunchedBefore"))
+        #expect(UserDefaults.standard.object(forKey: "hasLaunchedBefore") as? Bool == original)
+    }
+
     @MainActor @Test
     func closeControlPanelCommandClosesWindowWithoutTerminatingApp() {
         let delegate = AppDelegate()

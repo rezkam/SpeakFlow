@@ -9,8 +9,8 @@ import Testing
 @Suite("Credential Storage Safety", .serialized)
 struct CredentialStorageTests {
     private func makeStorage() throws -> (UnifiedAuthStorage, URL) {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakflow-auth-test-\(UUID().uuidString)")
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".agents/tests/credentials/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("auth.json")
         return (UnifiedAuthStorage(fileURL: file), file)
@@ -30,6 +30,37 @@ struct CredentialStorageTests {
         #expect(try Data(contentsOf: file) == original,
                 "An existing file that cannot be read must not be overwritten, or other credentials are lost")
         #expect(storage.apiKey(for: ProviderId.deepgram) == nil)
+    }
+
+    @Test(arguments: ["set-key", "nil-key", "remove-key", "save-login", "save-refresh", "logout"])
+    func deniedReadPreservesAllCredentialsAcrossMutations(operation: String) throws {
+        let (storage, file) = try makeStorage()
+        try storage.setApiKey("original-key", for: ProviderId.deepgram)
+        try storage.saveChatGPTCredentials(credentials("original-login"))
+        let generation = storage.chatGPTCredentialGeneration()
+        let original = try Data(contentsOf: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
+
+        // Prove this platform actually denied reading, rather than relying on chmod alone.
+        #expect(throws: (any Error).self) { _ = try Data(contentsOf: file) }
+        #expect(throws: (any Error).self) {
+            switch operation {
+            case "set-key": try storage.setApiKey("replacement-key", for: ProviderId.deepgram)
+            case "nil-key": try storage.setApiKey(nil, for: ProviderId.deepgram)
+            case "remove-key": try storage.removeApiKey(for: ProviderId.deepgram)
+            case "save-login": try storage.saveChatGPTCredentials(credentials("replacement-login"))
+            case "save-refresh":
+                try storage.saveChatGPTCredentials(credentials("replacement-refresh"), expectedGeneration: generation)
+            case "logout": try storage.deleteChatGPTCredentials()
+            default: Issue.record("Unknown credential mutation")
+            }
+        }
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #expect(try Data(contentsOf: file) == original, "Denied reads must not destroy any credential section")
+        #expect(storage.apiKey(for: ProviderId.deepgram) == "original-key")
+        #expect(storage.loadChatGPTCredentials()?.accessToken == "original-login")
     }
 
     @Test
@@ -174,6 +205,146 @@ extension HTTPDataProviderTestabilityTests {
         return "\(header).\(payload).sig"
     }
 
+    @Test(arguments: [400, 401, 403, 429, 503])
+    func transcriptionRetriesOnlyTransientRefreshFailures(status: Int) async throws {
+        let original = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = original }
+        let mock = MockHTTPProvider(responseData: Data(#"{"error":"invalid_grant"}"#.utf8), statusCode: status)
+        OpenAICodexAuth.httpProvider = mock
+        try OpenAICodexAuth.saveCredentials(OAuthCredentials(
+            accessToken: "synthetic-token", refreshToken: "synthetic-refresh", idToken: nil,
+            accountId: "synthetic-account", lastRefresh: .distantPast
+        ))
+        do {
+            _ = try await TranscriptionService().transcribe(audio: Data([0]))
+            Issue.record("Rejected credentials must prevent transcription")
+        } catch {
+            if status == 429 || status >= 500 {
+                #expect(TranscriptionErrorKind.classify(error) != .authentication)
+            } else {
+                #expect((error as? TranscriptionError)?.isRetryable == false)
+                #expect(TranscriptionErrorKind.classify(error) == .authentication)
+                #expect(error.localizedDescription.contains("log in again"))
+            }
+        }
+        #expect(mock.requestCount == (status == 429 || status >= 500 ? Config.maxAttempts : 1),
+                "Terminal OAuth rejection must not spend transcription retries")
+    }
+
+    @Test(arguments: [400, 401, 403])
+    func terminalRefreshRetainsOAuthAndHTTPMetadata(status: Int) async throws {
+        let original = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = original }
+        let mock = MockHTTPProvider(responseData: Data(#"{"error":"invalid_grant"}"#.utf8), statusCode: status)
+        OpenAICodexAuth.httpProvider = mock
+        let credentials = OAuthCredentials(accessToken: "synthetic-token", refreshToken: "synthetic-refresh",
+                                           idToken: nil, accountId: "synthetic-account", lastRefresh: .distantPast)
+        do {
+            _ = try await OpenAICodexAuth.refreshTokens(credentials,
+                expectedGeneration: UnifiedAuthStorage.shared.chatGPTCredentialGeneration())
+            Issue.record("A rejected refresh must fail")
+        } catch {
+            #expect(error as? AuthError == .tokenRefreshRejected(statusCode: status, oauthError: "invalid_grant"))
+            #expect(TranscriptionErrorKind.classify(error) == .authentication)
+        }
+        #expect(mock.requestCount == 1)
+    }
+
+    @Test
+    func tokenAndAccountComeFromTheSameValidatedSnapshot() async throws {
+        let original = OAuthCredentials(accessToken: "synthetic-token-a", refreshToken: "synthetic-refresh-a",
+                                        idToken: nil, accountId: "synthetic-account-a", lastRefresh: Date())
+        let replacement = OAuthCredentials(accessToken: "synthetic-token-b", refreshToken: "synthetic-refresh-b",
+                                           idToken: nil, accountId: "synthetic-account-b", lastRefresh: Date())
+        defer { OpenAICodexAuth.afterCredentialValidationForTesting = nil }
+        try OpenAICodexAuth.saveCredentials(original)
+        OpenAICodexAuth.afterCredentialValidationForTesting = {
+            try OpenAICodexAuth.saveCredentials(replacement)
+        }
+
+        let loaded = try await AuthCredentials.load()
+
+        #expect(OpenAICodexAuth.loadCredentials()?.accountId == replacement.accountId)
+        #expect(loaded.accessToken == original.accessToken)
+        #expect(loaded.accountId == original.accountId, "The account must belong to the validated token, not a later login")
+    }
+
+    @Test(arguments: ["logout", "replacement", "cancellation"])
+    func heldAuthorizationExchangeCannotCommitAfterRetirement(action: String) async throws {
+        let saved = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = saved }
+        try OpenAICodexAuth.deleteCredentials()
+        let body = try JSONSerialization.data(withJSONObject: [
+            "access_token": try Self.jwt(accountId: "acct"), "refresh_token": "new-refresh", "expires_in": 3600
+        ])
+        let response = HeldTokenResponse(body: body)
+        OpenAICodexAuth.httpProvider = response
+        defer { response.open() }
+        let flow = try OpenAICodexAuth.createAuthorizationFlow()
+        let exchange = Task { try await OpenAICodexAuth.exchangeCodeForTokens(code: "code", flow: flow) }
+        try await waitUntilAsync { response.hasStarted }
+        try #require(response.hasStarted)
+        switch action {
+        case "logout": try OpenAICodexAuth.deleteCredentials()
+        case "replacement": _ = try OpenAICodexAuth.createAuthorizationFlow()
+        default: exchange.cancel()
+        }
+        response.open()
+        do {
+            _ = try await exchange.value
+            Issue.record("Retired exchange must not commit credentials")
+        } catch { #expect(error is AuthError || error is CancellationError) }
+        #expect(OpenAICodexAuth.loadCredentials() == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func authorizationStartOwnsGenerationThroughLateCallback(replace: Bool) async throws {
+        let saved = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = saved }
+        try OpenAICodexAuth.deleteCredentials()
+        let body = try JSONSerialization.data(withJSONObject: [
+            "access_token": try Self.jwt(accountId: "acct"), "refresh_token": "new-refresh", "expires_in": 3600
+        ])
+        let response = HeldTokenResponse(body: body)
+        response.open()
+        OpenAICodexAuth.httpProvider = response
+        let old = try OpenAICodexAuth.createAuthorizationFlow()
+        if replace { _ = try OpenAICodexAuth.createAuthorizationFlow() }
+        else { try OpenAICodexAuth.deleteCredentials() }
+        do {
+            _ = try await OpenAICodexAuth.exchangeCodeForTokens(code: "retired-code", flow: old)
+            Issue.record("Retired authorization must not exchange or restore credentials")
+        } catch { #expect(error is AuthError) }
+        #expect(OpenAICodexAuth.loadCredentials() == nil)
+        #expect(!response.hasStarted)
+    }
+
+    @Test
+    func logoutBetweenCredentialReadAndCoordinatorCannotRestoreCredentials() async throws {
+        let saved = OpenAICodexAuth.httpProvider
+        defer {
+            OpenAICodexAuth.httpProvider = saved
+            OpenAICodexAuth.beforeCoordinatedRefreshForTesting = nil
+        }
+        let body = try JSONSerialization.data(withJSONObject: [
+            "access_token": try Self.jwt(accountId: "acct"), "refresh_token": "new-refresh", "expires_in": 3600
+        ])
+        let response = HeldTokenResponse(body: body)
+        response.open()
+        OpenAICodexAuth.httpProvider = response
+        try OpenAICodexAuth.saveCredentials(OAuthCredentials(
+            accessToken: "old", refreshToken: "old-refresh", idToken: nil, accountId: "acct", lastRefresh: .distantPast
+        ))
+        OpenAICodexAuth.beforeCoordinatedRefreshForTesting = { try OpenAICodexAuth.deleteCredentials() }
+        do {
+            _ = try await OpenAICodexAuth.getValidAccessToken()
+            Issue.record("Retired credential snapshot must not yield a refreshed token")
+        } catch {
+            #expect(error is AuthError)
+        }
+        #expect(OpenAICodexAuth.loadCredentials() == nil)
+    }
+
     @Test
     func refreshThatCompletesAfterLogoutDoesNotLogBackIn() async throws {
         let saved = OpenAICodexAuth.httpProvider
@@ -186,7 +357,8 @@ extension HTTPDataProviderTestabilityTests {
         let current = OAuthCredentials(accessToken: "old", refreshToken: "old-refresh", idToken: nil, accountId: "acct", lastRefresh: .distantPast)
         try OpenAICodexAuth.saveCredentials(current)
 
-        let refresh = Task { try await OpenAICodexAuth.refreshTokens(current) }
+        let generation = UnifiedAuthStorage.shared.chatGPTCredentialGeneration()
+        let refresh = Task { try await OpenAICodexAuth.refreshTokens(current, expectedGeneration: generation) }
         try await waitUntilAsync { held.hasStarted }
         try OpenAICodexAuth.deleteCredentials()
         held.open()

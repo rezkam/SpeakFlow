@@ -8,6 +8,23 @@ import Testing
 struct PermissionControllerDITests {
 
     @Test @MainActor
+    func untrustedCheckUsesInjectedPermissionRequest() {
+        let banner = SpyBannerPresenter()
+        var requests: [Bool] = []
+        let controller = PermissionController(
+            appState: banner,
+            hotkeySettings: SpyHotkeySettings(),
+            setupHotkeyAction: {},
+            isAccessibilityTrusted: { false },
+            requestAccessibility: { requests.append($0); return false }
+        )
+        controller.checkAccessibility()
+        #expect(requests == [true], "The injected boundary handles the untrusted request without OS prompts")
+        #expect(banner.refreshCount == 1)
+        controller.shutdown()
+    }
+
+    @Test @MainActor
     func checkAccessibilityRefreshesState() {
         let spyBanner = SpyBannerPresenter()
         let spyHK = SpyHotkeySettings()
@@ -15,7 +32,8 @@ struct PermissionControllerDITests {
         let controller = PermissionController(
             appState: spyBanner,
             hotkeySettings: spyHK,
-            setupHotkeyAction: {}
+            setupHotkeyAction: {},
+            isAccessibilityTrusted: { true }
         )
 
         controller.checkAccessibility()
@@ -33,7 +51,8 @@ struct PermissionControllerDITests {
         let controller = PermissionController(
             appState: spyBanner,
             hotkeySettings: spyHK,
-            setupHotkeyAction: { setupCalled = true }
+            setupHotkeyAction: { setupCalled = true },
+            isAccessibilityTrusted: { true }
         )
 
         // The delegate method setupHotkey() calls the injected action
@@ -49,7 +68,8 @@ struct PermissionControllerDITests {
         let controller = PermissionController(
             appState: spyBanner,
             hotkeySettings: SpyHotkeySettings(),
-            setupHotkeyAction: {}
+            setupHotkeyAction: {},
+            isAccessibilityTrusted: { true }
         )
 
         controller.showAccessibilityGrantedAlert()
@@ -67,7 +87,8 @@ struct PermissionControllerDITests {
         let controller = PermissionController(
             appState: spyBanner,
             hotkeySettings: SpyHotkeySettings(),
-            setupHotkeyAction: {}
+            setupHotkeyAction: {},
+            isAccessibilityTrusted: { true }
         )
 
         controller.showAccessibilityGrantedAlert()
@@ -82,7 +103,8 @@ struct PermissionControllerDITests {
         let controller = PermissionController(
             appState: spyBanner,
             hotkeySettings: SpyHotkeySettings(),
-            setupHotkeyAction: {}
+            setupHotkeyAction: {},
+            isAccessibilityTrusted: { true }
         )
 
         controller.checkInitialPermissions()
@@ -97,7 +119,8 @@ struct PermissionControllerDITests {
         let controller = PermissionController(
             appState: spyBanner,
             hotkeySettings: SpyHotkeySettings(),
-            setupHotkeyAction: {}
+            setupHotkeyAction: {},
+            isAccessibilityTrusted: { true }
         )
 
         // AccessibilityPermissionDelegate callback
@@ -113,7 +136,8 @@ struct PermissionControllerDITests {
         let controller = PermissionController(
             appState: spyBanner,
             hotkeySettings: SpyHotkeySettings(),
-            setupHotkeyAction: {}
+            setupHotkeyAction: {},
+            isAccessibilityTrusted: { true }
         )
 
         let response = await controller.showAccessibilityPermissionAlert()

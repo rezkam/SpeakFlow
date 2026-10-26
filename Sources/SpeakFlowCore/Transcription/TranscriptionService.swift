@@ -22,7 +22,19 @@ public actor TranscriptionService {
         return truncatedString + "..."
     }
 
-    private let rateLimiter = RateLimiter()
+    private let rateLimiter: RateLimiter
+    private let loadCredentials: @Sendable () async throws -> AuthCredentials
+    private let httpDataProvider: (any HTTPDataProvider)?
+
+    init(
+        loadCredentials: @escaping @Sendable () async throws -> AuthCredentials = { try await AuthCredentials.load() },
+        httpDataProvider: (any HTTPDataProvider)? = nil,
+        rateLimiter: RateLimiter = RateLimiter()
+    ) {
+        self.loadCredentials = loadCredentials
+        self.httpDataProvider = httpDataProvider
+        self.rateLimiter = rateLimiter
+    }
 
     /// Kept for MistralBatchProvider which scales timeout by file size.
     /// ChatGPT now uses a flat per-attempt timeout (Config.requestTimeout).
@@ -50,8 +62,10 @@ public actor TranscriptionService {
     ///       maxAttempts(3) × requestTimeout(15s) + (maxAttempts-1) × retryDelay(1s) = 47s
     ///   • Non-retryable errors (auth, 4xx, decode) fail on the first attempt.
     public func transcribe(audio: Data) async throws -> String {
-        do { try await rateLimiter.waitAndRecord() }
-        catch is CancellationError { throw TranscriptionError.cancelled }
+        let timing = ProviderTiming.Recorder(provider: .chatgptBatch)
+        do {
+            try await timing.measure(.rateLimit) { try await self.rateLimiter.waitAndRecord() }
+        } catch is CancellationError { throw TranscriptionError.cancelled }
 
         var lastError: Error?
 
@@ -59,7 +73,9 @@ public actor TranscriptionService {
             try Task.checkCancellation()
 
             do {
-                return try await performRequestWithDeadline(audio: audio)
+                return try await timing.withAttempt(attempt) { attemptTiming in
+                    try await self.performRequestWithDeadline(audio: audio, attempt: attemptTiming)
+                }
             } catch is CancellationError {
                 throw TranscriptionError.cancelled
             } catch let err as TranscriptionError where !err.isRetryable {
@@ -71,7 +87,9 @@ public actor TranscriptionService {
                 )
                 if attempt < Config.maxAttempts {
                     Logger.transcription.debug("Retrying in \(Config.retryDelay)s…")
-                    try? await Task.sleep(for: .seconds(Config.retryDelay))
+                    try? await timing.measure(.retryDelay) {
+                        try await Task.sleep(for: .seconds(Config.retryDelay))
+                    }
                 }
             }
         }
@@ -88,13 +106,12 @@ public actor TranscriptionService {
     /// cancelled. This reliably kills stalled HTTP responses that never send
     /// bytes — URLRequest.timeoutInterval only fires on idle (no I/O), so
     /// a server that accepts the connection but stalls can hang indefinitely.
-    private func performRequestWithDeadline(audio: Data) async throws -> String {
-        let credentials = try await AuthCredentials.load()
-        let request = try buildRequest(
-            audio: audio,
-            credentials: credentials,
-            timeout: Config.requestTimeout
-        )
+    private func performRequestWithDeadline(audio: Data, attempt: ProviderTiming.Attempt) async throws -> String {
+        let timing = attempt.recorder
+        let credentials = try await timing.measure(.authentication) { try await self.loadCredentials() }
+        let request = try timing.measureSync(.requestBuild) {
+            try buildRequest(audio: audio, credentials: credentials, timeout: Config.requestTimeout)
+        }
 
         // Use withTaskCancellationHandler so that when our deadline Task cancels
         // the parent, the underlying URLSessionDataTask is explicitly cancelled too.
@@ -102,35 +119,41 @@ public actor TranscriptionService {
         // the HTTP connection stays alive until the OS timeout fires (which can be
         // 30-47s even with timeoutInterval set, because the server holds the TCP conn).
         let (data, response): (Data, URLResponse)
+        let httpDataProvider = self.httpDataProvider
         do {
-            (data, response) = try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
-                // Deadline task: fires after requestTimeout and cancels the group
-                group.addTask {
-                    try await Task.sleep(for: .seconds(Config.requestTimeout))
-                    throw URLError(.timedOut)
-                }
-                // Network task: wrapped so URLSessionDataTask is cancelled on Task cancel
-                group.addTask {
-                    let sessionConfig = URLSessionConfiguration.ephemeral
-                    sessionConfig.timeoutIntervalForRequest = Config.requestTimeout
-                    sessionConfig.timeoutIntervalForResource = Config.requestTimeout
-                    let session = URLSession(configuration: sessionConfig)
-                    return try await withTaskCancellationHandler {
-                        defer { session.invalidateAndCancel() }
-                        return try await session.data(for: request)
-                    } onCancel: {
-                        session.invalidateAndCancel()
+            (data, response) = try await timing.measure(.transport) {
+                try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+                    // Deadline task: fires after requestTimeout and cancels the group
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(Config.requestTimeout))
+                        throw URLError(.timedOut)
                     }
+                    // Network task: wrapped so URLSessionDataTask is cancelled on Task cancel
+                    group.addTask {
+                        if let httpDataProvider { return try await httpDataProvider.data(for: request) }
+                        let sessionConfig = URLSessionConfiguration.ephemeral
+                        sessionConfig.timeoutIntervalForRequest = Config.requestTimeout
+                        sessionConfig.timeoutIntervalForResource = Config.requestTimeout
+                        let session = URLSession(configuration: sessionConfig)
+                        return try await withTaskCancellationHandler {
+                            defer { session.invalidateAndCancel() }
+                            return try await TimedHTTPDataProvider(session: session, provider: .chatgptBatch).data(for: request)
+                        } onCancel: {
+                            session.invalidateAndCancel()
+                        }
+                    }
+                    let result = try await group.next()!
+                    group.cancelAll()
+                    return result
                 }
-                let result = try await group.next()!
-                group.cancelAll()
-                return result
             }
         } catch let urlError as URLError {
+            attempt.transportFailed(urlError)
             throw TranscriptionError.networkError(underlying: urlError)
         } catch {
             throw TranscriptionError.networkError(underlying: error)
         }
+        attempt.received(response)
 
         // Validate HTTP response
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -154,7 +177,9 @@ public actor TranscriptionService {
 
         // Decode response
         do {
-            let transcriptionResponse = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
+            let transcriptionResponse = try timing.measureSync(.decode) {
+                try JSONDecoder().decode(TranscriptionResponse.self, from: data)
+            }
             return transcriptionResponse.text
         } catch let decodingError as DecodingError {
             throw TranscriptionError.decodingFailed(underlying: decodingError)

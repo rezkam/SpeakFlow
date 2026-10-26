@@ -237,7 +237,7 @@ struct TranscriptionQueueBridgeCleanupTests {
 struct TranscriptionQueueFinishStreamTests {
 
     /// finishStream() must finish the text stream, ending a for-await loop.
-    @Test func testFinishStreamEndsTheTextStream() async {
+    @Test func testFinishStreamEndsTheTextStream() async throws {
         let queue = TranscriptionQueue()
         let stream = await queue.textStream
         let streamEnded = OSAllocatedUnfairLock(initialState: false)
@@ -248,7 +248,7 @@ struct TranscriptionQueueFinishStreamTests {
         _ = streamTask
 
         await queue.finishStream()
-        try? await waitUntil(timeout: .seconds(1)) { streamEnded.withLock { $0 } }
+        try await waitUntil(timeout: .seconds(1)) { streamEnded.withLock { $0 } }
 
         #expect(streamEnded.withLock { $0 } == true,
                 "finishStream must finish textContinuation (ending for-await loop)")
@@ -700,7 +700,7 @@ struct TranscriptionQueueTextStreamLifecycleTests {
     }
 
     /// A for-await loop must exit when finishStream() is called.
-    @Test func testStreamEndedByFinishStreamTerminatesForAwait() async {
+    @Test func testStreamEndedByFinishStreamTerminatesForAwait() async throws {
         let queue = TranscriptionQueue()
         let stream = await queue.textStream
 
@@ -711,7 +711,7 @@ struct TranscriptionQueueTextStreamLifecycleTests {
         }
 
         await queue.finishStream()
-        try? await waitUntil(timeout: .seconds(1)) { loopExited.withLock { $0 } }
+        try await waitUntil(timeout: .seconds(1)) { loopExited.withLock { $0 } }
         #expect(loopExited.withLock { $0 } == true,
                 "for-await loop must exit after finishStream()")
         _ = task
@@ -818,6 +818,29 @@ struct TranscriptionQueueBridgeTests {
 
         #expect(callCount == 1,
                 "onAllComplete must fire exactly once per session (hasSignaledCompletion guard)")
+    }
+
+    @Test @MainActor func laterChunkSignalsAnotherIdleTransition() async throws {
+        let bridge = TranscriptionQueueBridge()
+        bridge.startListening()
+        defer { bridge.stopListening() }
+        var texts: [String] = []
+        var completions = 0
+        bridge.onTextReady = { texts.append($0) }
+        bridge.onAllComplete = { completions += 1 }
+        let first = await bridge.nextSequence()
+        await bridge.submitResult(ticket: first, text: "first")
+        try await waitUntil { completions == 1 }
+        try #require(completions == 1)
+
+        let tail = await bridge.nextSequence()
+        await bridge.submitResult(ticket: tail, text: "tail")
+        try await waitUntil { texts.count == 2 }
+        try #require(texts == ["first", "tail"])
+        await bridge.checkCompletion()
+        #expect(completions == 2, "Every idle transition must wake finalization, including the final tail")
+        await bridge.checkCompletion()
+        #expect(completions == 2, "Repeated checks without new work must not repeat completion")
     }
 
     /// checkCompletion() must NOT fire before any nextSequence() call
@@ -934,7 +957,7 @@ struct TranscriptionQueueBridgeTests {
     }
 
     /// Full lifecycle: session 1 → complete → reset → session 2 → complete.
-    @Test @MainActor func testFullSessionLifecycle() async {
+    @Test @MainActor func testFullSessionLifecycle() async throws {
         let bridge = TranscriptionQueueBridge()
         bridge.startListening()
 
@@ -950,12 +973,12 @@ struct TranscriptionQueueBridgeTests {
         await bridge.submitResult(ticket: s1t0, text: "hello")
         await bridge.submitResult(ticket: s1t2, text: "world")
         await bridge.submitResult(ticket: s1t1, text: "beautiful")
-        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+        try await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
             texts.count == 3
         }
         #expect(texts == ["hello", "beautiful", "world"])
         await bridge.checkCompletion()
-        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+        try await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
             completions == 1
         }
         #expect(completions == 1)
@@ -969,12 +992,12 @@ struct TranscriptionQueueBridgeTests {
         let s2t1 = await bridge.nextSequence()
         await bridge.markFailed(ticket: s2t0)
         await bridge.submitResult(ticket: s2t1, text: "recovered")
-        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+        try await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
             texts.count == 1
         }
         #expect(texts == ["recovered"])
         await bridge.checkCompletion()
-        try? await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
+        try await waitUntil(timeout: .seconds(1), interval: .milliseconds(20)) {
             completions == 2
         }
         #expect(completions == 2)

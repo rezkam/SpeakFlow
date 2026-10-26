@@ -43,7 +43,9 @@ struct TranscriptionSettingsView: View {
         ) {
             SettingRow(
                 "Language",
-                description: "A BCP-47 hint sent to the provider. Auto-detect works in most cases. Setting a language can improve accuracy and first-token latency."
+                description: state.activeProviderId == ProviderId.mistral
+                    ? "Voxtral Realtime detects the spoken language automatically."
+                    : "A BCP-47 hint sent to the provider. Auto-detect works in most cases. Setting a language can improve accuracy and first-token latency."
             ) {
                 languagePicker
             }
@@ -69,49 +71,12 @@ struct TranscriptionSettingsView: View {
         }
     }
 
-    @ViewBuilder
     private var languagePicker: some View {
-        switch state.activeProviderId {
-        case ProviderId.deepgram:
-            Picker("", selection: state.binding(for: \.deepgramLanguage)) {
-                Text("English (US)").tag("en-US")
-                Text("English (UK)").tag("en-GB")
-                Text("Spanish").tag("es")
-                Text("French").tag("fr")
-                Text("German").tag("de")
-                Text("Portuguese").tag("pt")
-                Text("Japanese").tag("ja")
-                Text("Korean").tag("ko")
-                Text("Chinese").tag("zh")
-            }
-            .labelsHidden()
-            .fixedSize()
-        case ProviderId.mistral, ProviderId.mistralBatch:
-            Picker("", selection: state.binding(for: \.mistralLanguage)) {
-                Text("Auto-detect").tag("")
-                Divider()
-                Text("English").tag("en")
-                Text("French").tag("fr")
-                Text("German").tag("de")
-                Text("Spanish").tag("es")
-                Text("Italian").tag("it")
-                Text("Portuguese").tag("pt")
-                Text("Dutch").tag("nl")
-                Text("Hindi").tag("hi")
-                Text("Arabic").tag("ar")
-                Divider()
-                Text("Japanese").tag("ja")
-                Text("Korean").tag("ko")
-                Text("Chinese").tag("zh")
-                Text("Russian").tag("ru")
-            }
-            .labelsHidden()
-            .fixedSize()
-        default:
-            Text("Auto-detect")
-                .foregroundStyle(Theme.text3)
-                .font(.system(size: 12.5))
-        }
+        TranscriptionLanguagePicker(
+            providerId: state.activeProviderId,
+            deepgramLanguage: state.binding(for: \.deepgramLanguage),
+            mistralLanguage: state.binding(for: \.mistralLanguage)
+        )
     }
 
     // MARK: - Model options

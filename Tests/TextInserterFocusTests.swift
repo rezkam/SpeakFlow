@@ -149,52 +149,29 @@ struct TextInserterFocusBehavioralTests {
     }
 }
 
-@Suite("TextInserter Focus — Bundle Matching", .serialized)
-struct TextInserterBundleMatchingTests {
+@Suite("TextInserter canonical application ownership", .serialized)
+struct TextInserterApplicationMatchingTests {
+    private func url(_ path: String) -> URL { URL(fileURLWithPath: path) }
+
     @Test
-    func exactBundleMatchIsTrue() {
-        #expect(
-            TextInserter.bundleIdentifiersLikelySameApp(
-                target: "com.google.Chrome",
-                candidate: "com.google.Chrome"
-            )
-        )
+    func exactApplicationAndContainedHelpersMatchInBothDirections() {
+        let app = url("/fixture/Editor.app")
+        let helper = url("/fixture/Editor.app/Contents/Frameworks/Worker.app")
+        #expect(ApplicationOwnership.matches(target: app, candidate: app))
+        #expect(ApplicationOwnership.matches(target: app, candidate: helper))
+        #expect(ApplicationOwnership.matches(target: helper, candidate: app))
+    }
+
+    @Test(arguments: ["/fixture/Editor.helper.app", "/fixture/Editor.app.other/Worker.app", "/other/Editor.app"])
+    func independentApplicationsDoNotMatch(path: String) {
+        #expect(!ApplicationOwnership.matches(target: url("/fixture/Editor.app"), candidate: url(path)))
     }
 
     @Test
-    func helperBundleSuffixMatchesParentApp() {
-        #expect(
-            TextInserter.bundleIdentifiersLikelySameApp(
-                target: "com.google.Chrome",
-                candidate: "com.google.Chrome.helper"
-            )
-        )
-        #expect(
-            TextInserter.bundleIdentifiersLikelySameApp(
-                target: "com.google.Chrome.helper",
-                candidate: "com.google.Chrome"
-            )
-        )
-    }
-
-    @Test
-    func unrelatedBundlesDoNotMatch() {
-        #expect(
-            !TextInserter.bundleIdentifiersLikelySameApp(
-                target: "com.apple.TextEdit",
-                candidate: "com.apple.Safari"
-            )
-        )
-    }
-
-    @Test
-    func nilBundleDoesNotMatch() {
-        #expect(
-            !TextInserter.bundleIdentifiersLikelySameApp(
-                target: "com.apple.TextEdit",
-                candidate: nil
-            )
-        )
+    func unknownOrNonApplicationLocationsFailClosed() {
+        #expect(!ApplicationOwnership.matches(target: url("/fixture/Editor.app"), candidate: nil))
+        #expect(!ApplicationOwnership.matches(target: nil, candidate: nil))
+        #expect(!ApplicationOwnership.matches(target: url("/fixture/tool"), candidate: url("/fixture/tool")))
     }
 }
 
@@ -318,7 +295,7 @@ struct TextInserterPidFocusTests {
         guard AXUIElementGetPid(focusedAX, &focusedPid) == .success, focusedPid != 0 else {
             return
         }
-        let focusedBundle = NSRunningApplication(processIdentifier: focusedPid)?.bundleIdentifier
+        let focusedApplication = ApplicationOwnership.applicationURL(for: focusedPid)
 
         let inserter = TextInserter.shared
         inserter.cancelAndReset()
@@ -332,11 +309,10 @@ struct TextInserterPidFocusTests {
                   $0.processIdentifier != focusedPid,
                   $0.activationPolicy == .regular
             else { return false }
-            // Also exclude apps in the same bundle family as the focused app.
-            let otherBundle = $0.bundleIdentifier
-            return !TextInserter.bundleIdentifiersLikelySameApp(
-                target: focusedBundle,
-                candidate: otherBundle
+            // Exclude verified helpers of the focused application too.
+            return !ApplicationOwnership.matches(
+                target: focusedApplication,
+                candidate: $0.bundleURL ?? $0.executableURL
             )
         }) {
             inserter.targetPid = otherApp.processIdentifier

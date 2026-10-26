@@ -93,6 +93,7 @@ final class TextInserter: TextInserting {
     /// `com.vendor.App.helper`). In those cases, AX focused PID can differ from
     /// the main app PID even when the user is still in the same app.
     private var targetBundleIdentifier: String?
+    private var targetApplicationURL: URL?
 
     /// Test-only override for `isTargetAppFrontmost()`.
     ///
@@ -116,6 +117,7 @@ final class TextInserter: TextInserting {
     /// Reports where keyboard focus is relative to the captured target; nil
     /// when Accessibility cannot answer. Tests inject a deterministic observer.
     private var focusObserver: ((TextInserter) -> FocusObservation?)?
+    private var focusWaitTimeoutProvider: () -> Double = { Settings.shared.focusWaitTimeout }
 
     /// Why the last focus check failed, recorded when typing pauses.
     private var lastFocusMismatch = "otherApp"
@@ -137,6 +139,8 @@ final class TextInserter: TextInserting {
     /// Bounded by `Config.maxQueuedTextInsertions` to prevent unbounded memory growth.
     private var queuedInsertionCount = 0
     private var queueGeneration: UInt64 = 0
+    private var streamingCommittedText = ""
+    private var streamingPostedText = ""
     /// Monotonic operation sequence used to correlate queued text actions.
     private var operationSequence: UInt64 = 0
     private var observabilitySessionId: UUID?
@@ -195,8 +199,15 @@ final class TextInserter: TextInserting {
     /// If no element has focus or accessibility permissions are denied, clears
     /// the target and returns false. Without a target every synthetic action
     /// fails closed, so callers must not start a recording.
+    #if DEBUG
+    var captureTargetForTesting: (() -> Bool)?
+    #endif
+
     @discardableResult
     func captureTarget() -> Bool {
+        #if DEBUG
+        if let captureTargetForTesting { return captureTargetForTesting() }
+        #endif
         let systemWide = AXUIElementCreateSystemWide()
         var focusedElement: CFTypeRef?
 
@@ -223,6 +234,7 @@ final class TextInserter: TextInserting {
                 targetBundleIdentifier = NSRunningApplication(
                     processIdentifier: pid
                 )?.bundleIdentifier
+                targetApplicationURL = ApplicationOwnership.applicationURL(for: pid)
                 return true
             }
         }
@@ -231,11 +243,52 @@ final class TextInserter: TextInserting {
         targetWindow = nil
         targetPid = 0
         targetBundleIdentifier = nil
+        targetApplicationURL = nil
         observabilityEvent("target_capture_failed", level: .warning)
         return false
     }
 
     // MARK: - Text Operations
+
+    /// Provider diffs describe intent, not delivery. Compute the actual correction
+    /// only when this snapshot reaches the queue head, using posted key pairs.
+    func updateStreamingText(_ text: String, isFinal: Bool) {
+        let segment = sanitizeTextForInsertion(text)
+        let desired = streamingCommittedText + segment + (isFinal && !segment.isEmpty ? " " : "")
+        if isFinal { streamingCommittedText = desired }
+        guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
+            observabilityEvent("streaming_snapshot_dropped_queue_full", level: .warning)
+            return
+        }
+        let operationId = nextOperationId()
+        let generation = queueGeneration
+        let previousTask = textInsertionTask
+        queuedInsertionCount += 1
+        textInsertionTask = Task { @MainActor [weak self] in
+            defer { self?.decrementQueuedInsertionCount(for: generation) }
+            await previousTask?.value
+            guard let self, self.queueGeneration == generation, !Task.isCancelled else { return }
+            let common = zip(self.streamingPostedText, desired).prefix { $0 == $1 }.count
+            let deleteCount = self.streamingPostedText.count - common
+            if deleteCount > 0 {
+                let completed = await self.deleteCharsAsync(
+                    deleteCount, operationId: operationId, generation: generation,
+                    onCharacterDeleted: { [weak self] in
+                        guard let self, self.queueGeneration == generation else { return }
+                        self.streamingPostedText.removeLast()
+                    }
+                )
+                guard completed else { return }
+            }
+            await self.typeTextAsync(
+                String(desired.dropFirst(common)), operationId: operationId, generation: generation,
+                onCharacterPosted: { [weak self] character in
+                    guard let self, self.queueGeneration == generation else { return }
+                    self.streamingPostedText.append(character)
+                }
+            )
+        }
+    }
 
     /// Queues an atomic tail replacement (delete then type) as a single queue item.
     ///
@@ -477,6 +530,8 @@ final class TextInserter: TextInserting {
     /// Call this when the user manually stops recording or when an error occurs.
     /// This immediately stops all queued operations and clears the target element.
     func cancelAndReset() {
+        streamingCommittedText = ""
+        streamingPostedText = ""
         textInsertionTask?.cancel()
         textInsertionTask = nil
         queueGeneration &+= 1
@@ -485,6 +540,7 @@ final class TextInserter: TextInserting {
         targetWindow = nil
         targetPid = 0
         targetBundleIdentifier = nil
+        targetApplicationURL = nil
     }
 
     /// Clears bookkeeping without cancelling tasks.
@@ -493,6 +549,8 @@ final class TextInserter: TextInserting {
     /// finished and were typed successfully). Unlike `cancelAndReset()`, this
     /// doesn't interrupt any tasks — it just resets state for the next session.
     func reset() {
+        streamingCommittedText = ""
+        streamingPostedText = ""
         textInsertionTask = nil
         queueGeneration &+= 1
         queuedInsertionCount = 0
@@ -500,6 +558,7 @@ final class TextInserter: TextInserting {
         targetWindow = nil
         targetPid = 0
         targetBundleIdentifier = nil
+        targetApplicationURL = nil
     }
 
     // MARK: - Private Helpers
@@ -518,7 +577,10 @@ final class TextInserter: TextInserting {
         return sanitized
     }
 
-    private func deleteCharsAsync(_ count: Int, operationId: UInt64, generation: UInt64) async -> Bool {
+    private func deleteCharsAsync(
+        _ count: Int, operationId: UInt64, generation: UInt64,
+        onCharacterDeleted: (() -> Void)? = nil
+    ) async -> Bool {
         guard count > 0 else { return true }
         observabilityEvent(
             "delete_chars_started",
@@ -558,6 +620,7 @@ final class TextInserter: TextInserting {
             ) else { continue }
 
             guard await postGuardedKeyPair(keyDown, keyUp, generation: generation) else { return false }
+            onCharacterDeleted?()
 
             // Small delay to ensure the app processes the deletion
             try? await Task.sleep(
@@ -616,7 +679,7 @@ final class TextInserter: TextInserting {
             return false
         }
 
-        let timeout = Settings.shared.focusWaitTimeout
+        let timeout = focusWaitTimeoutProvider()
         let startTime = ContinuousClock.now
 
         Logger.audio.info("Target app lost focus — waiting up to \(timeout)s for user to return")
@@ -668,7 +731,7 @@ final class TextInserter: TextInserting {
     /// keystrokes will actually go. This catches system overlays like
     /// Spotlight, Notification Center, and password dialogs that steal
     /// keyboard focus without changing the frontmost application.
-    /// Falls back to `NSWorkspace.frontmostApplication` if the AX query fails.
+    /// Fails closed if Accessibility cannot prove the captured field owns focus.
     func isTargetAppFrontmost() -> Bool {
         guard targetPid != 0 else { return false }
 
@@ -682,8 +745,9 @@ final class TextInserter: TextInserting {
         // frontmost app, and some apps route UI through helper processes.
         let observation = focusObserver.map { $0(self) } ?? systemFocusObservation()
         guard let observation else {
-            // AX unavailable (permission not granted or no focused element).
-            return frontmostApplicationIsTarget()
+            // App identity alone cannot distinguish fields or system overlays.
+            lastFocusMismatch = "unknownField"
+            return false
         }
         return focusMatchesTarget(observation)
     }
@@ -700,25 +764,13 @@ final class TextInserter: TextInserting {
         guard let bundleId = targetBundleIdentifier else { return false }
         guard let runningTarget = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == bundleId && !$0.isTerminated
+                && ApplicationOwnership.matches(target: targetApplicationURL, candidate: $0.bundleURL ?? $0.executableURL)
         }) else {
             return false
         }
 
         targetPid = runningTarget.processIdentifier
         return true
-    }
-
-    /// Returns true when two bundle identifiers likely refer to the same app family.
-    ///
-    /// Helper bundle IDs often use suffixes (for example `.helper`, `.renderer`).
-    /// We treat exact matches and dot-prefix matches as equivalent.
-    nonisolated static func bundleIdentifiersLikelySameApp(
-        target: String?,
-        candidate: String?
-    ) -> Bool {
-        guard let target, let candidate else { return false }
-        if target == candidate { return true }
-        return candidate.hasPrefix(target + ".") || target.hasPrefix(candidate + ".")
     }
 
     /// Number of characters to type before yielding to the run-loop.
@@ -740,7 +792,10 @@ final class TextInserter: TextInserting {
     /// 4. Yields between batches so mouse/keyboard input and event taps stay responsive
     ///
     /// - Parameter text: The sanitized text to type. Should not contain control characters.
-    private func typeTextAsync(_ text: String, operationId: UInt64, generation: UInt64) async {
+    private func typeTextAsync(
+        _ text: String, operationId: UInt64, generation: UInt64,
+        onCharacterPosted: ((Character) -> Void)? = nil
+    ) async {
         observabilityEvent(
             "type_text_started",
             metadata: [
@@ -801,6 +856,7 @@ final class TextInserter: TextInserting {
             )
 
             guard await postGuardedKeyPair(keyDown, keyUp, generation: generation) else { return }
+            onCharacterPosted?(chars[index])
 
             // Small delay to ensure the character is processed
             try? await Task.sleep(
@@ -971,9 +1027,8 @@ extension TextInserter {
         let field: FieldIdentity
     }
 
-    /// Decides whether focus is still in the captured field. Conservative: a
-    /// field counts as different only on definite evidence, because a false
-    /// "different" pauses dictation the user expects to continue.
+    /// Authorizes input only with positive evidence of the captured field.
+    /// A shared window is not proof: it may contain multiple editable fields.
     nonisolated static func fieldIdentity(
         elementsEqual: Bool,
         capturedReportsFocused: CapturedFocusState?,
@@ -986,8 +1041,7 @@ extension TextInserter {
         case .notFocused, .elementGone:
             return .different
         case .unknown, nil:
-            guard let windowsMatch else { return .unknown }
-            return windowsMatch ? .same : .different
+            return windowsMatch == false ? .different : .unknown
         }
     }
 
@@ -1038,28 +1092,21 @@ extension TextInserter {
         return unsafeDowncast(value, to: AXUIElement.self)
     }
 
-    /// Best-effort substitute when Accessibility cannot report keyboard focus.
-    private func frontmostApplicationIsTarget() -> Bool {
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
-        return frontmost.processIdentifier == targetPid
-    }
-
-    /// Focus must be in the target app (or one of its helpers) and, when
-    /// Accessibility can tell, in the captured field.
+    /// Focus must be in the target app (or one of its helpers) and positively
+    /// identified as the captured field.
     private func focusMatchesTarget(_ observation: FocusObservation) -> Bool {
         guard let focusedPid = observation.focusedPid else { return false }
         if focusedPid != targetPid {
-            let targetBundle = targetBundleIdentifier
-                ?? NSRunningApplication(processIdentifier: targetPid)?.bundleIdentifier
-            let focusedBundle = NSRunningApplication(processIdentifier: focusedPid)?.bundleIdentifier
-            guard Self.bundleIdentifiersLikelySameApp(target: targetBundle, candidate: focusedBundle) else {
+            let capturedApplication = targetApplicationURL ?? ApplicationOwnership.applicationURL(for: targetPid)
+            let focusedApplication = ApplicationOwnership.applicationURL(for: focusedPid)
+            guard ApplicationOwnership.matches(target: capturedApplication, candidate: focusedApplication) else {
                 lastFocusMismatch = "otherApp"
                 return false
             }
         }
-        // Same app, but another conversation, document, or field: pause.
-        guard observation.field != .different else {
-            lastFocusMismatch = "otherFieldInTargetApp"
+        // Same app is insufficient when field identity is different or unknown.
+        guard observation.field == .same else {
+            lastFocusMismatch = observation.field == .unknown ? "unknownField" : "otherFieldInTargetApp"
             return false
         }
         return true
@@ -1133,6 +1180,11 @@ extension TextInserter {
     // swiftlint:disable:next identifier_name
     func _testSetEventPoster(_ poster: @escaping (CGEvent) -> Void) {
         eventPoster = poster
+    }
+
+    // swiftlint:disable:next identifier_name
+    func _testSetFocusWaitTimeout(_ timeout: Double) {
+        focusWaitTimeoutProvider = { timeout }
     }
 
     // swiftlint:disable:next identifier_name

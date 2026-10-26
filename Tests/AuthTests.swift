@@ -120,6 +120,36 @@ struct TokenRefreshCoordinatorTests {
         )
     }
 
+    @Test func differentCredentialGenerationsNeverShareRefreshResults() async throws {
+        let oldGate = AsyncStream<Void>.makeStream()
+        let newGate = AsyncStream<Void>.makeStream()
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let coordinator = TokenRefreshCoordinator { credentials in
+            calls.withLock { $0 += 1 }
+            let stream = credentials.refreshToken == "old" ? oldGate.stream : newGate.stream
+            for await _ in stream {}
+            return credentials
+        }
+        defer { oldGate.continuation.finish(); newGate.continuation.finish() }
+        let oldCredentials = Self.makeCreds(refreshToken: "old")
+        let newCredentials = Self.makeCreds(refreshToken: "new")
+        let old = Task { try await coordinator.refreshIfNeeded(oldCredentials, generation: 0) }
+        try await waitUntilAsync { calls.withLock { $0 } == 1 }
+        try #require(calls.withLock { $0 } == 1)
+        let new = Task { try await coordinator.refreshIfNeeded(newCredentials, generation: 1) }
+        try await waitUntilAsync(timeout: .milliseconds(200)) { calls.withLock { $0 } == 2 }
+        #expect(calls.withLock { $0 } == 2)
+        oldGate.continuation.finish()
+        _ = try await old.value
+        // Old task cleanup must not retire the new generation's in-flight task.
+        let peer = Task { try await coordinator.refreshIfNeeded(newCredentials, generation: 1) }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(calls.withLock { $0 } == 2)
+        newGate.continuation.finish()
+        #expect(try await new.value.refreshToken == "new")
+        #expect(try await peer.value.refreshToken == "new")
+    }
+
     @Test func testConcurrentCallersShareSingleRefresh() async throws {
         // Track how many times the refresh function is actually invoked.
         let callCounter = OSAllocatedUnfairLock(initialState: 0)
@@ -146,7 +176,7 @@ struct TokenRefreshCoordinatorTests {
         ) { group in
             for _ in 0..<5 {
                 group.addTask {
-                    try await coordinator.refreshIfNeeded(creds)
+                    try await coordinator.refreshIfNeeded(creds, generation: 0)
                 }
             }
             var collected: [OAuthCredentials] = []
@@ -184,8 +214,8 @@ struct TokenRefreshCoordinatorTests {
         let creds = Self.makeCreds()
 
         // Two sequential (non-overlapping) refreshes should each invoke the function.
-        let first = try await coordinator.refreshIfNeeded(creds)
-        let second = try await coordinator.refreshIfNeeded(creds)
+        let first = try await coordinator.refreshIfNeeded(creds, generation: 0)
+        let second = try await coordinator.refreshIfNeeded(creds, generation: 0)
 
         #expect(first.accessToken == "at-1")
         #expect(second.accessToken == "at-2")
@@ -209,7 +239,7 @@ struct TokenRefreshCoordinatorTests {
             for _ in 0..<3 {
                 group.addTask {
                     do {
-                        _ = try await coordinator.refreshIfNeeded(creds)
+                        _ = try await coordinator.refreshIfNeeded(creds, generation: 0)
                     } catch is FakeError {
                         errorCounter.withLock { $0 += 1 }
                     } catch {}
@@ -242,7 +272,7 @@ struct TokenRefreshCoordinatorTests {
         )
 
         do {
-            _ = try await OpenAICodexAuth.refreshTokens(creds)
+            _ = try await OpenAICodexAuth.refreshTokens(creds, expectedGeneration: UnifiedAuthStorage.shared.chatGPTCredentialGeneration())
             Issue.record("Expected error from mock 400 response")
         } catch {
             // Expected: tokenRefreshFailed because mock returns 400
@@ -681,12 +711,12 @@ struct TokenRefreshEdgeCaseTests {
 
         // First call fails
         do {
-            _ = try await coordinator.refreshIfNeeded(creds)
+            _ = try await coordinator.refreshIfNeeded(creds, generation: 0)
             Issue.record("Expected failure on first call")
         } catch {}
 
         // Second call should start a NEW refresh (not get cached error)
-        let result = try await coordinator.refreshIfNeeded(creds)
+        let result = try await coordinator.refreshIfNeeded(creds, generation: 0)
         #expect(result.accessToken == "at-recovered",
                 "Second call must retry with fresh task after failure")
         #expect(callCounter.withLock { $0 } == 2,
@@ -710,13 +740,13 @@ struct TokenRefreshEdgeCaseTests {
 
         // Wave 1: 3 concurrent callers
         let wave1 = try await withThrowingTaskGroup(of: String.self, returning: [String].self) { g in
-            for _ in 0..<3 { g.addTask { try await coordinator.refreshIfNeeded(creds).accessToken } }
+            for _ in 0..<3 { g.addTask { try await coordinator.refreshIfNeeded(creds, generation: 0).accessToken } }
             return try await g.reduce(into: []) { $0.append($1) }
         }
 
         // Wave 2: 3 more concurrent callers (after wave 1 finished)
         let wave2 = try await withThrowingTaskGroup(of: String.self, returning: [String].self) { g in
-            for _ in 0..<3 { g.addTask { try await coordinator.refreshIfNeeded(creds).accessToken } }
+            for _ in 0..<3 { g.addTask { try await coordinator.refreshIfNeeded(creds, generation: 0).accessToken } }
             return try await g.reduce(into: []) { $0.append($1) }
         }
 
@@ -914,10 +944,10 @@ struct TokenRefreshDeduplicationTests {
 
         // Fire 4 concurrent refreshes — 2 via each entry point
         try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { _ = try await coordinator.refreshIfNeeded(creds) }
-            group.addTask { _ = try await coordinator.refreshIfNeeded(creds) }
-            group.addTask { _ = try await coordinator.refreshIfNeededCounted(creds) }
-            group.addTask { _ = try await coordinator.refreshIfNeededCounted(creds) }
+            group.addTask { _ = try await coordinator.refreshIfNeeded(creds, generation: 0) }
+            group.addTask { _ = try await coordinator.refreshIfNeeded(creds, generation: 0) }
+            group.addTask { _ = try await coordinator.refreshIfNeededCounted(creds, generation: 0) }
+            group.addTask { _ = try await coordinator.refreshIfNeededCounted(creds, generation: 0) }
             try await group.waitForAll()
         }
 
