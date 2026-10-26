@@ -10,6 +10,18 @@ export WRAPPER_CALLS="$TEST_DIR/calls"
 cat > "$TEST_DIR/bin/ffmpeg" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+format=''
+while (( $# > 1 )); do
+    case "$1" in
+        -f) format="$2"; shift 2 ;;
+        -i)
+            [[ "$format" == lavfi ]] || exit 70
+            format=''
+            shift 2
+            ;;
+        *) shift ;;
+    esac
+done
 [[ "$WRAPPER_SCENARIO" != fixture-failure ]] || exit 24
 [[ "$WRAPPER_SCENARIO" != missing-fixture ]] || exit 0
 printf 'synthetic fixture' > "${!#}"
@@ -17,6 +29,7 @@ STUB
 cat > "$TEST_DIR/bin/swift" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'case\n' >> "$WRAPPER_CALLS"
 expected='run --disable-sandbox SpeakFlowLiveE2E --silence-only'
 [[ "$WRAPPER_NAME" != test-noise-rejection.sh ]] || expected='run -c release --disable-sandbox SpeakFlowLiveE2E --silence-only'
 [[ "$*" == "$expected" ]] || exit 65
@@ -24,7 +37,6 @@ expected='run --disable-sandbox SpeakFlowLiveE2E --silence-only'
 [[ "${SPEAKFLOW_E2E_TEST_NOISE_REJECTION:-}" == 1 ]] || exit 67
 [[ -z "${SPEAKFLOW_E2E_EXPECT_PHRASE:-}" ]] || exit 68
 [[ -s "${SPEAKFLOW_E2E_AUDIO_FILE_PATH:-}" ]] || exit 69
-printf 'case\n' >> "$WRAPPER_CALLS"
 case "$WRAPPER_SCENARIO" in
     pass) echo 'E2E_RESULT status=pass assertions=noChunks chunks=0 auto_end_seconds=none' ;;
     missing-result) echo 'Done' ;;
@@ -49,6 +61,9 @@ for wrapper in run-noise-rejection-e2e.sh test-noise-rejection.sh; do
             [[ "$(wc -l < "$WRAPPER_CALLS" | tr -d ' ')" == 4 ]] || { echo 'FAIL: not all four fixtures ran'; exit 1; }
         else
             [[ "$rc" != 0 ]] || { echo "FAIL: $wrapper accepted $scenario"; exit 1; }
+            if [[ "$scenario" == fixture-failure || "$scenario" == missing-fixture ]]; then
+                [[ ! -s "$WRAPPER_CALLS" ]] || { echo "FAIL: $wrapper ran before required fixtures were ready"; exit 1; }
+            fi
         fi
         echo "PASS: $wrapper $scenario"
     done

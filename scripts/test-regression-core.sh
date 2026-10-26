@@ -113,6 +113,17 @@ REGRESSION_SUITES=(
   "MistralBatchCancellationTests"
   "TranscriptionCancellationRecognitionTests"
   "ObservabilitySettingsSnapshotTests"
+  "StreamingTextDeliveryTests"
+  "TextInserterApplicationMatchingTests"
+  "BorrowedEventOwnershipTests"
+  "HotkeyLocalMonitorTests"
+  "GracefulControlDeadlineTests"
+  "StreamingConnectionIdentityTests"
+  "RecorderIdleFeedbackTests"
+  "ProviderKeyValidationTests"
+  "TranscriptionLanguagePickerTests"
+  "UITestHarnessTests"
+  "HotkeyNativeMonitorTests"
 )
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

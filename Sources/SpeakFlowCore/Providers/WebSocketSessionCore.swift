@@ -433,6 +433,7 @@ actor WebSocketSessionCore {
 
         eventContinuation.yield(.closed)
         finishEventStream()
+        await close(code: .goingAway)
     }
 
     private func finishEventStream() {

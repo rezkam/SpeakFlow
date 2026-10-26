@@ -8,18 +8,12 @@ public struct AuthCredentials: Sendable {
     /// Load credentials from OAuth storage
     /// Throws if not logged in or tokens are invalid
     public static func load() async throws -> AuthCredentials {
-        // Try to get valid access token (will refresh if needed)
-        let accessToken = try await OpenAICodexAuth.getValidAccessToken()
-        
-        // Load full credentials for account ID
-        guard let credentials = OpenAICodexAuth.loadCredentials() else {
-            throw TranscriptionError.authenticationFailed(reason: "Not logged in. Please login via the menu.")
+        do {
+            let credentials = try await OpenAICodexAuth.getValidCredentials()
+            return AuthCredentials(accessToken: credentials.accessToken, accountId: credentials.accountId)
+        } catch let error as AuthError where error.isAuthenticationError {
+            throw TranscriptionError.authenticationFailed(reason: error.localizedDescription)
         }
-        
-        return AuthCredentials(
-            accessToken: accessToken,
-            accountId: credentials.accountId
-        )
     }
     
     /// Synchronous load for cases where we can't use async

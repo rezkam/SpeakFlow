@@ -361,6 +361,34 @@ struct SessionControllerTests {
                 "Auto-end should fire only after the full post-chunk silence duration")
     }
 
+    @Test func silentChunksDoNotExtendTheAutoEndDeadline() async {
+        let clock = MockDateProvider()
+        let config = AutoEndConfiguration(
+            enabled: true,
+            silenceDuration: 30,
+            minSessionDuration: 1,
+            requireSpeechFirst: true,
+            noSpeechTimeout: 100
+        )
+        let controller = SessionController(autoEndConfig: config, dateProvider: clock.date)
+        await controller.startSession()
+        await controller.onSpeechEvent(.started(at: 0))
+        clock.now += 2
+        await controller.onSpeechEvent(.ended(at: 2))
+        await controller.chunkSent()
+
+        clock.now += 15
+        await controller.chunkSent()
+        #expect(await controller.shouldAutoEndSession() == false)
+
+        clock.now += 15
+        await controller.chunkSent()
+        #expect(await controller.currentSilenceDuration == 30,
+                "Silent chunks must preserve the sustained-silence clock")
+        #expect(await controller.shouldAutoEndSession() == true,
+                "Silent chunks must not keep an abandoned session alive")
+    }
+
     @Test func testShouldSendChunkNotWhileSpeaking() async {
         let vadConfig = VADConfiguration(minSilenceAfterSpeech: 0.2)
         let c = SessionController(vadConfig: vadConfig, maxChunkDuration: 1.0)

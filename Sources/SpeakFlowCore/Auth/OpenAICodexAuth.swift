@@ -134,6 +134,11 @@ public final class OpenAICodexAuth {
     
     private static let storage = UnifiedAuthStorage.shared
     #if DEBUG
+    private static let validatedHook = OSAllocatedUnfairLock<(@Sendable () throws -> Void)?>(initialState: nil)
+    static var afterCredentialValidationForTesting: (@Sendable () throws -> Void)? {
+        get { validatedHook.withLock { $0 } }
+        set { validatedHook.withLock { $0 = newValue } }
+    }
     private static let refreshHook = OSAllocatedUnfairLock<(@Sendable () throws -> Void)?>(initialState: nil)
     static var beforeCoordinatedRefreshForTesting: (@Sendable () throws -> Void)? {
         get { refreshHook.withLock { $0 } }
@@ -354,9 +359,16 @@ public final class OpenAICodexAuth {
         let (data, response) = try await httpProvider.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-            Logger.auth.error("Token refresh failed: \(errorText)")
-            throw AuthError.tokenRefreshFailed(errorText)
+            struct OAuthFailure: Decodable { let error: String? }
+            let oauthError = (try? JSONDecoder().decode(OAuthFailure.self, from: data))?.error
+            let status = (response as? HTTPURLResponse)?.statusCode
+            let terminalCodes = ["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"]
+            if let status, status == 401 || status == 403
+                || (status == 400 && terminalCodes.contains(oauthError ?? "")) {
+                throw AuthError.tokenRefreshRejected(statusCode: status, oauthError: oauthError)
+            }
+            Logger.auth.error("Token refresh failed with HTTP status \(status ?? 0)")
+            throw AuthError.tokenRefreshFailed(status.map { "HTTP \($0)" } ?? "Invalid token response")
         }
         
         struct TokenResponse: Codable {
@@ -441,6 +453,11 @@ public final class OpenAICodexAuth {
     /// Get valid access token, refreshing if needed.
     /// Concurrent callers share a single in-flight refresh via `TokenRefreshCoordinator`.
     public static func getValidAccessToken() async throws -> String {
+        try await getValidCredentials().accessToken
+    }
+
+    /// Return token and account identity from one validated credential snapshot.
+    public static func getValidCredentials() async throws -> OAuthCredentials {
         guard let snapshot = storage.loadChatGPTCredentialSnapshot() else {
             throw AuthError.notLoggedIn
         }
@@ -454,7 +471,10 @@ public final class OpenAICodexAuth {
             credentials = try await TokenRefreshCoordinator.shared.refreshIfNeeded(credentials, generation: snapshot.generation)
         }
         
-        return credentials.accessToken
+        #if DEBUG
+        try afterCredentialValidationForTesting?()
+        #endif
+        return credentials
     }
     
     /// Check if user is logged in (has valid credentials file)
@@ -469,6 +489,7 @@ public enum AuthError: LocalizedError, Equatable {
     case notLoggedIn
     case tokenExchangeFailed(String)
     case tokenRefreshFailed(String)
+    case tokenRefreshRejected(statusCode: Int, oauthError: String?)
     case missingAccountId
     case stateMismatch
     case missingCode
@@ -476,6 +497,15 @@ public enum AuthError: LocalizedError, Equatable {
     /// Credentials changed (logout or a newer login) while this exchange or
     /// refresh was in flight; its result is discarded.
     case credentialsChanged
+
+    var isAuthenticationError: Bool {
+        switch self {
+        case .notLoggedIn, .credentialsChanged, .tokenRefreshRejected:
+            return true
+        default:
+            return false
+        }
+    }
     
     public var errorDescription: String? {
         switch self {
@@ -485,6 +515,8 @@ public enum AuthError: LocalizedError, Equatable {
             return String(localized: "Failed to exchange authorization code: \(message)")
         case .tokenRefreshFailed(let message):
             return String(localized: "Failed to refresh token: \(message)")
+        case .tokenRefreshRejected:
+            return String(localized: "Session expired or revoked. Please log in again.")
         case .missingAccountId:
             return String(localized: "Could not extract account ID from token")
         case .stateMismatch:

@@ -20,17 +20,20 @@ final class PermissionController: AccessibilityPermissionDelegate {
     /// Injected closure to avoid circular dependency with RecordingController.
     let setupHotkeyAction: () -> Void
     private let isAccessibilityTrusted: () -> Bool
+    private let requestAccessibility: ((Bool) -> Bool)?
 
     init(
         appState: any BannerPresenting = SpeakFlow.AppState.shared,
         hotkeySettings: any HotkeySettingsProviding = SpeakFlowCore.HotkeySettings.shared,
         setupHotkeyAction: @escaping () -> Void = { RecordingController.shared.setupHotkey() },
-        isAccessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }
+        isAccessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() },
+        requestAccessibility: ((Bool) -> Bool)? = nil
     ) {
         self.appState = appState
         self.hotkeySettings = hotkeySettings
         self.setupHotkeyAction = setupHotkeyAction
         self.isAccessibilityTrusted = isAccessibilityTrusted
+        self.requestAccessibility = requestAccessibility
         lastObservedTrust = isAccessibilityTrusted()
         permissionManager.delegate = self
     }
@@ -89,7 +92,7 @@ final class PermissionController: AccessibilityPermissionDelegate {
     // MARK: - Public Actions (called from views)
 
     func checkAccessibility() {
-        let trusted = observeTrust() || permissionManager.checkAndRequestPermission(showAlertIfNeeded: true)
+        let trusted = observeTrust() || ensureAccessibility(showAlertIfNeeded: true)
         if trusted {
             appState.showBanner("Accessibility permission is active", style: .success)
         }
@@ -127,7 +130,8 @@ final class PermissionController: AccessibilityPermissionDelegate {
 
     /// Returns whether accessibility is currently granted, triggering a request if not.
     func ensureAccessibility(showAlertIfNeeded: Bool = true) -> Bool {
-        permissionManager.checkAndRequestPermission(showAlertIfNeeded: showAlertIfNeeded)
+        if let requestAccessibility { return requestAccessibility(showAlertIfNeeded) }
+        return permissionManager.checkAndRequestPermission(showAlertIfNeeded: showAlertIfNeeded)
     }
 
     func shutdown() {

@@ -202,6 +202,7 @@ public final class StreamingRecorder {
     private var vadProcessor: VADProcessor?
     private var sessionController: SessionController?
     private var audioFilter: (any AudioFilter)?
+    private var hasEmittedChunk = false
     private var idleNudgeController: IdleNudgeController?
     private var turnClassifier: TurnClassifier?
 
@@ -234,8 +235,14 @@ public final class StreamingRecorder {
 
     private let settings: any SettingsProviding
 
-    public init(settings: any SettingsProviding = Settings.shared) {
+    private let playSoundEffect: (SoundEffect) -> Void
+
+    public init(
+        settings: any SettingsProviding = Settings.shared,
+        playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
+    ) {
         self.settings = settings
+        self.playSoundEffect = playSoundEffect
     }
 
     private static func isTestRuntime() -> Bool {
@@ -345,6 +352,7 @@ public final class StreamingRecorder {
     /// On failure, all state is rolled back (engine, buffer, flags cleaned up).
     @discardableResult
     public func start() async -> Bool {
+        hasEmittedChunk = false
         sessionStartDate = Date()
         isDiscardingAudio = false
         observabilityEvent(
@@ -537,13 +545,15 @@ public final class StreamingRecorder {
         // each chunk through VAD sequentially. This ensures every sample gets
         // evaluated while still amortizing actor hop overhead.
         guard state.getVADActive() else { return }
+        await processModelSizedFrames(filteredSamples)
+    }
 
+    private func processModelSizedFrames(_ samples: [Float]) async {
         let maxChunkSize = 4096
         var offset = 0
-        while offset < filteredSamples.count {
-            let end = min(offset + maxChunkSize, filteredSamples.count)
-            let chunk = Array(filteredSamples[offset..<end])
-            await processWithVAD(samples: chunk)
+        while offset < samples.count {
+            let end = min(offset + maxChunkSize, samples.count)
+            await processWithVAD(samples: Array(samples[offset..<end]))
             offset = end
         }
     }
@@ -725,6 +735,14 @@ public final class StreamingRecorder {
     private func periodicCheck() async {
         guard state.getRecording(), let buffer = audioBuffer else { return }
 
+        // The transport ceiling is independent of configured chunk length and
+        // speaking state. The emitter also splits any processing overshoot.
+        if await buffer.count >= Self.maxBatchSamples {
+            let sent = await sendChunkIfReady(reason: "provider byte ceiling", minimumDuration: 0)
+            if sent { await sessionController?.chunkSent() }
+            return
+        }
+
         let duration = await buffer.duration
         let isFullRecording = self.settings.chunkDuration.isFullRecording
 
@@ -881,14 +899,9 @@ public final class StreamingRecorder {
         let speechPct = String(format: "%.0f", speechProbability * 100)
         Logger.audio.info("Chunk ready (\(reason)): \(durationStr)s, \(speechPct)% speech")
 
-        let wavData = createWav(from: samples)
-        let chunk = AudioChunk(wavData: wavData, durationSeconds: duration, speechProbability: speechProbability)
-
-        // Cancellation can begin while this path is suspended above.
-        guard !isDiscardingAudio else { return false }
-        await onChunkReady?(chunk)
-        state.updateLastSoundTime()
-        return true
+        let emitted = await emitBoundedChunks(samples, speechProbability: speechProbability)
+        if emitted { state.updateLastSoundTime() }
+        return emitted
     }
 
     public func stop() {
@@ -907,7 +920,6 @@ public final class StreamingRecorder {
 
         let hadVADActive = state.getVADActive()
         let filter = audioFilter
-        audioFilter = nil
 
         let wasCancelled = isCancelled
         isCancelled = false
@@ -916,15 +928,19 @@ public final class StreamingRecorder {
         let stopTask = Task { [self] in
             // The stop-time drain continues where the in-flight pass ends.
             await inFlightPass?.value
-            await filter?.stop()
+            audioFilter = nil
             idleNudgeController = nil
             turnClassifier = nil
             defer { self.state.setVADActive(false) }
-            guard let buffer = self.audioBuffer else { return }
+            guard let buffer = self.audioBuffer else {
+                await filter?.stop()
+                return
+            }
 
             // Cancelled audio is discarded before anything that can emit: VAD
             // processing of queued samples can raise a speech-end early emission.
             guard !wasCancelled else {
+                await filter?.stop()
                 let droppedBatches = self.sampleQueue.dequeueAll().count
                 let discarded = await buffer.takeAll()
                 await self.vadProcessor?.resetSession()
@@ -951,17 +967,23 @@ public final class StreamingRecorder {
                 )
             }
             for sample in pendingSamples {
-                await buffer.append(frames: sample)
+                let filtered = filter?.filter(sample) ?? sample
+                await buffer.append(frames: filtered)
                 if hadVADActive {
-                    await self.processWithVAD(samples: sample)
+                    await self.processModelSizedFrames(filtered)
                 }
             }
+            await filter?.stop()
 
             let finalSamples = await buffer.takeAll()
             let duration = Double(finalSamples.count) / self.sampleRate
 
             let minDurationMs = Double(Config.minRecordingDurationMs) / 1000.0
-            let minDuration = self.settings.chunkDuration.isFullRecording ? minDurationMs : 1.0
+            // A short tail belongs to the already established session. The
+            // accidental-recording floor applies only before its first chunk.
+            let minDuration = self.hasEmittedChunk
+                ? 1.0 / self.sampleRate
+                : (self.settings.chunkDuration.isFullRecording ? minDurationMs : 1.0)
             let skipSilentChunks = self.settings.skipSilentChunks
 
             let speechProbability: Float
@@ -992,17 +1014,7 @@ public final class StreamingRecorder {
 
             if shouldSend {
                 Logger.audio.info("Final chunk: \(String(format: "%.1f", duration))s, speech=\(String(format: "%.0f", speechProbability * 100))%")
-                let wavData = self.createWav(from: finalSamples)
-                self.observabilityEvent(
-                    "stop_final_chunk_sent",
-                    metadata: [
-                        "durationSeconds": String(format: "%.3f", duration),
-                        "speechProbability": String(format: "%.3f", speechProbability),
-                        "bytes": String(wavData.count)
-                    ]
-                )
-                let chunk = AudioChunk(wavData: wavData, durationSeconds: duration, speechProbability: speechProbability)
-                await self.onChunkReady?(chunk)
+                await self.emitBoundedChunks(finalSamples, speechProbability: speechProbability, isFinal: true)
             } else if duration < minDuration {
                 Logger.audio.debug("Recording too short (\(String(format: "%.2f", duration))s < \(String(format: "%.2f", minDuration))s)")
                 self.observabilityEvent(
@@ -1032,6 +1044,38 @@ public final class StreamingRecorder {
         self.stopTask = stopTask
     }
 
+    // Mono PCM16 WAV has a 44-byte header. Apply the provider limit to the
+    // encoded representation, not Float32 buffer storage or elapsed time.
+    private static let maxBatchSamples = (Config.maxAudioSizeBytes - 44) / MemoryLayout<Int16>.size
+
+    @discardableResult
+    private func emitBoundedChunks(
+        _ samples: [Float], speechProbability: Float, isFinal: Bool = false
+    ) async -> Bool {
+        var offset = 0
+        while offset < samples.count {
+            // Cancellation while an earlier callback was suspended retires the
+            // remaining slices as well, before they can reach an uploader.
+            guard !isDiscardingAudio else { return false }
+            let end = min(offset + Self.maxBatchSamples, samples.count)
+            let wavData = createWav(from: Array(samples[offset..<end]))
+            let duration = Double(end - offset) / sampleRate
+            if isFinal {
+                observabilityEvent("stop_final_chunk_sent", metadata: [
+                    "durationSeconds": String(format: "%.3f", duration),
+                    "speechProbability": String(format: "%.3f", speechProbability),
+                    "bytes": String(wavData.count)
+                ])
+            }
+            hasEmittedChunk = true
+            await onChunkReady?(AudioChunk(
+                wavData: wavData, durationSeconds: duration, speechProbability: speechProbability
+            ))
+            offset = end
+        }
+        return !samples.isEmpty
+    }
+
     /// Encode PCM Float32 samples as a WAV file.
     ///
     /// Delegates to shared ``WavEncoder`` so WAV generation remains reusable and
@@ -1043,6 +1087,7 @@ public final class StreamingRecorder {
     /// Start a mock recording session using provided audio data.
     /// Used for E2E testing in environments without microphone hardware.
     public func startMock(audioData: [Float]) async {
+        hasEmittedChunk = false
         #if DEBUG
         mockSamplesFedForTesting = 0
         #endif
@@ -1119,6 +1164,10 @@ extension StreamingRecorder {
         sessionController = controller
     }
 
+    func _testInjectAudioFilter(_ filter: any AudioFilter) {
+        audioFilter = filter
+    }
+
     func _testInjectVADProcessor(_ processor: VADProcessor?) {
         vadProcessor = processor
     }
@@ -1154,6 +1203,15 @@ extension StreamingRecorder {
     }
 
     var _testHasIdleNudgeController: Bool { idleNudgeController != nil }
+
+    func _testBeginIdleMonitoring() {
+        setupIdleNudgeController()
+        idleNudgeController?.startMonitoring(afterDelay: 0)
+    }
+
+    func _testStopIdleMonitoring() {
+        idleNudgeController?.stopMonitoring()
+    }
 
     /// Enqueue a sample batch directly into the internal AudioSampleQueue.
     /// Used by tests to bypass the audio tap and inject controlled sample data.
@@ -1199,10 +1257,12 @@ private extension StreamingRecorder {
             nudgeInterval: settings.idleNudgeInterval,
             maxNudges: settings.idleNudgeMaxCount
         )
-        controller.onNudge = {
+        controller.onNudge = { [weak self] in
+            self?.playSoundEffect(.nudge)
             Logger.audio.info("Idle nudge: user is silent, waiting before auto-end")
         }
-        controller.onFinalWarning = {
+        controller.onFinalWarning = { [weak self] in
+            self?.playSoundEffect(.warning)
             Logger.audio.info("Idle final warning before auto-end")
         }
         controller.onExpired = { [weak self] in
