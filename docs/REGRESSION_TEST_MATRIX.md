@@ -27,6 +27,7 @@ Run `make test-regression-core` and the serialized full suite with muted, isolat
 | Idle feedback uses the central mute-aware sound policy | `RecorderIdleFeedbackTests`, `SoundEffectTests` |
 | Realtime language is automatic while Batch language remains editable | `TranscriptionLanguagePickerTests` |
 | Live runners isolate stores and fail closed on missing fixtures or assertions | `RegressionScriptTests`, offline shell contract probes |
+| Packaged resources resolve without the build checkout; private paths and scan errors block publication | `RegressionScriptTests`, `ReleaseDependencyTests`, native SwiftPM packaging probe |
 
 ## Provider timing
 
