@@ -28,6 +28,15 @@ Run `make test-regression-core` and the serialized full suite with muted, isolat
 | Realtime language is automatic while Batch language remains editable | `TranscriptionLanguagePickerTests` |
 | Live runners isolate stores and fail closed on missing fixtures or assertions | `RegressionScriptTests`, offline shell contract probes |
 
+## Provider timing
+
+Privacy-safe batch attempt outcomes, local phases, missing network milestones, and actual
+URLSession transaction metrics are covered by `ProviderTimingTests`, `HTTPPhaseMetricsTests`,
+and `ProviderTimingTransportTests`. These suites are included in the core gate.
+`TranscriptionTests` also verifies original-session/request correlation across replacement.
+The network fixture binds only to loopback and never uses live providers or credentials.
+See [Batch provider timing](PROVIDER_TIMING.md) for field meanings and limitations.
+
 ## Native UI probes
 
 Native UI suites are opt-in and run in isolated child processes:
