@@ -55,6 +55,7 @@ REGRESSION_SUITES=(
   "KeyInterceptorEnterCaptureTests"
   "KeyInterceptorRegistrationTests"
   "TextInserterFocusTests"
+  "TextInserterTargetCaptureTests"
   "TextInserterModifierSafetyTests"
   "SoundEffectTests"
   "SessionControllerTests"
