@@ -7,7 +7,7 @@ import SpeakFlowCore
 ///
 /// This component handles all text insertion operations by:
 /// - Capturing the currently focused accessibility element before recording starts
-/// - Restoring focus to the captured element before each operation (activating its app if needed)
+/// - Waiting for the user to return focus to the captured element before each operation
 /// - Serializing all text operations (insertions, deletions, Enter key) into a task queue
 /// - Synthesizing keystrokes character-by-character using CGEvent Unicode strings
 /// - Waiting for modifier keys to be released to prevent corruption
@@ -145,6 +145,8 @@ final class TextInserter: TextInserting {
     private var operationSequence: UInt64 = 0
     private var observabilitySessionId: UUID?
 
+    private var captureAccessibility = TargetCaptureAccessibility.live
+
     private init() {}
 
     private func observabilityEvent(
@@ -208,43 +210,46 @@ final class TextInserter: TextInserting {
         #if DEBUG
         if let captureTargetForTesting { return captureTargetForTesting() }
         #endif
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedElement: CFTypeRef?
-
-        // Query the system for the currently focused accessibility element
-        if AXUIElementCopyAttributeValue(
-            systemWide,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedElement
-        ) == .success,
-           let element = focusedElement,
-           CFGetTypeID(element) == AXUIElementGetTypeID() {
-            // Safe: CFGetTypeID check above guarantees element is AXUIElement;
-            // Swift CF bridging always succeeds for this cast
-            // swiftlint:disable:next force_cast
-            let axElement = element as! AXUIElement
+        let originalPid = captureAccessibility.frontmostPid()
+        if let pid = originalPid, pid > 0 {
+            let activationStatus = captureAccessibility.prepareApplication(pid)
+            observabilityEvent(
+                "target_accessibility_activation_requested",
+                metadata: ["status": String(activationStatus.rawValue)]
+            )
+        }
+        let (status, focusedElement) = captureAccessibility.systemFocus()
+        if status == .success, let axElement = focusedElement,
+           let pid = captureAccessibility.processId(axElement), pid > 0 {
+            if let originalPid {
+                guard captureAccessibility.frontmostPid() == originalPid else {
+                    return refuseTargetCapture(reason: "focus_changed", status: status)
+                }
+                guard captureAccessibility.sameApplication(originalPid, pid) else {
+                    return refuseTargetCapture(reason: "foreign_owner", status: status)
+                }
+            }
             AXUIElementSetMessagingTimeout(axElement, Self.fieldQueryTimeoutSeconds)
             targetElement = axElement
-            targetWindow = Self.elementAttribute(kAXWindowAttribute, of: axElement)
-
-            // Store the PID for reliable app-level focus comparison
-            var pid: pid_t = 0
-            if AXUIElementGetPid(axElement, &pid) == .success, pid != 0 {
-                targetPid = pid
-                targetBundleIdentifier = NSRunningApplication(
-                    processIdentifier: pid
-                )?.bundleIdentifier
-                targetApplicationURL = ApplicationOwnership.applicationURL(for: pid)
-                return true
-            }
+            targetWindow = captureAccessibility.window(axElement)
+            targetPid = pid
+            targetBundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+            targetApplicationURL = ApplicationOwnership.applicationURL(for: pid)
+            return true
         }
-        // No focused element, no owning process, or accessibility denied.
+        return refuseTargetCapture(reason: "focused_element_unavailable", status: status)
+    }
+
+    private func refuseTargetCapture(reason: String, status: AXError) -> Bool {
         targetElement = nil
         targetWindow = nil
         targetPid = 0
         targetBundleIdentifier = nil
         targetApplicationURL = nil
-        observabilityEvent("target_capture_failed", level: .warning)
+        observabilityEvent(
+            "target_capture_failed", level: .warning,
+            metadata: ["reason": reason, "status": String(status.rawValue)]
+        )
         return false
     }
 
@@ -1117,6 +1122,10 @@ extension TextInserter {
 extension TextInserter {
     // swiftlint:disable:next identifier_name
     static func _testMakeIsolatedInstance() -> TextInserter { TextInserter() }
+
+    func setCaptureAccessibilityForTesting(_ accessibility: TargetCaptureAccessibility) {
+        captureAccessibility = accessibility
+    }
 
     // swiftlint:disable:next identifier_name
     var _testQueuedInsertionCount: Int { queuedInsertionCount }
