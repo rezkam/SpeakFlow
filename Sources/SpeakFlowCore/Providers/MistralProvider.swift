@@ -178,6 +178,14 @@ public actor MistralStreamingSession: StreamingSession {
     /// Reset when a `transcription.segment` or `transcription.done` arrives.
     private var pendingDeltaText = ""
 
+    private struct PendingFinal {
+        let result: TranscriptionResult
+        var delivery: Task<Void, Never>?
+    }
+    private var pendingFinals: [UInt64: PendingFinal] = [:]
+    private var finalSequence: UInt64 = 0
+    private var isClosing = false
+
     public nonisolated var events: AsyncStream<TranscriptionEvent> {
         core.events
     }
@@ -328,12 +336,43 @@ public actor MistralStreamingSession: StreamingSession {
                 isFinal: true,
                 speechFinal: true
             )
-            await beforeFinalYield?()
-            await core.yield(.finalResult(result))
+            await publishFinal(result)
         }
 
+        // A parser may be suspended after consuming its delta but before yielding.
+        // Claim its final without waiting for that parser, then finish the stream.
+        isClosing = true
+        let finalIds = pendingFinals.keys.sorted()
+        let deliveries = finalIds.compactMap { deliverFinal($0) }
+        for delivery in deliveries { await delivery.value }
+        for id in finalIds { pendingFinals.removeValue(forKey: id) }
         await core.close()
         logger.log("WebSocket closed", level: .info, visibility: .public)
+    }
+
+    private func publishFinal(_ result: TranscriptionResult) async {
+        finalSequence &+= 1
+        let id = finalSequence
+        pendingFinals[id] = PendingFinal(result: result)
+        await beforeFinalYield?()
+        await deliverFinal(id)?.value
+        pendingFinals.removeValue(forKey: id)
+    }
+
+    /// Both the parser and close share one delivery task. The task only hops to
+    /// the core's synchronous yield, never to transport or a suspended parser.
+    private func deliverFinal(_ id: UInt64) -> Task<Void, Never>? {
+        guard let pending = pendingFinals[id] else { return nil }
+        if let delivery = pending.delivery { return delivery }
+        let earlierDeliveries = pendingFinals.keys.filter { $0 < id }.sorted().compactMap { deliverFinal($0) }
+        let core = core
+        let result = pending.result
+        let delivery = Task {
+            for earlier in earlierDeliveries { await earlier.value }
+            await core.yield(.finalResult(result))
+        }
+        pendingFinals[id]?.delivery = delivery
+        return delivery
     }
 
     public func keepAlive() async throws {
@@ -359,6 +398,7 @@ public actor MistralStreamingSession: StreamingSession {
     /// Parse a server message according to the Mistral realtime protocol.
     /// Message types are defined in `_MESSAGE_MODELS` in the Python SDK's `connection.py`.
     func parseMessage(_ json: String) async {
+        guard !isClosing else { return }
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return }
@@ -409,8 +449,7 @@ public actor MistralStreamingSession: StreamingSession {
                     isFinal: true,
                     speechFinal: true
                 )
-                await beforeFinalYield?()
-                await core.yield(.finalResult(result))
+                await publishFinal(result)
                 logger.log(
                     "SEGMENT [\(String(format: "%.1f", start))–\(String(format: "%.1f", start + duration))s]: \(segmentText)",
                     level: .info,
@@ -442,8 +481,7 @@ public actor MistralStreamingSession: StreamingSession {
                     isFinal: true,
                     speechFinal: true
                 )
-                await beforeFinalYield?()
-                await core.yield(.finalResult(result))
+                await publishFinal(result)
             }
             logger.log("Transcription done", level: .info, visibility: .public)
 
