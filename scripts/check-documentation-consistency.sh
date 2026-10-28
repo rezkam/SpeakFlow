@@ -24,9 +24,13 @@ reject_readme() {
   fi
 }
 
-if [[ -n "$(git -C "$ROOT_DIR" ls-files docs)" ]]; then
-  fail "docs/ must contain only ignored local documentation; remove tracked docs files with git rm --cached."
-fi
+# The protected contract matrix is the sole tracked documentation exception.
+while IFS= read -r -d '' doc; do
+  case "$doc" in
+    docs/REGRESSION_TEST_MATRIX.md) ;;
+    *) fail "Unexpected tracked documentation: $doc (only docs/REGRESSION_TEST_MATRIX.md is allowed)." ;;
+  esac
+done < <(git -C "$ROOT_DIR" ls-files -z docs)
 
 reject_readme 'Accounts(\*\*)?[[:space:]]+tab' 'Accounts tab (plain or Markdown-emphasized)'
 reject_readme 'Whisper API' 'Whisper API'

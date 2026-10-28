@@ -773,7 +773,7 @@ struct SpeakFlowLiveE2E {
         } else {
             // Skipping the transcription scenarios and exiting 0 would report a
             // full-suite success that never transcribed anything.
-            return fail("Transcription scenarios need a ChatGPT login. Log in, or pass --silence-only "
+            return fail("Transcription scenarios need an explicit isolated login export (--auth-file or SPEAKFLOW_E2E_AUTH_FILE). Use --silence-only "
                 + "to run only the silence and auto-end scenarios.")
         }
 
@@ -1203,6 +1203,10 @@ enum LiveE2EEntry {
         #endif
         Task {
             #if DEBUG
+            if CommandLine.arguments.contains("--auth-bootstrap-probe") {
+                exit(await IsolatedAuthBootstrap.probe(
+                    arguments: CommandLine.arguments, environment: ProcessInfo.processInfo.environment))
+            }
             if CommandLine.arguments.contains("--authenticated-silence-probe") {
                 exit(await AuthenticatedSilenceProbe.run())
             }
@@ -1210,6 +1214,13 @@ enum LiveE2EEntry {
                 exit(await StorageIsolationProbe.run())
             }
             #endif
+            do {
+                try IsolatedAuthBootstrap.apply(
+                    arguments: CommandLine.arguments, environment: ProcessInfo.processInfo.environment)
+            } catch {
+                print("Authentication bootstrap refused")
+                exit(1)
+            }
             let status = await SpeakFlowLiveE2E.main()
             exit(status)
         }

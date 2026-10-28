@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 BINARY="${1:-.build/debug/SpeakFlowLiveE2E}"
+[[ -x "$BINARY" ]] || { echo 'FAIL: missing SpeakFlowLiveE2E executable; pass its active build path'; exit 1; }
 unset SPEAKFLOW_ISOLATED_STORAGE SPEAKFLOW_UI_TEST_MODE
 for mode in default silence; do
     args=(--runtime-policy-probe)
