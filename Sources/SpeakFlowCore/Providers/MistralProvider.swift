@@ -172,6 +172,7 @@ public actor MistralStreamingSession: StreamingSession {
 
     private let core: WebSocketSessionCore
     private let handshakeTimeout: TimeInterval
+    private let beforeFinalYield: (@Sendable () async -> Void)?
 
     /// Accumulates `transcription.text.delta` fragments between segment boundaries.
     /// Reset when a `transcription.segment` or `transcription.done` arrives.
@@ -185,6 +186,7 @@ public actor MistralStreamingSession: StreamingSession {
         apiKey: String,
         config: StreamingSessionConfig,
         handshakeTimeout: TimeInterval = 10,
+        beforeFinalYield: (@Sendable () async -> Void)? = nil,
         connectionFactory: @escaping WebSocketConnectionFactory = { request, timeout in
             try await WebSocketConnector.connect(request: request, timeout: timeout)
         },
@@ -193,6 +195,7 @@ public actor MistralStreamingSession: StreamingSession {
         self.apiKey = apiKey
         self.config = config
         self.handshakeTimeout = handshakeTimeout
+        self.beforeFinalYield = beforeFinalYield
         self.logger = logger
         self.core = WebSocketSessionCore(
             component: "MistralSession",
@@ -316,15 +319,17 @@ public actor MistralStreamingSession: StreamingSession {
     }
 
     public func close() async throws {
-        // Flush any remaining delta text as a final result.
-        if !pendingDeltaText.isEmpty {
+        // Consume before yielding so a concurrent boundary cannot flush it twice.
+        let remainingText = pendingDeltaText
+        pendingDeltaText = ""
+        if !remainingText.isEmpty {
             let result = TranscriptionResult(
-                transcript: pendingDeltaText,
+                transcript: remainingText,
                 isFinal: true,
                 speechFinal: true
             )
+            await beforeFinalYield?()
             await core.yield(.finalResult(result))
-            pendingDeltaText = ""
         }
 
         await core.close()
@@ -391,6 +396,8 @@ public actor MistralStreamingSession: StreamingSession {
                 segmentText = pendingDeltaText
             }
 
+            // Retire this segment's delta before the first actor suspension.
+            pendingDeltaText = ""
             let start = obj["start"] as? Double ?? 0
             let duration = (obj["end"] as? Double ?? 0) - start
 
@@ -402,6 +409,7 @@ public actor MistralStreamingSession: StreamingSession {
                     isFinal: true,
                     speechFinal: true
                 )
+                await beforeFinalYield?()
                 await core.yield(.finalResult(result))
                 logger.log(
                     "SEGMENT [\(String(format: "%.1f", start))–\(String(format: "%.1f", start + duration))s]: \(segmentText)",
@@ -409,9 +417,6 @@ public actor MistralStreamingSession: StreamingSession {
                     visibility: .privateHash
                 )
             }
-
-            // Reset delta accumulator for next segment
-            pendingDeltaText = ""
 
             // Signal utterance boundary so LiveStreamingController can track silence
             await core.yield(.utteranceEnd(lastWordEnd: start + duration))
@@ -428,15 +433,17 @@ public actor MistralStreamingSession: StreamingSession {
         // Session complete. Contains full text, model, usage stats.
         // Python model: TranscriptionStreamDone { model: str, text: str, usage: UsageInfo, language: str? }
         case "transcription.done":
-            // Flush any remaining delta text
-            if !pendingDeltaText.isEmpty {
+            // Consume before yielding, preserving any delta that arrives meanwhile.
+            let remainingText = pendingDeltaText
+            pendingDeltaText = ""
+            if !remainingText.isEmpty {
                 let result = TranscriptionResult(
-                    transcript: pendingDeltaText,
+                    transcript: remainingText,
                     isFinal: true,
                     speechFinal: true
                 )
+                await beforeFinalYield?()
                 await core.yield(.finalResult(result))
-                pendingDeltaText = ""
             }
             logger.log("Transcription done", level: .info, visibility: .public)
 

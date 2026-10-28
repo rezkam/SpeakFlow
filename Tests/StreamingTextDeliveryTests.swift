@@ -37,6 +37,38 @@ struct StreamingTextDeliveryTests {
     }
 
     @Test @MainActor
+    func terminalSnapshotAtCapacitySettlesBeforeEnter() async throws {
+        let (_, inserter, posted) = fixture()
+        #expect(inserter.captureTarget())
+        // Fill the real queue synchronously so none of its tasks can drain yet.
+        for _ in 0..<Config.maxQueuedTextInsertions { inserter.insertText("x") }
+        for index in 0..<100 { inserter.updateStreamingText("draft\(index)", isFinal: false) }
+        inserter.updateStreamingText("terminal", isFinal: true)
+        inserter.pressEnterKey()
+        await inserter.waitForPendingInsertions()
+        #expect(posted.keyDowns.dropLast().joined() == String(repeating: "x", count: Config.maxQueuedTextInsertions) + "terminal ")
+        #expect(posted.keyCodes.last == 36)
+        #expect(posted.keyCodes.filter { $0 == 36 }.count == 1)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func resetRetiresCoalescedSnapshotsAndEnter(cancel: Bool) async {
+        let (_, inserter, posted) = fixture()
+        #expect(inserter.captureTarget())
+        for _ in 0..<Config.maxQueuedTextInsertions { inserter.insertText("old") }
+        inserter.updateStreamingText("retired", isFinal: true)
+        inserter.pressEnterKey()
+        let oldTail = inserter.pendingTask
+        if cancel { inserter.cancelAndReset() } else { inserter.reset() }
+        #expect(inserter.captureTarget())
+        inserter.updateStreamingText("fresh", isFinal: true)
+        await oldTail?.value
+        await inserter.waitForPendingInsertions()
+        #expect(posted.keyDowns.joined() == "fresh ")
+        #expect(!posted.keyCodes.contains(36))
+    }
+
+    @Test @MainActor
     func laterSegmentReconcilesARejectedFinalBeforeAppending() async throws {
         let (controller, inserter, posted) = fixture()
         defer { controller.cancelRecording() }
