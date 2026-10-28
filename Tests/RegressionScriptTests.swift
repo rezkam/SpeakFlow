@@ -1,19 +1,44 @@
 import Foundation
 import Testing
 
+private final class RegressionScriptBundleMarker: NSObject {}
+
 @Suite("Regression script contracts", .serialized)
 struct RegressionScriptTests {
     #if DEBUG
     @Test(arguments: [
         "scripts/test-e2e-runtime-policy.sh", "scripts/test-e2e-fixture-lifecycle.sh",
-        "scripts/test-provider-executable-policy.sh", "scripts/test-e2e-store-isolation.sh"
+        "scripts/test-provider-executable-policy.sh", "scripts/test-e2e-store-isolation.sh",
+        "scripts/test-e2e-auth-bootstrap.sh"
     ])
     func liveExecutablePolicyAndFixtureLifecycle(script: String) throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let pipe = Pipe()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [script]
+        // XCTest bundles live below the products directory; swift-testing runners
+        // can also be plain executables alongside the products.
+        var products = Bundle(for: RegressionScriptBundleMarker.self).executableURL!
+            .standardizedFileURL.deletingLastPathComponent()
+        var ancestor = products
+        while ancestor.path != "/" {
+            if ancestor.pathExtension == "xctest" {
+                products = ancestor.deletingLastPathComponent()
+                break
+            }
+            ancestor.deleteLastPathComponent()
+        }
+        let names = script.contains("provider-executable")
+            ? ["DeepgramE2E", "DeepgramTest"] : ["SpeakFlowLiveE2E"]
+        let binaries = try names.map { name in
+            let binary = products.appendingPathComponent(name)
+            guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+                throw NSError(domain: "RegressionScriptTests", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Missing sibling executable \(name); build that product in the active scratch directory"])
+            }
+            return binary.path
+        }
+        process.arguments = [script] + binaries
         process.currentDirectoryURL = root
         process.standardOutput = pipe
         process.standardError = pipe
@@ -25,7 +50,7 @@ struct RegressionScriptTests {
     }
     #endif
 
-    @Test(arguments: ["scripts/test-release-resources.sh", "scripts/test-release-privacy.sh", "scripts/test-portable-release.sh"])
+    @Test(arguments: ["scripts/test-release-resources.sh", "scripts/test-release-privacy.sh", "scripts/test-portable-release.sh", "scripts/test-documentation-policy.sh", "scripts/test-local-rc-staging.sh"])
     func releaseArtifactsAreSelfContainedAndPrivate(script: String) throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let pipe = Pipe()

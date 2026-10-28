@@ -102,6 +102,22 @@ make rc
 
 Requires **macOS 26+** and **Swift 6.2+** (Xcode 26 or later).
 
+For artifact-only local review, use a fresh directory under `.agents` and keep
+assembly separate from installation:
+
+```bash
+mkdir .agents/rc-review-unique
+bash scripts/build-portable-release.sh --scratch-path .agents/rc-review-unique/build
+bash scripts/stage-local-rc.sh .agents/rc-review-unique/stage .agents/rc-review-unique/build/release
+```
+
+The staging helper refuses existing outputs and destinations outside `.agents`.
+It assembles resources and an icon, uses a separate local-review bundle ID, and
+ad-hoc signs, verifies and privacy-scans only the staged app. It never installs,
+launches, quits the installed app, queries signing identities, notarizes or
+publishes. This is not Developer ID or Gatekeeper validation. Unlike this path,
+`make rc` and `make local` replace the installed app and launch a smoke test.
+
 ## Permissions
 
 SpeakFlow needs two permissions, both granted from the **General** tab in settings:
@@ -178,6 +194,15 @@ All settings are in the **Transcription** tab:
 - **Full test suite:** `make test`
 - **Thread-safety sweep:** `make test-tsan`
 - **Live E2E suites (manual/pre-release):** `make test-live-e2e-all`
+  uses fresh isolated storage, not the installed app's login. For transcription,
+  explicitly set `SPEAKFLOW_E2E_AUTH_FILE` to a deliberately exported credentials
+  JSON file, or pass `--auth-file FILE` to `scripts/run-live-e2e.sh`. The file has
+  `accessToken`, `refreshToken`, `accountId`, optional `idToken`, and `lastRefresh`
+  (seconds since 2001-01-01 UTC). Treat it as a secret, keep it out of git and logs,
+  and obtain/export it through a separately approved authentication step. No
+  installed credentials are discovered or copied automatically. Import is local;
+  actual transcription can refresh credentials and contact the provider only when
+  the live suite runs. Do not combine bootstrap with `--silence-only`.
 
 If local SwiftPM lock contention occurs, run the regression gate with an isolated build path:
 `SPEAKFLOW_SWIFT_SCRATCH_PATH=/tmp/speakflow-regression-build make test-regression-core`

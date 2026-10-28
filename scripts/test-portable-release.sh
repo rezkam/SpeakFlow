@@ -7,7 +7,11 @@ mkdir -p "$FIXTURE/Sources/SpeakFlow" "$FIXTURE/Fixture.app/Contents/MacOS"
 cat > "$FIXTURE/Package.swift" <<'SWIFT'
 // swift-tools-version:6.0
 import PackageDescription
-let package = Package(name: "Fixture", targets: [.executableTarget(name: "SpeakFlow", resources: [.copy("marker.txt")])])
+// A private-pattern synthetic rpath makes the privacy regression independent
+// of where the selected Swift toolchain happens to be installed.
+let package = Package(name: "Fixture", targets: [.executableTarget(
+    name: "SpeakFlow", resources: [.copy("marker.txt")],
+    linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "/home/fixture-toolchain/swift runtime"])])])
 SWIFT
 printf 'fixture' > "$FIXTURE/Sources/SpeakFlow/marker.txt"
 cat > "$FIXTURE/Sources/SpeakFlow/main.swift" <<'SWIFT'

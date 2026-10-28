@@ -16,17 +16,30 @@ swift "$SCRIPT_DIR/release-resources.swift" prepare "$BIN"
 swift build "${args[@]}"
 BINARY="$BIN/SpeakFlow"
 strip -S "$BINARY"
-while IFS= read -r path; do
-    case "$path" in
-        /Users/*|/home/*|/private/var/folders/*|/var/folders/*)
-            install_name_tool -delete_rpath "$path" "$BINARY"
-            ;;
+# Materialize the load commands before mutating the executable. Fail closed if
+# inspection fails, rather than hiding a producer failure in process substitution.
+LOAD_COMMANDS="$(otool -l "$BINARY")"
+rpath=false
+# Parse in the shell, independent of the awk implementation selected by PATH.
+# read trims otool's indentation, while the capture preserves spaces in paths.
+while read -r line; do
+    case "$line" in
+        'cmd LC_RPATH') rpath=true ;;
+        cmd\ *) rpath=false ;;
+        path\ *)
+            if [[ "$rpath" == true ]]; then
+                [[ "$line" =~ ^path\ (.*)\ \(offset\ [0-9]+\)$ ]] || {
+                    echo 'FAIL: malformed LC_RPATH load command' >&2; exit 1;
+                }
+                path="${BASH_REMATCH[1]}"
+                case "$path" in
+                    /Users/*|/home/*|/private/var/folders/*|/var/folders/*)
+                        install_name_tool -delete_rpath "$path" "$BINARY" ;;
+                esac
+                rpath=false
+            fi ;;
     esac
-done < <(otool -l "$BINARY" | awk '
-    /cmd LC_RPATH/ { rpath = 1; next }
-    rpath && /^[[:space:]]*path / {
-        sub(/^[[:space:]]*path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print; rpath = 0
-    }')
+done <<< "$LOAD_COMMANDS"
 # Keep the CLI executable runnable after modifying signed Mach-O load commands.
 # The app receives its Developer ID signature later in the packaging flow.
 codesign --force --sign - "$BINARY"
