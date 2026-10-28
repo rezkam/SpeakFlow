@@ -62,6 +62,12 @@ public actor TokenRefreshCoordinator {
     /// in-flight task. When `counted` is true, increments `refreshStartCount`
     /// each time a *new* refresh is started (for test observability).
     private func _refreshCore(_ credentials: OAuthCredentials, generation: UInt64, counted: Bool) async throws -> OAuthCredentials {
+        // A delayed caller may arrive after its refresh task has been cleared.
+        // Storage proves refresh lineage, and retires it on logout or new login.
+        if refreshFn == nil,
+           let completed = UnifiedAuthStorage.shared.completedChatGPTRefresh(for: generation) {
+            return completed
+        }
         // Only callers from the same credential generation may share a result.
         if let existing = inFlightRefresh, inFlightGeneration == generation {
             return try await existing.value
@@ -401,7 +407,7 @@ public final class OpenAICodexAuth {
 
         // Save updated credentials, unless a logout or a newer login happened
         // while this refresh was in flight.
-        try saveCredentials(newCredentials, expectedGeneration: generation)
+        try storage.saveRefreshedChatGPTCredentials(newCredentials, expectedGeneration: generation)
         
         Logger.auth.info("Successfully refreshed OpenAI Codex tokens")
         return newCredentials

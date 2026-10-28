@@ -1285,17 +1285,17 @@ private extension StreamingRecorder {
 
     func maybeEvaluateTurnCompletion(session: SessionController) async {
         guard let turnClassifier else { return }
-        guard await session.shouldEvaluateTurnCompletion() else { return }
-
-        let transcript = await session.lastTranscript
-        let recentAudio = await audioBuffer?.peekLast(seconds: 8.0) ?? []
-        let probability = await turnClassifier.classify(
-            transcript: transcript,
-            recentAudio: recentAudio,
-            sampleRate: sampleRate
-        )
-        await session.setTurnCompletionProbability(probability)
-        await session.markTurnCompletionEvaluated()
-        Logger.audio.debug("Turn classifier probability=\(String(format: "%.2f", probability), privacy: .public)")
+        let audioBuffer = self.audioBuffer
+        let sampleRate = self.sampleRate
+        await session.evaluateTurnCompletion { transcript in
+            let recentAudio = await audioBuffer?.peekLast(seconds: 8.0) ?? []
+            let probability = await turnClassifier.classify(
+                transcript: transcript,
+                recentAudio: recentAudio,
+                sampleRate: sampleRate
+            )
+            Logger.audio.debug("Turn classifier probability=\(String(format: "%.2f", probability), privacy: .public)")
+            return probability
+        }
     }
 }

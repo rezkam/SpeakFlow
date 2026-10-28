@@ -212,10 +212,10 @@ public final class OAuthCallbackServer: @unchecked Sendable {
             }
 
             if clientSocket >= 0 {
-                guard setNonBlocking(clientSocket) else {
+                guard prepareClientSocket(clientSocket) else {
                     // One bad accepted client must not kill the whole login attempt:
                     // close it and keep listening for the real callback.
-                    Logger.auth.error("Failed to set accepted client socket non-blocking")
+                    Logger.auth.error("Failed to configure accepted client socket")
                     Darwin.close(clientSocket)
                     continue
                 }
@@ -242,6 +242,21 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         // Timeout or stopped.
         resumeOnce(returning: nil)
     }
+
+    func prepareClientSocket(_ socket: Int32) -> Bool {
+        // A browser can reset its connection before even an error response is
+        // written. Suppress SIGPIPE per accepted socket, not process-wide.
+        var enabled: Int32 = 1
+        guard setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
+                         socklen_t(MemoryLayout<Int32>.size)) == 0 else { return false }
+        return setNonBlocking(socket)
+    }
+
+    #if DEBUG
+    func handlePreparedClientForTesting(_ socket: Int32) {
+        _ = handleClient(socket)
+    }
+    #endif
 
     /// Handles one accepted connection to completion: reads the request, writes the
     /// matching HTTP response, and distinguishes ignorable connection noise from a
@@ -350,8 +365,23 @@ public final class OAuthCallbackServer: @unchecked Sendable {
         \(body)
         """
 
-        _ = response.withCString { ptr in
-            Darwin.write(socket, ptr, strlen(ptr))
+        let data = Data(response.utf8)
+        data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let written = Darwin.write(socket, base.advanced(by: offset), bytes.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0 && errno == EINTR {
+                    continue
+                } else {
+                    // Responses are best effort. A disconnected browser must not
+                    // terminate the listener or discard a valid callback code.
+                    Logger.auth.debug("OAuth callback response could not be written")
+                    return
+                }
+            }
         }
     }
 

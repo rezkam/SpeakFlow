@@ -41,6 +41,8 @@ struct ObservabilityTests {
             metadata: ["key": "value"]
         )
 
+        let pathInfo = await store.pathInfoValue()
+        #expect(try Data(contentsOf: pathInfo.eventsFile).last == 0x0A, "Each written record must end with a newline")
         let events = try await loadEvents(from: store)
         #expect(events.contains { $0.component == "Test" && $0.name == "event_written" })
         #expect(events.contains { $0.metadata["key"] == "value" })
