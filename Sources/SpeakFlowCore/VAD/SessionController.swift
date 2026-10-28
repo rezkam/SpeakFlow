@@ -53,7 +53,9 @@ public actor SessionController {
     // MARK: - Core state
 
     private var isUserSpeaking = false
-    private var lastSpeechEndTime: Date?
+    private var lastSpeechEndTime: Date? {
+        didSet { invalidateTurnCompletion() }
+    }
     /// Only a chunk containing new speech may receive speech-boundary protection.
     private var hasSpeechSinceLastChunk = false
     private var chunkStartTime: Date?
@@ -77,7 +79,11 @@ public actor SessionController {
     /// The most recent transcript text for this session. Updated by StreamingRecorder
     /// as new partial or final transcription results arrive. Used by
     /// `ThinkingPauseDetector` to determine if the user is mid-thought.
-    public var lastTranscript: String = ""
+    public var lastTranscript: String = "" {
+        didSet {
+            if lastTranscript != oldValue { invalidateTurnCompletion() }
+        }
+    }
 
     // MARK: - Turn completion classifier state
 
@@ -85,6 +91,13 @@ public actor SessionController {
     private var lastTurnCompletionProbability: Float?
     /// Tracks which speech-end boundary has already been evaluated.
     private var lastTurnCompletionEvaluatedSpeechEnd: Date?
+    private var turnCompletionRevision: UInt64 = 0
+
+    private func invalidateTurnCompletion() {
+        turnCompletionRevision &+= 1
+        lastTurnCompletionProbability = nil
+        lastTurnCompletionEvaluatedSpeechEnd = nil
+    }
 
     /// Update the transcript text. Called by StreamingRecorder when new transcription
     /// results arrive (both interim and final). Actor-isolated, safe to call from any task.
@@ -161,8 +174,7 @@ public actor SessionController {
             hasSpeechSinceLastChunk = true
             speakingStartTime = dateProvider()                  // ← Safety timeout tracking
             lastPotentialSpeechActivityTime = speakingStartTime
-            lastTurnCompletionProbability = nil
-            lastTurnCompletionEvaluatedSpeechEnd = nil
+            invalidateTurnCompletion()
             if chunkStartTime == nil { chunkStartTime = dateProvider() }
             logger.info("🎤 SPEECH START: sessionDur=\(String(format: "%.1f", self.currentSessionDuration), privacy: .public)s")
 
@@ -479,13 +491,24 @@ public actor SessionController {
 
     /// Whether turn completion should be evaluated for the current speech-end boundary.
     public func shouldEvaluateTurnCompletion() -> Bool {
-        guard autoEndConfig.turnClassifierEnabled,
+        guard autoEndConfig.turnClassifierEnabled, !isUserSpeaking,
               let lastEnd = lastSpeechEndTime else {
             return false
         }
         guard lastTurnCompletionEvaluatedSpeechEnd != lastEnd else { return false }
         let silence = dateProvider().timeIntervalSince(lastEnd)
         return silence >= autoEndConfig.turnClassifierMinimumSilence
+    }
+
+    /// Evaluate asynchronously without holding up speech or transcript updates.
+    func evaluateTurnCompletion(using classify: @Sendable (String) async -> Float) async {
+        guard shouldEvaluateTurnCompletion() else { return }
+        let transcript = lastTranscript
+        let revision = turnCompletionRevision
+        let probability = await classify(transcript)
+        guard revision == turnCompletionRevision, !Task.isCancelled else { return }
+        setTurnCompletionProbability(probability)
+        markTurnCompletionEvaluated()
     }
 
     /// Store classifier output for current boundary.

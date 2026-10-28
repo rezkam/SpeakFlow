@@ -205,6 +205,45 @@ extension HTTPDataProviderTestabilityTests {
         return "\(header).\(payload).sig"
     }
 
+    @Test(arguments: ["unchanged", "logout", "replacement", "authorization"])
+    func delayedRefreshEntryUsesOnlyTheSameAuthorization(change: String) async throws {
+        let original = OpenAICodexAuth.httpProvider
+        defer { OpenAICodexAuth.httpProvider = original }
+        let token = try Self.jwt(accountId: "synthetic-account")
+        let body = try JSONSerialization.data(withJSONObject: [
+            "access_token": token, "refresh_token": "synthetic-new-refresh", "expires_in": 3600
+        ])
+        let mock = MockHTTPProvider(responseData: body, statusCode: 200)
+        OpenAICodexAuth.httpProvider = mock
+        try OpenAICodexAuth.saveCredentials(OAuthCredentials(
+            accessToken: "synthetic-old", refreshToken: "synthetic-old-refresh", idToken: nil,
+            accountId: "synthetic-account", lastRefresh: .distantPast
+        ))
+        // Capture the delayed caller's input before another caller completes and
+        // clears the coordinator's in-flight task. No timing sleeps are needed.
+        let delayed = try #require(UnifiedAuthStorage.shared.loadChatGPTCredentialSnapshot())
+        #expect(try await OpenAICodexAuth.getValidAccessToken() == token)
+        if change == "logout" {
+            try OpenAICodexAuth.deleteCredentials()
+        } else if change == "replacement" {
+            // Even a replacement with the same account and token is a new login.
+            try OpenAICodexAuth.saveCredentials(delayed.credentials)
+        } else if change == "authorization" {
+            _ = UnifiedAuthStorage.shared.beginChatGPTAuthorization()
+        }
+        do {
+            let result = try await TokenRefreshCoordinator.shared.refreshIfNeeded(
+                delayed.credentials, generation: delayed.generation
+            )
+            #expect(change == "unchanged")
+            #expect(result.accessToken == token)
+        } catch {
+            #expect(change != "unchanged", "A completed same-authorization refresh must be reusable")
+            #expect(error as? AuthError == .credentialsChanged)
+        }
+        #expect(mock.requestCount == 1, "Delayed entry must not repeat a completed refresh or refresh retired work")
+    }
+
     @Test(arguments: [400, 401, 403, 429, 503])
     func transcriptionRetriesOnlyTransientRefreshFailures(status: Int) async throws {
         let original = OpenAICodexAuth.httpProvider

@@ -366,6 +366,14 @@ public actor ObservabilityStore {
         )
     }
 
+    #if DEBUG
+    /// Exercise a real kernel write failure without changing the user's disk.
+    func useReadOnlyEventsHandleForTesting() throws {
+        try handle?.close()
+        handle = try FileHandle(forReadingFrom: pathInfo.eventsFile)
+    }
+    #endif
+
     private func append(_ event: ObservabilityEvent) {
         do {
             let encoder = JSONEncoder()
@@ -375,11 +383,11 @@ public actor ObservabilityStore {
                 formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
                 try container.encode(formatter.string(from: date))
             }
-            let data = try encoder.encode(event)
-            try rotateIfNeeded(additionalBytes: UInt64(data.count + 1))
+            var data = try encoder.encode(event)
+            data.append(0x0A)
+            try rotateIfNeeded(additionalBytes: UInt64(data.count))
             guard let handle else { return }
-            handle.write(data)
-            handle.write(Data([0x0A])) // newline
+            try handle.write(contentsOf: data)
         } catch {
             // Best-effort diagnostics: observability must never crash product flows.
         }

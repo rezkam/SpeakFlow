@@ -34,6 +34,9 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
     /// Advanced by logout and by every successful ChatGPT credential save, so
     /// a refresh or login exchange that started earlier cannot commit.
     private var chatGPTGeneration: UInt64 = 0
+    /// Only successful refresh saves preserve these predecessor generations.
+    /// Logout, authorization, and replacement saves retire the entire lineage.
+    private var chatGPTRefreshPredecessors: Set<UInt64> = []
 
     private init() {
         fileURLOverride = nil
@@ -80,12 +83,33 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
     /// A new authorization supersedes older login exchanges and refreshes.
     public func beginChatGPTAuthorization() -> UInt64 {
         lock.withLockUnchecked { _ in
+            chatGPTRefreshPredecessors.removeAll()
             chatGPTGeneration &+= 1
             return chatGPTGeneration
         }
     }
 
     public func saveChatGPTCredentials(_ credentials: OAuthCredentials, expectedGeneration: UInt64? = nil) throws {
+        try saveChatGPTCredentials(credentials, expectedGeneration: expectedGeneration, isRefresh: false)
+    }
+
+    func saveRefreshedChatGPTCredentials(_ credentials: OAuthCredentials, expectedGeneration: UInt64) throws {
+        try saveChatGPTCredentials(credentials, expectedGeneration: expectedGeneration, isRefresh: true)
+    }
+
+    /// Resolve only a completed refresh of this authorization, never a new login.
+    func completedChatGPTRefresh(for generation: UInt64) -> OAuthCredentials? {
+        lock.withLockUnchecked { _ in
+            guard chatGPTRefreshPredecessors.contains(generation),
+                  let credentials = loadChatGPTUnlocked(),
+                  !credentials.shouldRefresh(after: 3600) else { return nil }
+            return credentials
+        }
+    }
+
+    private func saveChatGPTCredentials(
+        _ credentials: OAuthCredentials, expectedGeneration: UInt64?, isRefresh: Bool
+    ) throws {
         let iso8601 = ISO8601DateFormatter()
         iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
@@ -113,6 +137,11 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
             var content = try readFileUnlocked()
             content["chatgpt"] = sectionDict
             try writeFileUnlocked(content)
+            if isRefresh, let expectedGeneration {
+                chatGPTRefreshPredecessors.insert(expectedGeneration)
+            } else {
+                chatGPTRefreshPredecessors.removeAll()
+            }
             chatGPTGeneration &+= 1
         }
     }
@@ -154,6 +183,7 @@ public final class UnifiedAuthStorage: @unchecked Sendable {
     public func deleteChatGPTCredentials() throws {
         try lock.withLockUnchecked { _ in
             // Logout invalidates in-flight refreshes even if the removal fails.
+            chatGPTRefreshPredecessors.removeAll()
             chatGPTGeneration &+= 1
             var content = try readFileUnlocked()
             content.removeValue(forKey: "chatgpt")
