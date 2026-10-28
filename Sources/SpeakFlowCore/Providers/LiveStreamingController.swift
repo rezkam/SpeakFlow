@@ -646,6 +646,7 @@ public final class LiveStreamingController {
         // Explicit user action: suppress onSessionClosed for this shutdown path.
         suppressSessionClosedCallback = true
         startupGeneration &+= 1
+        let stopGeneration = startupGeneration
 
         // Cancel any in-flight reconnection attempt so it doesn't resume after we stop.
         reconnectTask?.cancel()
@@ -708,13 +709,25 @@ public final class LiveStreamingController {
                 }
             } catch { logger.debug("Session close failed: \(error.localizedDescription)") }
         }
+        // Cancellation or a replacement start owns the state after suspension.
+        guard startupGeneration == stopGeneration, !Task.isCancelled else { return }
         session = nil
 
         eventTask?.cancel()
         eventTask = nil
 
-        // Clear interim state
+        // Provider finals were only deferred to avoid premature short commits.
+        // Normal stop is terminal, but arbitrary interim text is not authoritative.
+        let retainedFinalText = deferredFinalSegments.map(\.transcript).filter { !$0.isEmpty }.joined(separator: " ")
         deferredFinalSegments.removeAll()
+        if !retainedFinalText.isEmpty {
+            let (deleted, suffix) = diffFromEnd(old: lastInterimText, new: retainedFinalText)
+            lastInterimText = ""
+            lastInterimCharCount = 0
+            onTextUpdate?(suffix, deleted, true, retainedFinalText)
+        }
+
+        // Clear interim state
         lastInterimText = ""
         lastInterimCharCount = 0
         transcriptionEventSequence = 0
@@ -1129,9 +1142,13 @@ public final class LiveStreamingController {
         guard result.start.isFinite, result.start >= 0,
               result.duration.isFinite, result.duration > 0 else {
             deferredFinalSegments.removeAll()
+            if retainFinal { deferredFinalSegments.append(result) }
             return result.transcript
         }
-        deferredFinalSegments.removeAll { $0.start + $0.duration > result.start + 0.000_001 }
+        deferredFinalSegments.removeAll {
+            !$0.start.isFinite || $0.start < 0 || !$0.duration.isFinite || $0.duration <= 0
+                || $0.start + $0.duration > result.start + 0.000_001
+        }
         let prefix = deferredFinalSegments.map(\.transcript)
         if retainFinal { deferredFinalSegments.append(result) }
         guard !prefix.isEmpty else { return result.transcript }

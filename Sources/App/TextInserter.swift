@@ -141,6 +141,8 @@ final class TextInserter: TextInserting {
     private var queueGeneration: UInt64 = 0
     private var streamingCommittedText = ""
     private var streamingPostedText = ""
+    private var pendingStreamingSnapshot: String?
+    private var streamingReconciliationQueued = false
     /// Monotonic operation sequence used to correlate queued text actions.
     private var operationSequence: UInt64 = 0
     private var observabilitySessionId: UUID?
@@ -261,37 +263,45 @@ final class TextInserter: TextInserting {
         let segment = sanitizeTextForInsertion(text)
         let desired = streamingCommittedText + segment + (isFinal && !segment.isEmpty ? " " : "")
         if isFinal { streamingCommittedText = desired }
-        guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
-            observabilityEvent("streaming_snapshot_dropped_queue_full", level: .warning)
-            return
-        }
+        pendingStreamingSnapshot = desired
+        guard !streamingReconciliationQueued else { return }
+        // One dedicated worker and one latest-snapshot slot stay bounded even when
+        // the ordinary insertion queue is full. Never drop the terminal snapshot.
+        streamingReconciliationQueued = true
         let operationId = nextOperationId()
         let generation = queueGeneration
         let previousTask = textInsertionTask
-        queuedInsertionCount += 1
         textInsertionTask = Task { @MainActor [weak self] in
-            defer { self?.decrementQueuedInsertionCount(for: generation) }
+            defer {
+                if let self, self.queueGeneration == generation {
+                    self.streamingReconciliationQueued = false
+                }
+            }
             await previousTask?.value
-            guard let self, self.queueGeneration == generation, !Task.isCancelled else { return }
-            let common = zip(self.streamingPostedText, desired).prefix { $0 == $1 }.count
-            let deleteCount = self.streamingPostedText.count - common
-            if deleteCount > 0 {
-                let completed = await self.deleteCharsAsync(
-                    deleteCount, operationId: operationId, generation: generation,
-                    onCharacterDeleted: { [weak self] in
+            guard let self else { return }
+            while self.queueGeneration == generation, !Task.isCancelled,
+                  let desired = self.pendingStreamingSnapshot {
+                self.pendingStreamingSnapshot = nil
+                let common = zip(self.streamingPostedText, desired).prefix { $0 == $1 }.count
+                let deleteCount = self.streamingPostedText.count - common
+                if deleteCount > 0 {
+                    let completed = await self.deleteCharsAsync(
+                        deleteCount, operationId: operationId, generation: generation,
+                        onCharacterDeleted: { [weak self] in
+                            guard let self, self.queueGeneration == generation else { return }
+                            self.streamingPostedText.removeLast()
+                        }
+                    )
+                    guard completed else { return }
+                }
+                await self.typeTextAsync(
+                    String(desired.dropFirst(common)), operationId: operationId, generation: generation,
+                    onCharacterPosted: { [weak self] character in
                         guard let self, self.queueGeneration == generation else { return }
-                        self.streamingPostedText.removeLast()
+                        self.streamingPostedText.append(character)
                     }
                 )
-                guard completed else { return }
             }
-            await self.typeTextAsync(
-                String(desired.dropFirst(common)), operationId: operationId, generation: generation,
-                onCharacterPosted: { [weak self] character in
-                    guard let self, self.queueGeneration == generation else { return }
-                    self.streamingPostedText.append(character)
-                }
-            )
         }
     }
 
@@ -535,6 +545,8 @@ final class TextInserter: TextInserting {
     /// Call this when the user manually stops recording or when an error occurs.
     /// This immediately stops all queued operations and clears the target element.
     func cancelAndReset() {
+        pendingStreamingSnapshot = nil
+        streamingReconciliationQueued = false
         streamingCommittedText = ""
         streamingPostedText = ""
         textInsertionTask?.cancel()
@@ -554,6 +566,8 @@ final class TextInserter: TextInserting {
     /// finished and were typed successfully). Unlike `cancelAndReset()`, this
     /// doesn't interrupt any tasks — it just resets state for the next session.
     func reset() {
+        pendingStreamingSnapshot = nil
+        streamingReconciliationQueued = false
         streamingCommittedText = ""
         streamingPostedText = ""
         textInsertionTask = nil
