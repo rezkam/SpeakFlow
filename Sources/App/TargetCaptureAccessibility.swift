@@ -14,7 +14,7 @@ struct TargetCaptureAccessibility {
     static var live: Self {
         Self(
             frontmostPid: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
-            prepareApplication: prepareApplication,
+            prepareApplication: { prepareApplication($0) },
             systemFocus: { focusedElement(of: AXUIElementCreateSystemWide()) },
             processId: {
                 var pid: pid_t = 0
@@ -30,9 +30,14 @@ struct TargetCaptureAccessibility {
         )
     }
 
-    private static func prepareApplication(_ pid: pid_t) -> AXError {
+    nonisolated static func prepareApplication(
+        _ pid: pid_t,
+        setAttribute: (AXUIElement, CFString, CFTypeRef) -> AXError = AXUIElementSetAttributeValue
+    ) -> AXError {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
+        // Electron documents this request, even when the attribute cannot be read back.
+        _ = setAttribute(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         let name = "AXEnhancedUserInterface" as CFString
         var enabled: CFTypeRef?
         if AXUIElementCopyAttributeValue(app, name, &enabled) == .success,
@@ -43,7 +48,7 @@ struct TargetCaptureAccessibility {
         guard settable.boolValue else { return .attributeUnsupported }
         // Some Electron versions enable the tree but return notImplemented.
         // Only a subsequent focused-element query can establish a valid target.
-        return AXUIElementSetAttributeValue(app, name, kCFBooleanTrue)
+        return setAttribute(app, name, kCFBooleanTrue)
     }
 
     private static func focusedElement(of element: AXUIElement) -> (AXError, AXUIElement?) {

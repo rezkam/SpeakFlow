@@ -12,6 +12,7 @@ import SpeakFlowCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var uiTestHarness: UITestHarnessController?
+    private let accessibilityPrewarmer = ApplicationAccessibilityPrewarmer()
     private var windowCloseObserver: Any?
     private var openMainWindowHandler: (() -> Void)?
     private var closeMainWindowHandler: (() -> Void)?
@@ -51,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // comes back; pick up a grant the permission poll may have missed.
         guard !isUITestMode else { return }
         PermissionController.shared.reconcileAccessibility()
+        accessibilityPrewarmer.start()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -111,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
         Logger.app.info("SpeakFlow ready - \(hotkeyName)")
 
+        accessibilityPrewarmer.start()
         recording.setupHotkey()
         recording.setupTranscriptionCallbacks()
 
@@ -237,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Termination
 
     func applicationWillTerminate(_ notification: Notification) {
+        accessibilityPrewarmer.stop()
         Task {
             await ObservabilityStore.shared.record(
                 component: "App",

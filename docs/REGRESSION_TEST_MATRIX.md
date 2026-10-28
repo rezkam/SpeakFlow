@@ -7,7 +7,7 @@ Run `make test-regression-core` and the serialized full suite with muted, isolat
 | --- | --- |
 | Corrections use successfully posted text, including queue rejection and partial typing/deletion | `StreamingTextDeliveryTests` |
 | Original-field evidence is required for text, deletion, and Enter | `TextInserterFieldIdentityTests` |
-| Activate the focused app's accessibility tree before capture; reject missing targets and app switches | `TextInserterTargetCaptureTests` |
+| Prewarm accessibility off the main actor on app activation; request Electron's manual accessibility API; capture only at the hotkey and reject missing targets/app switches | `ApplicationAccessibilityPreparationTests`, `TextInserterTargetCaptureTests` |
 | Batch deadline retires delivery before submit finishes | `RecordingCrossModeTests` |
 | Stop remains cancellable; finalization is exclusive; deferred errors retain recording identity | `RecordingControllerSessionIdentityTests` |
 | Retired tap callbacks cannot consume a new registration | `KeyInterceptorRegistrationTests` |
