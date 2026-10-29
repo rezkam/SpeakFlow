@@ -16,7 +16,7 @@ final class LoopbackTimingServer: @unchecked Sendable {
         let reply = response
         listener.newConnectionHandler = { connection in
             connection.start(queue: queue)
-            Self.receiveRequest(on: connection, progress: LoopbackRequestProgress(), reply: reply)
+            Self.receiveRequest(on: connection, queue: queue, progress: LoopbackRequestProgress(), reply: reply)
         }
         let readiness = AsyncThrowingStream<Void, Error> { continuation in
             listener.stateUpdateHandler = { state in
@@ -47,16 +47,20 @@ final class LoopbackTimingServer: @unchecked Sendable {
     func cancel() { listener.cancel() }
     deinit { listener.cancel() }
 
-    private static func receiveRequest(on connection: NWConnection, progress: LoopbackRequestProgress, reply: Data) {
+    private static func receiveRequest(on connection: NWConnection, queue: DispatchQueue,
+                                       progress: LoopbackRequestProgress, reply: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
             guard let data, error == nil else { connection.cancel(); return }
             var next = progress
             if next.receive(data) {
-                connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+                // Keep the response milestone distinct from upload completion on loopback.
+                queue.asyncAfter(deadline: .now() + .milliseconds(20)) {
+                    connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+                }
             } else if isComplete || next.isOversized {
                 connection.cancel()
             } else {
-                receiveRequest(on: connection, progress: next, reply: reply)
+                receiveRequest(on: connection, queue: queue, progress: next, reply: reply)
             }
         }
     }
