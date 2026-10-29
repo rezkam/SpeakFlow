@@ -75,6 +75,11 @@ private struct ControlPanelCommands: Commands {
     let appDelegate: AppDelegate
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button(UpdateController.shared.model.hasUpdate ? "Update Available…" : "Check for Updates…") {
+                UpdateController.shared.check()
+            }
+        }
         CommandGroup(replacing: .appTermination) {
             Button("Close Control Panel") {
                 appDelegate.closeControlPanel()
@@ -101,6 +106,10 @@ struct MenuBarView: View {
 
         Button("Open SpeakFlow...") {
             showSettingsWindow()
+        }
+
+        Button(UpdateController.shared.model.hasUpdate ? "Update Available…" : "Check for Updates…") {
+            UpdateController.shared.check()
         }
 
         Divider()

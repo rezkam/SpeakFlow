@@ -118,6 +118,38 @@ launches, quits the installed app, queries signing identities, notarizes or
 publishes. This is not Developer ID or Gatekeeper validation. Unlike this path,
 `make rc` and `make local` replace the installed app and launch a smoke test.
 
+## In-app updates
+
+Stable distribution builds use Sparkle with an Updates page in the settings sidebar.
+The app checks automatically by default. Downloading and restarting each require an
+explicit click. Restart is blocked while dictation, final transcription, or pending
+text insertion is active. The application menu and menu bar both open Updates.
+Direct downloads and Homebrew installations use the same in-app update flow.
+
+Release builds require `SPEAKFLOW_UPDATE_PUBLIC_KEY` (base64 Ed25519 public key)
+and `SPEAKFLOW_UPDATE_PRIVATE_KEY_FILE` (a private file containing the base64
+32-byte signing seed). Generate and retain the key using Sparkle's `generate_keys`
+tool. Keep the private key outside the repository and restrict access to release
+maintainers. Losing it prevents existing installations from trusting new updates.
+
+The release script embeds the public key, verifies the private/public pair, signs
+the final notarized DMG and appcast, verifies both signatures, and uploads both
+assets to the same stable release. By default, installed apps discover the feed at
+the repository's `releases/latest/download/appcast.xml` URL. Set
+`SPEAKFLOW_UPDATE_FEED_URL` before packaging to use a different stable HTTPS feed.
+Local and RC builds leave the updater disabled so they cannot enter the stable
+update channel. Publishing still uses the existing release confirmation flow.
+
+The Homebrew tap workflow marks the cask `auto_updates true`. Homebrew remains a
+valid way to upgrade; an in-app update does not invoke Homebrew or require its CLI.
+An older installation without the updater needs one manual upgrade to adopt it.
+
+For local end-to-end verification, a debug-only test bundle can set both
+`SPEAKFLOW_UPDATE_VERIFICATION=1` and `SPEAKFLOW_ISOLATED_STORAGE=1`.
+This skips microphone and hotkey setup, uses isolated stores, and permits a
+signed appcast on `http://localhost`. `SPEAKFLOW_UPDATE_APPEARANCE=dark` exercises
+the dark theme in that bundle. Release builds cannot enable this mode.
+
 ## Permissions
 
 SpeakFlow needs two permissions, both granted from the **General** tab in settings:

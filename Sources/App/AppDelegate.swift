@@ -19,8 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let terminationReasonProvider: @MainActor () -> OSType?
     private let terminationRequester: @MainActor () -> Void
     private var explicitTerminationRequested = false
+    var updateModel: UpdateModel = UpdateController.shared.model
     private let launchDefaults = RuntimeIsolation.current.makeDefaults(prefix: "app.launch.tests")
-    private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1"
+    private let isUITestMode = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MODE"] == "1" || UpdateVerification.isEnabled
     private let useMockRecordingInUITests = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_MOCK_RECORDING"] != "0"
     private let resetUITestState = ProcessInfo.processInfo.environment["SPEAKFLOW_UI_TEST_RESET_STATE"] == "1"
     private let uiTestHotkeyCycle: [HotkeyType] = [.controlOptionD, .controlOptionSpace, .commandShiftD]
@@ -45,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// We always show the settings window on launch so the user can review their setup.
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        if UpdateVerification.isEnabled,
+           ProcessInfo.processInfo.environment["SPEAKFLOW_UPDATE_APPEARANCE"] == "dark" {
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -113,11 +118,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName
         Logger.app.info("SpeakFlow ready - \(hotkeyName)")
 
-        accessibilityPrewarmer.start()
-        recording.setupHotkey()
+        if !UpdateVerification.isEnabled {
+            accessibilityPrewarmer.start()
+            recording.setupHotkey()
+        }
         recording.setupTranscriptionCallbacks()
 
-        if isUITestMode { setupUITestHarness() }
+        if isUITestMode && !UpdateVerification.isEnabled { setupUITestHarness() }
 
         AppState.shared.refresh()
         setupWindowLifecycleObservers()
@@ -125,7 +132,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Bring settings window to front on launch
         NSApp.activate(ignoringOtherApps: true)
 
+        if !isUITestMode || UpdateVerification.isEnabled {
+            UpdateController.shared.presentWindow = { [weak self] in self?.openUpdatesWindow() }
+            UpdateController.shared.start()
+        }
         recordSuccessfulLaunch()
+    }
+
+    private func openUpdatesWindow() {
+        NSApp.setActivationPolicy(.regular)
+        openMainWindowHandler?()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func recordSuccessfulLaunch() {
@@ -140,6 +157,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Treat ordinary Quit requests, including Dock Quit, as control-panel close requests.
     /// Shutdown, restart, logout, system-wide Quit All, and the explicit menu action terminate normally.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if updateModel.installationAuthorized {
+            if updateModel.permitsUpdateTermination { return .terminateNow }
+            updateModel.terminationDenied()
+            return .terminateCancel
+        }
         if explicitTerminationRequested {
             return .terminateNow
         }

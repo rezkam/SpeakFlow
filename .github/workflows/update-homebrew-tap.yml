@@ -124,6 +124,13 @@ jobs:
           sed -i "s@^  version \"[^\"]*\"@  version \"$VERSION\"@" "$CASK_FILE"
           sed -i "s@^  sha256 \"[^\"]*\"@  sha256 \"$SHA256\"@" "$CASK_FILE"
 
+          # Both direct and Homebrew installs use the same in-app updater.
+          if grep -q '^  auto_updates ' "$CASK_FILE"; then
+            sed -i 's/^  auto_updates .*/  auto_updates true/' "$CASK_FILE"
+          else
+            sed -i '/^  sha256 /a\  auto_updates true' "$CASK_FILE"
+          fi
+
           echo "Verifying cask updates..."
           if ! grep -q "^  version \"$VERSION\"" "$CASK_FILE"; then
             echo "Failed to update version in cask"

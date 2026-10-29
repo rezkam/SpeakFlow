@@ -98,6 +98,7 @@ final class RecordingController {
     var uiTestToggleCount = 0
     /// Called after recording state changes (used by UI test harness).
     var onStateChanged: (() -> Void)?
+    var updateInstallationInProgress: () -> Bool = { UpdateController.shared.model.installationAuthorized }
 
     // No longer used — batch finalization uses an adaptive deadline (see startBatchFinalization).
 
@@ -259,6 +260,7 @@ final class RecordingController {
     // MARK: - Start Recording
 
     func startRecording() {
+        guard !updateInstallationInProgress() else { return }
         guard !isRecording else { return }
         resetRecordingErrorPresentation()
         session.latestStreamingError = nil

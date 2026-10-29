@@ -2,6 +2,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 args=(-c release --product SpeakFlow --disable-local-rpath
+      -Xlinker -rpath -Xlinker @executable_path/../Frameworks
       -Xswiftc -file-prefix-map -Xswiftc "$PWD=."
       -Xcc "-ffile-prefix-map=$PWD=." "$@")
 BIN="$(swift build "${args[@]}" --show-bin-path)"

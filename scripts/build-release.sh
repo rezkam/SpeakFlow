@@ -199,6 +199,19 @@ if [[ "$MODE" == "release" ]]; then
     : "${SPEAKFLOW_NOTARY_PROFILE:?SPEAKFLOW_NOTARY_PROFILE is not set — see script header}"
 fi
 
+# Repository-hosted feed follows the latest stable release asset.
+UPDATE_FEED_URL="${SPEAKFLOW_UPDATE_FEED_URL:-}"
+UPDATE_ENABLED=0
+if [[ "$MODE" == "release" ]]; then
+    : "${SPEAKFLOW_UPDATE_PUBLIC_KEY:?Set the public Sparkle update key}"
+    : "${SPEAKFLOW_UPDATE_PRIVATE_KEY_FILE:?Set the private Sparkle signing key file}"
+    swift scripts/verify-update-key.swift "$SPEAKFLOW_UPDATE_PRIVATE_KEY_FILE" \
+        || fail "Update signing key does not match the public key"
+    UPDATE_REPO_URL="$(gh repo view --json url -q .url)"
+    UPDATE_FEED_URL="${UPDATE_FEED_URL:-$UPDATE_REPO_URL/releases/latest/download/appcast.xml}"
+    UPDATE_ENABLED=1
+fi
+
 BUNDLE_ID="$SPEAKFLOW_BUNDLE_ID"
 SIGNING_IDENTITY="$SPEAKFLOW_SIGNING_IDENTITY"
 NOTARY_PROFILE="${SPEAKFLOW_NOTARY_PROFILE:-}"
@@ -509,6 +522,9 @@ cp "$BUILT_BINARY" "$APP_NAME.app/Contents/MacOS/"
 # Include dependency resources as well as the executable's own resources.
 swift scripts/release-resources.swift package "$BUILD_ROOT/release" "$APP_NAME.app"
 
+# Updater helpers are executable nested bundles, not SwiftPM resource bundles.
+bash scripts/embed-sparkle.sh "$BUILD_ROOT/release" "$APP_NAME.app"
+
 # App icon
 ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET_DIR"
@@ -550,6 +566,12 @@ cat > "$APP_NAME.app/Contents/Info.plist" << PLIST
 </dict>
 </plist>
 PLIST
+
+UPDATE_CONFIG_ARGS=(configure "$APP_NAME.app")
+if [[ "$UPDATE_ENABLED" == 1 ]]; then
+    UPDATE_CONFIG_ARGS+=(--enabled --feed "$UPDATE_FEED_URL")
+fi
+python3 scripts/update-release.py "${UPDATE_CONFIG_ARGS[@]}" || fail "Invalid update configuration"
 
 ok "App bundle assembled"
 
@@ -741,7 +763,17 @@ else
     info "Creating release v${DISPLAY_VERSION}..."
     NOTES_FILE="$(mktemp)"
     printf '%s' "$NOTES" > "$NOTES_FILE"
-    gh release create "v${DISPLAY_VERSION}" "$APP_NAME.dmg" \
+    UPDATE_OUTPUT="$BUILD_ROOT/update-feed"
+    mkdir -p "$UPDATE_OUTPUT"
+    printf '%s' "$NOTES" > "$UPDATE_OUTPUT/notes.txt"
+    SPARKLE_TOOLS="$BUILD_ROOT/artifacts/sparkle/Sparkle/bin"
+    python3 scripts/update-release.py appcast \
+        --archive "$APP_NAME.dmg" \
+        --download-url "$UPDATE_REPO_URL/releases/download/v${DISPLAY_VERSION}/$APP_NAME.dmg" \
+        --version "$MARKETING_VERSION" --notes "$UPDATE_OUTPUT/notes.txt" \
+        --tools "$SPARKLE_TOOLS" --output "$UPDATE_OUTPUT/appcast.xml" \
+        || fail "Update archive or feed signing failed"
+    gh release create "v${DISPLAY_VERSION}" "$APP_NAME.dmg" "$UPDATE_OUTPUT/appcast.xml" \
         --target "$(git rev-parse HEAD)" \
         --title "v${DISPLAY_VERSION}" \
         --notes-file "$NOTES_FILE" \
