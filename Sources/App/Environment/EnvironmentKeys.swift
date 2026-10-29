@@ -65,3 +65,14 @@ extension EnvironmentValues {
         set { self[StatisticsKey.self] = newValue }
     }
 }
+
+private struct MicrophoneSelectionKey: @preconcurrency EnvironmentKey {
+    @MainActor static let defaultValue = MicrophoneSelection.shared
+}
+
+extension EnvironmentValues {
+    var microphoneSelection: MicrophoneSelection {
+        get { self[MicrophoneSelectionKey.self] }
+        set { self[MicrophoneSelectionKey.self] = newValue }
+    }
+}

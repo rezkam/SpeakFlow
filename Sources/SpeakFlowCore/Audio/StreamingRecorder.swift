@@ -145,8 +145,7 @@ func createOneShotInputBlock(buffer: AVAudioPCMBuffer) -> AVAudioConverterInputB
 }
 
 /// Install audio tap outside MainActor context to avoid isolation assertions.
-private func installAudioTap(
-    on inputNode: AVAudioInputNode,
+private func makeRecordingConsumer(
     inputFormat: AVAudioFormat,
     outputFormat: AVAudioFormat,
     converter: AVAudioConverter,
@@ -154,10 +153,10 @@ private func installAudioTap(
     sampleQueue: AudioSampleQueue,
     silenceThreshold: Float,
     targetSampleRate: Double
-) {
+) -> MicrophoneBufferConsumer {
     let inputSampleRate = inputFormat.sampleRate
 
-    inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, _ in
+    return { buffer in
         guard recordingState.getRecording() else { return }
 
         let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * targetSampleRate / inputSampleRate)
@@ -187,7 +186,8 @@ private func installAudioTap(
 /// Records audio and streams chunks for transcription with VAD support
 @MainActor
 public final class StreamingRecorder {
-    private var audioEngine: AVAudioEngine?
+    private var microphoneCapture: RoutedMicrophoneCapture?
+    public var onCaptureError: ((Error) -> Void)?
     private var audioBuffer: AudioBuffer?
     private var checkTimer: Timer?
     private var processingTimer: Timer?
@@ -233,14 +233,17 @@ public final class StreamingRecorder {
     /// Throttle for periodic diagnostic heartbeat (every ~2s)
     private var lastHeartbeatLog: Date = .distantPast
 
+    private let microphoneSelection: MicrophoneSelection?
     private let settings: any SettingsProviding
 
     private let playSoundEffect: (SoundEffect) -> Void
 
     public init(
         settings: any SettingsProviding = Settings.shared,
+        microphoneSelection: MicrophoneSelection? = nil,
         playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
     ) {
+        self.microphoneSelection = microphoneSelection
         self.settings = settings
         self.playSoundEffect = playSoundEffect
     }
@@ -253,8 +256,8 @@ public final class StreamingRecorder {
     private static func shouldIsolateTestAudioCapture() -> Bool {
         let env = ProcessInfo.processInfo.environment
         let isolate = env["SPEAKFLOW_ISOLATE_TEST_AUDIO"] ?? "1"
-        let allowAudioEngine = env["SPEAKFLOW_ALLOW_TEST_AUDIO_ENGINE"] == "1"
-        return isTestRuntime() && isolate != "0" && !allowAudioEngine
+        let allowAudioCapture = env["SPEAKFLOW_ALLOW_TEST_AUDIO_CAPTURE"] == "1"
+        return isTestRuntime() && isolate != "0" && !allowAudioCapture
     }
 
     private func observabilityEvent(
@@ -348,7 +351,7 @@ public final class StreamingRecorder {
     }
 
     /// Start recording audio.
-    /// Returns `true` if the audio engine started successfully, `false` on failure.
+    /// Returns `true` if the audio capture started successfully, `false` on failure.
     /// On failure, all state is rolled back (engine, buffer, flags cleaned up).
     @discardableResult
     public func start() async -> Bool {
@@ -386,13 +389,12 @@ public final class StreamingRecorder {
             idleNudgeController?.stopMonitoring()
             idleNudgeController = nil
             turnClassifier = nil
-            audioEngine = nil
             audioBuffer = nil
             return false
         }
 
         if Self.shouldIsolateTestAudioCapture() {
-            Logger.audio.info("Test runtime detected — starting recorder without audio engine")
+            Logger.audio.info("Test runtime detected, starting recorder without audio capture")
             observabilityEvent(
                 "start_succeeded_test_isolated",
                 level: .warning,
@@ -402,49 +404,9 @@ public final class StreamingRecorder {
             return true
         }
 
-        audioEngine = AVAudioEngine()
-        guard let engine = audioEngine else { return false }
-
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-        guard let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            Logger.audio.error("Failed to create output audio format")
-            observabilityEvent("start_failed_output_format", level: .error)
-            audioEngine = nil
-            return false
-        }
-        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            Logger.audio.error("Failed to create audio converter")
-            observabilityEvent("start_failed_converter", level: .error)
-            audioEngine = nil
-            return false
-        }
-
-        // Capture references for use in audio callback (NO self capture)
-        let recordingState = self.state
-        let sampleQueue = self.sampleQueue
-        let silenceThreshold = Config.silenceThreshold
-        let targetSampleRate = self.sampleRate
-
-        // Install tap using nonisolated helper to avoid actor context in closure
-        installAudioTap(
-            on: inputNode,
-            inputFormat: inputFormat,
-            outputFormat: outputFormat,
-            converter: converter,
-            recordingState: recordingState,
-            sampleQueue: sampleQueue,
-            silenceThreshold: silenceThreshold,
-            targetSampleRate: targetSampleRate
-        )
-
         do {
-            try engine.start()
+            try await startMicrophoneCapture()
+            guard state.getRecording() else { return false }
             let settings = self.settings
             let isFullRecording = settings.chunkDuration.isFullRecording
 
@@ -463,15 +425,15 @@ public final class StreamingRecorder {
             startTimers()
             return true
         } catch {
-            Logger.audio.error("Failed to start audio engine: \(error.localizedDescription)")
+            Logger.audio.error("Failed to start audio capture: \(error.localizedDescription)")
             observabilityEvent(
                 "start_failed_audio_engine",
                 level: .error,
                 metadata: ["error": error.localizedDescription]
             )
             // Rollback all state on failure
-            engine.inputNode.removeTap(onBus: 0)
-            audioEngine = nil
+            microphoneCapture?.stop()
+            microphoneCapture = nil
             audioBuffer = nil
             state.setRecording(false)
             await audioFilter?.stop()
@@ -483,6 +445,30 @@ public final class StreamingRecorder {
             sessionController = nil
             sessionStartDate = nil
             return false
+        }
+    }
+
+    private func startMicrophoneCapture() async throws {
+        let capture = RoutedMicrophoneCapture(selection: microphoneSelection ?? .shared)
+        let recordingState = state
+        let queue = sampleQueue
+        let targetSampleRate = sampleRate
+        let silenceThreshold = Config.silenceThreshold
+        capture.onFailure = { [weak self] error in self?.onCaptureError?(error) }
+        microphoneCapture = capture
+        try await capture.start { inputFormat in
+            guard let outputFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32, sampleRate: targetSampleRate,
+                channels: 1, interleaved: false
+            ), let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+                throw MicrophoneError.invalidFormat
+            }
+            return makeRecordingConsumer(
+                inputFormat: inputFormat, outputFormat: outputFormat,
+                converter: converter, recordingState: recordingState,
+                sampleQueue: queue, silenceThreshold: silenceThreshold,
+                targetSampleRate: targetSampleRate
+            )
         }
     }
 
@@ -915,8 +901,8 @@ public final class StreamingRecorder {
         idleNudgeController?.stopMonitoring()
         turnClassifier = nil
 
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
+        microphoneCapture?.stop()
+        microphoneCapture = nil
 
         let hadVADActive = state.getVADActive()
         let filter = audioFilter
@@ -1239,7 +1225,7 @@ extension StreamingRecorder {
 
     var _testHasProcessingTimer: Bool { processingTimer != nil }
     var _testHasCheckTimer: Bool { checkTimer != nil }
-    var _testHasAudioEngine: Bool { audioEngine != nil }
+    var _testHasAudioCapture: Bool { microphoneCapture != nil }
     var _testHasAudioBuffer: Bool { audioBuffer != nil }
     var _testIsRecording: Bool { state.getRecording() }
 }

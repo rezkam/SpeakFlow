@@ -19,6 +19,7 @@ struct GeneralSettingsView: View {
         let _ = state.refreshVersion
         VStack(alignment: .leading, spacing: 18) {
             banner
+            MicrophoneSettingsView(isRecording: state.isRecording, permissionGranted: state.microphoneGranted)
             permissionsSection
             activationSection
             behaviorSection

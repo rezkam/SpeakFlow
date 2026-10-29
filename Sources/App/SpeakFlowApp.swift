@@ -15,6 +15,7 @@ struct SpeakFlowApp: App {
     var body: some Scene {
         Window("SpeakFlow", id: "main") {
             MainSettingsView()
+                .environment(\.microphoneSelection, MicrophoneUIPreview.selection)
                 .environment(\.appState, AppState.shared)
                 .environment(\.recordingController, RecordingController.shared)
                 .environment(\.permissionController, PermissionController.shared)
@@ -26,10 +27,18 @@ struct SpeakFlowApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             ControlPanelCommands(appDelegate: appDelegate)
+            #if DEBUG
+            if MicrophoneUIPreview.enabled {
+                CommandMenu("UI Preview") {
+                    Button("Show app menu") { MicrophoneUIPreview.showMenu(appDelegate: appDelegate) }
+                }
+            }
+            #endif
         }
 
         MenuBarExtra {
             MenuBarView(appDelegate: appDelegate)
+                .environment(\.microphoneSelection, MicrophoneUIPreview.selection)
         } label: {
             // Use the custom app icon from the bundle for the menu bar
             if let icon = Self.menuBarIcon {
@@ -109,6 +118,8 @@ struct MenuBarView: View {
             recordingController.toggle()
         }
         .disabled(!state.isRecording && !state.canStartDictation)
+
+        MicrophoneMenu(isRecording: state.isRecording)
 
         // Show provider switcher when more than one provider is configured
         let configured = ProviderRegistry.shared.configuredProviders

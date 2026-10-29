@@ -385,6 +385,11 @@ final class RecordingController {
         let generation = session.generation
         let startingRecorder = StreamingRecorder()
         recorder = startingRecorder
+        startingRecorder.onCaptureError = { [weak self] error in
+            guard let self, self.owns(generation), self.isRecording else { return }
+            self.presentRecordingError(error, providerId: provider.id)
+            self.stopRecording(reason: .unknown)
+        }
         startingRecorder.onChunkReady = { [weak self] chunk in
             // The recorder awaits acceptance, including final ticket allocation.
             guard let self, self.owns(generation) else {
@@ -888,10 +893,10 @@ extension RecordingController {
         )
 
         // Unit tests set testMode = .live to skip permission checks while still
-        // exercising the real code paths. Passing skipAudioEngineForTesting = true
+        // exercising the real code paths. Passing skipAudioCaptureForTesting = true
         // ensures start() never touches the real microphone, installs audio taps,
         // or consumes mic permissions — no host-OS side-effects from tests.
-        let controller = LiveStreamingController(skipAudioEngineForTesting: testMode == .live)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: testMode == .live)
         self.liveStreamingController = controller
         let generation = session.generation
         let metricsSessionId = currentMetricsSessionId

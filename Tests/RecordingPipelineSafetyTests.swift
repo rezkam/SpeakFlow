@@ -97,7 +97,7 @@ struct LiveStreamingStopDrainTests {
     private func startController(session: SlowRecordingSession) async -> LiveStreamingController {
         let provider = MockStreamingProvider()
         provider.mockSession = session
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         _ = await controller.start(provider: provider, config: .default)
         return controller
     }
@@ -122,7 +122,7 @@ struct LiveStreamingStopDrainTests {
         let session = SuspendedUploadSession()
         let provider = MockStreamingProvider()
         provider.mockSession = session
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         #expect(await controller.start(provider: provider, config: .default))
         controller.stopDrainTimeout = .seconds(10)
         controller._testEnqueueAudioFrame(Data([1]))
@@ -246,7 +246,7 @@ struct LiveStreamingFinalLatencyTests {
     ) async throws -> LiveStreamingController {
         let provider = MockStreamingProvider()
         provider.mockSession = session
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         _ = await controller.start(provider: provider, config: StreamingSessionConfig(sampleRate: sampleRate))
         controller._testEnqueueAudioFrame(Data(repeating: 0, count: 3200), capturedAt: capturedAt)
         try await waitUntilAsync { await !session.sentAudioChunks.isEmpty }
@@ -278,7 +278,7 @@ struct LiveStreamingFinalLatencyTests {
         let second = MockStreamingSession()
         let provider = MultiSessionMockProvider()
         provider.sessions = [first, second]
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller.keepAliveEnabled = false
         controller.reconnectEnabled = true
         defer { Task { await controller.cancel() } }
@@ -310,7 +310,7 @@ struct LiveStreamingFinalLatencyTests {
     @MainActor @Test
     func droppedAudioDoesNotInflateLatencyForSurvivingFrames() async throws {
         let session = SuspendedUploadSession()
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         defer { Task { await controller.cancel() } }
         var samples: [Double] = []
         controller.onFinalLatency = { samples.append($0) }
@@ -373,7 +373,7 @@ struct LiveStreamingFinalLatencyTests {
     @MainActor @Test
     func boundedTimingHistoryKeepsRecentFinalsWithoutGuessingEvictedOnes() async throws {
         let session = MockStreamingSession()
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller._testSetAudioSessionRefActive(true, session: session)
         var samples: [Double] = []
         controller.onFinalLatency = { samples.append($0) }
