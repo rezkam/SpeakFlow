@@ -55,7 +55,7 @@ def create_appcast(archive, download_url, version, notes, signature, output):
     ET.SubElement(item, f"{{{SPARKLE}}}version").text = version
     ET.SubElement(item, f"{{{SPARKLE}}}shortVersionString").text = version
     ET.SubElement(item, f"{{{SPARKLE}}}minimumSystemVersion").text = "26.0"
-    ET.SubElement(item, "description", {f"{{{SPARKLE}}}descriptionFormat": "plain-text"}).text = notes
+    ET.SubElement(item, "description", {f"{{{SPARKLE}}}format": "plain-text"}).text = notes
     ET.SubElement(item, "enclosure", {
         "url": download_url,
         "length": str(Path(archive).stat().st_size),
