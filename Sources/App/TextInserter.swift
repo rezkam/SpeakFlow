@@ -342,6 +342,7 @@ final class TextInserter: TextInserting {
     /// Provider diffs describe intent, not delivery. Compute the actual correction
     /// only when this snapshot reaches the queue head, using posted key pairs.
     func updateStreamingText(_ text: String, isFinal: Bool) {
+        adoptClearedFieldAfterCompletedSegment()
         streamingOwnershipActive = true
         let segment = sanitizeTextForInsertion(text)
         let desired = streamingCommittedText + segment + (isFinal && !segment.isEmpty ? " " : "")
@@ -387,6 +388,21 @@ final class TextInserter: TextInserting {
                 )
             }
         }
+    }
+
+    private func adoptClearedFieldAfterCompletedSegment() {
+        // Clearing a settled utterance retires its text, not the next utterance.
+        // Never rebase while a key or provider revision may still be in flight.
+        guard !streamingDeliveryFailed, !streamingReconciliationQueued,
+              pendingStreamingSnapshot == nil, queuedInsertionCount == 0,
+              !streamingPostedText.isEmpty, streamingPostedText == streamingCommittedText,
+              isTargetAppFrontmost(), let current = editorSnapshot(),
+              current.text.isEmpty, current.selection == NSRange(location: 0, length: 0) else { return }
+        expectedEditorSnapshot = current
+        ownedStart = 0
+        streamingCommittedText = ""
+        streamingPostedText = ""
+        streamingDesiredText = ""
     }
 
     /// Queues an atomic tail replacement (delete then type) as a single queue item.

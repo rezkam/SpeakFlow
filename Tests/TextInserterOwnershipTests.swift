@@ -52,6 +52,50 @@ struct TextInserterOwnershipTests {
         }
     }
 
+    @Test @MainActor func clearingCompletedDictationAllowsTheNextUtterance() async {
+        let editor = Editor()
+        let inserter = editor.inserter()
+        inserter.updateStreamingText("first utterance", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        #expect(editor.text == "prefix first utterance ")
+        editor.text = ""
+        editor.selection = NSRange(location: 0, length: 0)
+        inserter.updateStreamingText("next utterance", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        #expect(editor.text == "next utterance ")
+        #expect(!editor.keys.contains(51), "Cleared text must never authorize Backspace")
+    }
+
+    @Test @MainActor func clearingADifferentFieldDoesNotRetargetDictation() async {
+        let editor = Editor()
+        let inserter = editor.inserter()
+        inserter.updateStreamingText("first utterance", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        let posted = editor.keys.count
+        editor.text = ""
+        editor.selection = NSRange(location: 0, length: 0)
+        inserter.testIsTargetFrontmost = false
+        inserter._testSetFocusWaitTimeout(0)
+        inserter.updateStreamingText("next utterance", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        #expect(editor.keys.count == posted)
+        #expect(editor.text.isEmpty)
+    }
+
+    @Test @MainActor func aNewRecordingCanStartInTheClearedField() async {
+        let editor = Editor()
+        let inserter = editor.inserter()
+        inserter.updateStreamingText("first utterance", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        inserter.reset()
+        editor.text = ""
+        editor.selection = NSRange(location: 0, length: 0)
+        #expect(inserter.captureTarget())
+        inserter.updateStreamingText("next utterance", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        #expect(editor.text == "next utterance ")
+    }
+
     @Test @MainActor func movedCaretCannotDeleteExistingContentOrSubmit() async {
         let editor = Editor()
         let inserter = editor.inserter()
