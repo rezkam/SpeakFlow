@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// A loopback-only fixture. It never captures or logs incoming request bytes.
+/// A loopback-only fixture. It never persists or logs incoming request bytes.
 final class LoopbackTimingServer: @unchecked Sendable {
     private let listener: NWListener
 
@@ -16,10 +16,7 @@ final class LoopbackTimingServer: @unchecked Sendable {
         let reply = response
         listener.newConnectionHandler = { connection in
             connection.start(queue: queue)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, error in
-                guard error == nil else { connection.cancel(); return }
-                connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
-            }
+            Self.receiveUpload(connection, queue: queue, reply: reply)
         }
         let readiness = AsyncThrowingStream<Void, Error> { continuation in
             listener.stateUpdateHandler = { state in
@@ -33,6 +30,32 @@ final class LoopbackTimingServer: @unchecked Sendable {
         }
         listener.start(queue: queue)
         for try await _ in readiness { break }
+    }
+
+    private static func receiveUpload(_ connection: NWConnection, queue: DispatchQueue,
+                                      reply: Data, accumulated: Data = Data()) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
+            guard error == nil else { connection.cancel(); return }
+            var bytes = accumulated
+            bytes.append(data ?? Data())
+            if let boundary = bytes.range(of: Data("\r\n\r\n".utf8)) {
+                let headers = String(decoding: bytes[..<boundary.lowerBound], as: UTF8.self)
+                let lengthHeader = headers.components(separatedBy: "\r\n")
+                    .first { $0.lowercased().hasPrefix("content-length:") }
+                let value = lengthHeader?.split(separator: ":", maxSplits: 1).last?
+                    .trimmingCharacters(in: .whitespaces) ?? "0"
+                guard let length = Int(value), length >= 0 else { connection.cancel(); return }
+                if bytes.count - boundary.upperBound >= length {
+                    // Keep the response milestone distinct from upload completion on loopback.
+                    queue.asyncAfter(deadline: .now() + .milliseconds(20)) {
+                        connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+                    }
+                    return
+                }
+            }
+            guard !complete else { connection.cancel(); return }
+            receiveUpload(connection, queue: queue, reply: reply, accumulated: bytes)
+        }
     }
 
     func request() -> URLRequest {
