@@ -414,7 +414,7 @@ struct WebSocketReconnectIntegrationTests {
         let provider = MultiSessionMockProvider()
         provider.sessions = [initialSession, reconnectedSession]
 
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller.keepAliveEnabled = false
         controller.reconnectEnabled = true
 

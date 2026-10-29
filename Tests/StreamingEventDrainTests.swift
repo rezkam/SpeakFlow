@@ -43,7 +43,7 @@ struct StreamingEventDrainTests {
         let session = CloseFinalSession()
         let provider = MockStreamingProvider()
         provider.mockSession = session
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller.keepAliveEnabled = false
         let collector = TextUpdateCollector()
         collector.wire(controller)
@@ -118,7 +118,7 @@ struct StreamingEventDrainTests {
         let session = CloseFinalSession(finishes: false)
         let provider = MockStreamingProvider()
         provider.mockSession = session
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller.keepAliveEnabled = false
         controller.controlMessageTimeout = 0.05
         try #require(await controller.start(provider: provider, config: .default))
@@ -133,7 +133,7 @@ struct StreamingEventDrainTests {
         let session = CloseFinalSession()
         let provider = MockStreamingProvider()
         provider.mockSession = session
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller.keepAliveEnabled = false
         controller.controlMessageTimeout = 0.05
         let collector = TextUpdateCollector()
@@ -153,7 +153,7 @@ struct StreamingEventDrainTests {
         let session = CloseFinalSession()
         let provider = MockStreamingProvider()
         provider.mockSession = session
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller.keepAliveEnabled = false
         let collector = TextUpdateCollector()
         collector.wire(controller)

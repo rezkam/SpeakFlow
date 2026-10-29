@@ -425,12 +425,12 @@ struct ReconnectLifecycleTests {
 
     // ── 3d: stop() tears down mic capture even when isActive is false ──────
 
-    /// During reconnection, isActive is false but the audio engine is intentionally
+    /// During reconnection, isActive is false but the audio capture is intentionally
     /// left running for seamless reconnect. If the user presses stop during that
     /// window, the mic MUST be immediately torn down — not left running until the
     /// reconnect task unwinds.
-    @MainActor @Test("stop() during reconnect tears down audio engine immediately")
-    func stopDuringReconnectTearsDownEngine() async throws {
+    @MainActor @Test("stop() during reconnect tears down audio capture immediately")
+    func stopDuringReconnectTearsDownCapture() async throws {
         let provider = MultiSessionMockProvider()
         provider.sessions = [MockStreamingSession()]
         provider.reconnectDelay = 2.0  // slow reconnect
@@ -442,31 +442,31 @@ struct ReconnectLifecycleTests {
         c.reconnectProvider = provider
         c.reconnectConfig = .default
 
-        // Simulate an active audio engine (normally set by start())
-        c._testSetAudioEngine(AVAudioEngine())
-        #expect(c._testAudioEngineIsNil == false, "Pre-condition: engine is set")
+        // Simulate an active audio capture (normally set by start())
+        c._testSetAudioCapture(RoutedMicrophoneCapture())
+        #expect(c._testAudioCaptureIsNil == false, "Pre-condition: engine is set")
 
         // Trigger unexpected close → reconnect starts, isActive set to false
         c.handleEvent(.closed)
         try await Task.sleep(for: .milliseconds(50))
         #expect(c.isActive == false, "isActive is false during reconnect")
 
-        // Audio engine should STILL be running (for seamless reconnect)
-        #expect(c._testAudioEngineIsNil == false,
+        // Audio capture should STILL be running (for seamless reconnect)
+        #expect(c._testAudioCaptureIsNil == false,
                 "Engine kept alive during reconnect for seamless audio")
 
         // User calls stop() — engine must be torn down immediately
         await c.stop()
 
-        #expect(c._testAudioEngineIsNil == true,
-                "stop() must tear down audio engine even when isActive is false")
+        #expect(c._testAudioCaptureIsNil == true,
+                "stop() must tear down audio capture even when isActive is false")
         #expect(c._testAudioSessionRefActive == false,
                 "Audio session ref must be cleared on stop")
     }
 
     /// cancel() must also tear down the engine during reconnect.
-    @MainActor @Test("cancel() during reconnect tears down audio engine immediately")
-    func cancelDuringReconnectTearsDownEngine() async throws {
+    @MainActor @Test("cancel() during reconnect tears down audio capture immediately")
+    func cancelDuringReconnectTearsDownCapture() async throws {
         let provider = MultiSessionMockProvider()
         provider.sessions = [MockStreamingSession()]
         provider.reconnectDelay = 2.0
@@ -478,15 +478,15 @@ struct ReconnectLifecycleTests {
         c.reconnectProvider = provider
         c.reconnectConfig = .default
 
-        c._testSetAudioEngine(AVAudioEngine())
+        c._testSetAudioCapture(RoutedMicrophoneCapture())
 
         c.handleEvent(.closed)
         try await Task.sleep(for: .milliseconds(50))
 
         await c.cancel()
 
-        #expect(c._testAudioEngineIsNil == true,
-                "cancel() must tear down audio engine even when isActive is false")
+        #expect(c._testAudioCaptureIsNil == true,
+                "cancel() must tear down audio capture even when isActive is false")
     }
 
     // ── 3e: User-cancelled reconnect does NOT fire onSessionClosed ─────────
@@ -739,7 +739,7 @@ struct LiveStreamingAudioBufferingTests {
 
         do {
             var controller: LiveStreamingController? = LiveStreamingController(
-                skipAudioEngineForTesting: true
+                skipAudioCaptureForTesting: true
             )
             weakController = controller
             controller?._testSetAudioSessionRefDeinitHandler {
@@ -761,7 +761,7 @@ struct LiveStreamingAudioBufferingTests {
 
     @MainActor @Test("Terminal stop explicitly shuts down the audio sender")
     func terminalStopShutsDownAudioSender() async {
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
 
         await controller.stop(trailingFinalTimeout: 0)
 
@@ -770,7 +770,7 @@ struct LiveStreamingAudioBufferingTests {
 
     @MainActor @Test("Failed startup cleanup explicitly shuts down the audio sender")
     func failedStartupShutsDownAudioSender() async {
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         let provider = MockStreamingProvider()
         provider.shouldFailOnStart = true
 

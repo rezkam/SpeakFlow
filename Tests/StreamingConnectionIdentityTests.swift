@@ -42,7 +42,7 @@ struct StreamingConnectionIdentityTests {
     @Test @MainActor
     func stoppedReconnectCannotActivateAnUncooperativeHandshake() async throws {
         let provider = HeldHandshakeProvider()
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller.keepAliveEnabled = false
         controller.isActive = true
         controller.reconnectProvider = provider
@@ -67,7 +67,7 @@ struct StreamingConnectionIdentityTests {
         defer { gate.continuation.finish() }
         let retired = DelayedFailingAudioSession(gate: gate.stream)
         let replacement = MockStreamingSession()
-        let controller = LiveStreamingController(skipAudioEngineForTesting: true)
+        let controller = LiveStreamingController(skipAudioCaptureForTesting: true)
         controller._testSetAudioSessionRefActive(true, session: retired)
         controller._testEnqueueAudioFrame(Data([1]))
         try await waitUntilAsync { await retired.sendStarted }

@@ -138,6 +138,12 @@ Released SpeakFlow builds are signed with a Developer ID certificate and notariz
 
 ## Usage
 
+### Microphone selection
+
+Choose an input under **General → Audio input → Microphone**, or open the menu bar dropdown and select **Microphone** to see the device list. **System Default** follows the macOS input. An explicit device choice is remembered locally.
+
+If the selected device disconnects, SpeakFlow switches to the system input and shows the active input in settings. Manual changes during recording apply to the next recording. Reconnecting a preferred device does not interrupt an ongoing fallback recording.
+
 ### Menu Bar
 
 Use **Close Control Panel** to hide the settings window while keeping SpeakFlow available in the menu bar. Select **Quit SpeakFlow** when you want to fully exit the app. Command-Q and Dock Quit close only the control panel so they do not interrupt the menu-bar service.
@@ -214,7 +220,7 @@ Regression feature mapping is documented in:
 
 ### Streaming (Deepgram)
 
-1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+1. **Capture**: 16 kHz, mono, 16-bit PCM from the selected microphone
 2. **Stream** — raw audio is sent over WebSocket to Deepgram Nova-3 with the selected language
 3. **Interim results** — partial transcriptions appear immediately as you speak
 4. **Smart diff** — when text updates, only the changed suffix is retyped (common prefix is preserved)
@@ -223,7 +229,7 @@ Regression feature mapping is documented in:
 
 ### Streaming (Mistral Voxtral Realtime)
 
-1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+1. **Capture**: 16 kHz, mono, 16-bit PCM from the selected microphone
 2. **Stream** — raw audio is base64-encoded and sent over WebSocket to Mistral's realtime transcription API
 3. **Delta accumulation** — incremental text fragments arrive as `transcription.text.delta` messages and are displayed as interim results
 4. **Segment finalization** — the server emits `transcription.segment` with timing info, producing a final result and resetting the delta buffer
@@ -231,7 +237,7 @@ Regression feature mapping is documented in:
 
 ### Batch (ChatGPT)
 
-1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+1. **Capture**: 16 kHz, mono, 16-bit PCM from the selected microphone
 2. **Voice activity detection** — a lightweight neural model runs on Apple Neural Engine, classifying 32ms frames as speech or silence
 3. **Speech segmentation** — hysteresis thresholds with 3-second silence debounce avoid false ends during natural pauses
 4. **Chunking** — audio is buffered and sent at the configured interval, waiting for natural pauses
@@ -240,7 +246,7 @@ Regression feature mapping is documented in:
 
 ### Batch (Mistral Voxtral Mini)
 
-1. **Capture** — 16 kHz, mono, 16-bit PCM from the system microphone
+1. **Capture**: 16 kHz, mono, 16-bit PCM from the selected microphone
 2. **Voice activity detection** — same on-device neural model as ChatGPT batch mode
 3. **Speech segmentation** — same hysteresis and silence debounce logic
 4. **Chunking** — audio is buffered as WAV and sent via multipart POST to Mistral's `/v1/audio/transcriptions` endpoint
