@@ -3,10 +3,10 @@ import ApplicationServices
 import Testing
 @testable import SpeakFlow
 
-@Suite("Native editor streaming ownership", .serialized)
+@Suite("Native editor streaming compatibility", .serialized)
 struct TextInserterNativeEditorTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_UI_PROBES"] == "1")) @MainActor
-    func nativeEditorAcknowledgesCorrectionsAndRejectsMovedCaret() async throws {
+    func nativeEditorCorrectsAndContinuesAfterClearing() async throws {
         guard NativeUIProbeSupport.isChild(for: "TextInserterNativeEditorTests") else {
             try NativeUIProbeSupport.runChild(suite: "TextInserterNativeEditorTests")
             return
@@ -59,12 +59,16 @@ struct TextInserterNativeEditorTests {
         inserter.updateStreamingText("help", isFinal: false)
         await inserter.waitForPendingInsertions()
         #expect(editor.string == "prefix help")
-        editor.setSelectedRange(NSRange(location: 3, length: 0))
-        inserter.updateStreamingText("held", isFinal: true)
+        inserter.updateStreamingText("help", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        #expect(editor.string == "prefix help ")
+        editor.string = ""
+        editor.setSelectedRange(NSRange(location: 0, length: 0))
+        inserter.updateStreamingText("next phrase", isFinal: true)
         inserter.pressEnterKey()
         await inserter.waitForPendingInsertions()
-        #expect(editor.string == "prefix help")
-        #expect(enters == 0)
-        #expect(notices == 1)
+        #expect(editor.string == "next phrase ")
+        #expect(enters == 1)
+        #expect(notices == 0)
     }
 }

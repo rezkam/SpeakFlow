@@ -3,7 +3,7 @@ import ApplicationServices
 import Testing
 @testable import SpeakFlow
 
-@Suite("Streaming insertion ownership", .serialized)
+@Suite("Streaming insertion compatibility and safety", .serialized)
 struct TextInserterOwnershipTests {
     @MainActor final class Editor {
         var text = "prefix "
@@ -52,6 +52,26 @@ struct TextInserterOwnershipTests {
         }
     }
 
+    @Test(arguments: [false, true]) @MainActor
+    func opaqueEditorReceivesCompleteUtterancesAndCanBeCleared(unreadable: Bool) async {
+        let editor = Editor()
+        let inserter = editor.inserter()
+        let stale = editor.snapshot
+        inserter.editorSnapshotForTesting = { unreadable ? nil : stale }
+        #expect(inserter.captureTarget())
+        inserter.updateStreamingText("sample phrase", isFinal: true)
+        await inserter.waitForPendingInsertions()
+        #expect(editor.text == "prefix sample phrase ")
+        editor.text = ""
+        editor.selection = NSRange(location: 0, length: 0)
+        inserter.updateStreamingText("another phrase", isFinal: true)
+        inserter.pressEnterKey()
+        await inserter.waitForPendingInsertions()
+        #expect(editor.text == "another phrase ")
+        #expect(editor.keys.filter { $0 == 36 }.count == 1)
+        #expect(!editor.keys.contains(51))
+    }
+
     @Test @MainActor func clearingCompletedDictationAllowsTheNextUtterance() async {
         let editor = Editor()
         let inserter = editor.inserter()
@@ -96,105 +116,50 @@ struct TextInserterOwnershipTests {
         #expect(editor.text == "next utterance ")
     }
 
-    @Test @MainActor func movedCaretCannotDeleteExistingContentOrSubmit() async {
-        let editor = Editor()
-        let inserter = editor.inserter()
-        inserter.updateStreamingText("hello", isFinal: false)
-        await inserter.waitForPendingInsertions()
-        #expect(editor.text == "prefix hello")
-        editor.selection.location = 3
-        inserter.updateStreamingText("help", isFinal: true)
-        inserter.pressEnterKey()
-        await inserter.waitForPendingInsertions()
-        #expect(editor.text == "prefix hello")
-        #expect(!editor.keys.contains(51))
-        #expect(!editor.keys.contains(36))
-    }
-
-    @Test @MainActor func unreadableEditorDoesNotReceiveStreamingOrEnter() async {
-        let editor = Editor()
-        editor.readable = false
-        let inserter = editor.inserter()
-        inserter.updateStreamingText("hello", isFinal: true)
-        inserter.pressEnterKey()
-        await inserter.waitForPendingInsertions()
-        #expect(editor.keys.isEmpty)
-    }
-
-    @Test @MainActor func unacknowledgedKeyStopsFurtherTypingAndEnter() async {
-        let editor = Editor()
-        editor.acceptsEvents = false
-        let inserter = editor.inserter()
-        inserter.updateStreamingText("hello", isFinal: true)
-        inserter.pressEnterKey()
-        await inserter.waitForPendingInsertions()
-        #expect(editor.keys.count == 1)
-        #expect(!editor.keys.contains(36))
-    }
-
-    @Test(arguments: [false, true]) @MainActor
-    func changedContentOrSelectionCannotAuthorizeCorrection(select: Bool) async {
-        let editor = Editor()
-        let inserter = editor.inserter()
-        inserter.updateStreamingText("hello", isFinal: false)
-        await inserter.waitForPendingInsertions()
-        if select { editor.selection.length = 1; editor.selection.location -= 1 }
-        else { editor.text = "edited hello" }
-        let untouched = editor.text
-        let count = editor.keys.count
-        inserter.updateStreamingText("help", isFinal: true)
-        inserter.pressEnterKey()
-        await inserter.waitForPendingInsertions()
-        #expect(editor.text == untouched)
-        #expect(editor.keys.count == count)
-    }
-
-    @Test @MainActor func delayedAcknowledgementIsAwaitedBeforeSubmit() async throws {
-        let editor = Editor()
-        let inserter = editor.inserter()
-        editor.acceptsEvents = false
-        inserter._testSetEventPoster { event in
-            guard event.type == .keyDown else { return }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(25))
-                editor.acceptsEvents = true
-                editor.post(event)
-                editor.acceptsEvents = false
-            }
-        }
-        inserter.updateStreamingText("ok", isFinal: true)
-        inserter.pressEnterKey()
-        await inserter.waitForPendingInsertions()
-        #expect(editor.text == "prefix ok ")
-        try await waitUntil { editor.keys.contains(36) }
-    }
-
-    @Test @MainActor func movingCaretWhileModifiersAreHeldCannotRedirectTyping() async throws {
+    @Test @MainActor func changingFieldsWhileModifiersAreHeldStopsTyping() async throws {
         let editor = Editor()
         let inserter = editor.inserter()
         var held = true
         inserter._testSetFlagsProvider { held ? .maskCommand : [] }
+        inserter._testSetFocusWaitTimeout(0)
         inserter.updateStreamingText("hello", isFinal: true)
         inserter.pressEnterKey()
         try await Task.sleep(for: .milliseconds(30))
-        editor.selection.location = 2
+        #expect(editor.keys.isEmpty)
+        inserter.testIsTargetFrontmost = false
         held = false
         await inserter.waitForPendingInsertions()
         #expect(editor.keys.isEmpty)
         #expect(editor.text == "prefix ")
     }
 
-    @Test @MainActor func cancellationRetiresAnAcknowledgementWait() async throws {
+    @Test @MainActor func cancellationRetiresRemainingCharactersAndEnter() async {
         let editor = Editor()
-        editor.acceptsEvents = false
         let inserter = editor.inserter()
-        inserter.updateStreamingText("old", isFinal: true)
+        inserter._testSetEventPoster { event in
+            editor.post(event)
+            if event.type == .keyUp, editor.keys.count == 1 { inserter.cancelAndReset() }
+        }
+        inserter.updateStreamingText("retired", isFinal: true)
         inserter.pressEnterKey()
-        let old = inserter.pendingTask
-        try await waitUntil { editor.keys.count == 1 }
-        inserter.cancelAndReset()
-        await old?.value
+        await inserter.waitForPendingInsertions()
+        #expect(editor.text == "prefix r")
         #expect(editor.keys.count == 1)
+    }
+
+    @Test @MainActor func partiallyPostedFinalCannotSubmit() async {
+        let editor = Editor()
+        let inserter = editor.inserter()
+        inserter._testSetFocusWaitTimeout(0)
+        inserter._testSetEventPoster { event in
+            editor.post(event)
+            if event.type == .keyUp, editor.keys.count == 1 { inserter.testIsTargetFrontmost = false }
+        }
+        inserter.updateStreamingText("final phrase", isFinal: true)
+        inserter.pressEnterKey()
+        await inserter.waitForPendingInsertions()
+        #expect(editor.text == "prefix f")
+        #expect(!editor.keys.contains(36))
     }
 
     @Test @MainActor func unicodeCorrectionPreservesSurroundingContent() async {
