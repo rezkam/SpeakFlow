@@ -44,11 +44,12 @@ Native UI suites are opt-in and run in isolated child processes:
 
 ```sh
 SPEAKFLOW_RUN_UI_PROBES=1 SPEAKFLOW_MUTE_SOUNDS=1 SPEAKFLOW_ISOLATE_TEST_AUDIO=1 \
-  swift test --no-parallel --filter 'ProviderKeyValidationTests|TranscriptionLanguagePickerTests|UITestHarnessTests|HotkeyNativeMonitorTests'
+  swift test --no-parallel --filter 'ProviderKeyValidationTests|TranscriptionLanguagePickerTests|UITestHarnessTests|HotkeyNativeMonitorTests|TextInserterNativeEditorTests'
 ```
 
 These probes render synthetic controls and dispatch synthetic input locally. They do not
 record microphone audio, contact providers, or use installed-app storage. Real microphone
 capture, live provider interoperability, and audible sound quality require separate opt-in
-verification. Successfully posted key pairs are the insertion acknowledgment boundary;
-these tests cannot prove a third-party application accepted every posted event.
+verification. Streaming insertion requires matching accessible field content and a collapsed selection before each edit, then bounded acknowledgement of the resulting content and UTF-16 selection. `TextInserterOwnershipTests` covers caret movement, selection, changed content, unsupported editors, delayed or missing acknowledgement, Unicode, cancellation, and withheld Enter. Accessibility checks and event posting are not atomic; native probes do not establish compatibility with every third-party editor.
+
+`TextInserterNativeEditorTests` opens a synthetic AppKit editor and checks actual native editing and caret-move refusal through a local event adapter. It does not test WindowServer delivery or cross-process accessibility. Final-event timeout submission protection is covered by `StreamingEventDrainTests`.

@@ -781,6 +781,17 @@ struct TranscriptionQueueTextStreamLifecycleTests {
 
 @Suite("TranscriptionQueueBridge — Session Lifecycle & Completion")
 struct TranscriptionQueueBridgeTests {
+    @Test @MainActor func emptyFinalCompletesWithoutAConsumerEvent() async {
+        let bridge = TranscriptionQueueBridge()
+        var completions = 0
+        bridge.onAllComplete = { completions += 1 }
+        let ticket = await bridge.nextSequence()
+        await bridge.submitResult(ticket: ticket, text: "")
+        #expect(completions == 1)
+        await bridge.checkCompletion()
+        #expect(completions == 1)
+    }
+
 
     /// The stream consumer calls checkCompletion after each text delivery.
     /// After submitting a result and letting the consumer process it,

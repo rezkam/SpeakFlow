@@ -51,7 +51,7 @@ run_case() {
 
     set +e
     (
-        e2e_prepare_scenario
+        e2e_prepare_scenario transcription
         export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="$speak_text"
         export SPEAKFLOW_E2E_EXPECT_PHRASE="$expect_phrase"
         export SPEAKFLOW_E2E_AUTO_SPEAK_RATE="$speak_rate"

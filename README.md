@@ -185,7 +185,7 @@ All settings are in the **Transcription** tab:
 - **Automatic turn detection** — when you stop speaking, silence is detected and the session ends automatically (works in both modes — local VAD for batch, server-side for streaming)
 - **Smart chunking** — in batch mode, audio is split at natural sentence boundaries detected by silence analysis
 - **Noise filtering** — silent and noise-only chunks are filtered before transcription, saving API calls and improving accuracy
-- **Universal text insertion** — transcribed text is typed into the focused app via macOS Accessibility, with per-keystroke focus tracking that pauses if you switch apps and resumes when you return
+- **Focus-safe text insertion:** text targets the captured field and pauses during focus changes. Streaming edits require readable accessibility text and selection, with acknowledgement after each edit. If verification fails, delivery stops and automatic Enter is withheld; review the text and start a new dictation. Editors without this accessibility support cannot receive streaming edits.
 - **Launch at login** — runs quietly in the menu bar
 
 ## Testing

@@ -57,7 +57,8 @@ struct MistralDeltaReentrancyTests {
         #expect(await collected.value == ["first"])
     }
 
-    @Test(arguments: ["segment", "done", "close"])
+    // Segment/done retire only their own snapshot, not input accepted during publication.
+    @Test(arguments: ["segment", "done"])
     func concurrentBoundaryPreservesNextDelta(boundary: String) async throws {
         let gate = FinalYieldGate()
         let session = MistralStreamingSession(
@@ -74,19 +75,45 @@ struct MistralDeltaReentrancyTests {
         }
         await session.parseMessage(#"{"type":"transcription.text.delta","text":"first"}"#)
         let first = Task {
-            if boundary == "close" { try await session.close() }
-            else { await session.parseMessage("{\"type\":\"transcription.\(boundary)\"}") }
+            await session.parseMessage("{\"type\":\"transcription.\(boundary)\"}")
         }
         await gate.waitForArrival()
         await session.parseMessage(#"{"type":"transcription.text.delta","text":"next"}"#)
-        if boundary == "close" {
-            await session.parseMessage(#"{"type":"transcription.done"}"#)
-        }
         await gate.resume()
-        try await first.value
+        await first.value
         // After segment/done, the next delta must still be pending. Close flushes it.
-        if boundary != "close" { try await session.close() }
+        try await session.close()
         let finals = await collected.value
         #expect(finals == ["first", "next"])
+    }
+
+    @Test(arguments: [false, true])
+    func closeRejectsInputBeforeSuspending(concurrentClose: Bool) async throws {
+        let gate = FinalYieldGate()
+        let session = MistralStreamingSession(
+            apiKey: "synthetic-key", config: .default,
+            beforeFinalYield: { await gate.pauseFirst() }
+        )
+        let collected = Task {
+            var transcripts: [String] = []
+            for await event in session.events {
+                switch event {
+                case .interim(let result): transcripts.append("interim:" + result.transcript)
+                case .finalResult(let result): transcripts.append("final:" + result.transcript)
+                default: break
+                }
+            }
+            return transcripts
+        }
+        await session.parseMessage(#"{"type":"transcription.text.delta","text":"first"}"#)
+        let closing = Task { try await session.close() }
+        await gate.waitForArrival()
+        // Close is terminal: unlike segment/done it must reject new input. No done
+        // message is sent to rescue a delta mistakenly accepted after its snapshot.
+        await session.parseMessage(#"{"type":"transcription.text.delta","text":"next"}"#)
+        if concurrentClose { try await session.close() }
+        await gate.resume()
+        try await closing.value
+        #expect(await collected.value == ["interim:first", "final:first"])
     }
 }

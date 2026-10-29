@@ -63,7 +63,7 @@ run_case() {
 
     set +e
     (
-        e2e_prepare_scenario
+        e2e_prepare_scenario transcription
         export SPEAKFLOW_E2E_CHUNK_DURATION="$chunk_duration"
         export SPEAKFLOW_E2E_TIMEOUT_SECONDS="$timeout"
         export SPEAKFLOW_E2E_AUTO_SPEAK_RATE="$speak_rate"

@@ -21,7 +21,7 @@ final class StatisticsSessionHistory {
         let cutoff = resetDate()
         let fetched = await load(cutoff)
         guard generation == request, resetDate() == cutoff, !Task.isCancelled else { return }
-        sessions = fetched
+        sessions = fetched.filter { $0.endReason != "START_FAILED" }
     }
 
     func reset() {

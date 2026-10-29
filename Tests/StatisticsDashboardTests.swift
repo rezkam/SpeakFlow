@@ -10,6 +10,18 @@ import os
 
 @Suite("Statistics dashboard observation and history")
 struct StatisticsDashboardTests {
+    @Test @MainActor
+    func failedStartsDoNotCountAsRecordings() async {
+        let history = StatisticsSessionHistory { _ in
+            ["START_FAILED", "HOTKEY", "ESCAPE"].map {
+                SessionMetrics(sessionId: UUID(), providerId: "test-provider", mode: .batch, endReason: $0)
+            }
+        }
+        await history.refresh { .distantPast }
+        #expect(history.sessions.count == 2)
+        #expect(!history.sessions.contains { $0.endReason == "START_FAILED" })
+    }
+
     @Test(arguments: ["words", "provider", "reset"]) @MainActor
     func statisticsMutationsInvalidateObservedDashboardValues(field: String) {
         let stats = Statistics.shared

@@ -8,6 +8,18 @@ import Testing
 
 @Suite("HotkeyListener — Double-Tap Detection", .serialized)
 struct HotkeyListenerDoubleTapTests {
+    @Test @MainActor
+    func stoppingRetiresQueuedActivation() async throws {
+        let listener = HotkeyListener()
+        var activations = 0
+        listener.onActivate = { activations += 1 }
+        tapControl(on: listener)
+        tapControl(on: listener)
+        listener.stop()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(activations == 0)
+    }
+
 
     /// Create a synthetic flagsChanged CGEvent with specified flags.
     /// Uses `CGEvent(source: nil)` for minimal overhead — we only need the flags.

@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib/e2e-result.sh"
 
 run_case() {
     local label="$1" text="$2" minimum="$3" maximum="$4"
-    e2e_prepare_scenario
+    e2e_prepare_scenario transcription
     export SPEAKFLOW_E2E_TEST_AUTO_END=true
     export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="$text"
     export SPEAKFLOW_E2E_TIMEOUT_SECONDS="$maximum"
