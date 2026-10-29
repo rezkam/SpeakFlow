@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Main settings window with a warm custom sidebar and title bar.
 struct MainSettingsView: View {
+    private let updates = UpdateController.shared
     @State private var selectedTab: SettingsTab = .general
     @Environment(\.appState) private var state
 
@@ -28,6 +29,8 @@ struct MainSettingsView: View {
         }
         .frame(minWidth: 760, minHeight: 540)
         .background(Theme.background)
+        .onChange(of: updates.model.navigationRequest) { _, _ in selectedTab = .updates }
+        .onAppear { if updates.model.navigationRequest > 0 { selectedTab = .updates } }
     }
 
     // MARK: - Sidebar
@@ -43,7 +46,7 @@ struct MainSettingsView: View {
                 .padding(.bottom, 8)
 
             VStack(spacing: 1) {
-                ForEach(SettingsTab.allCases) { tab in
+                ForEach(SettingsTab.allCases.filter { $0 != .updates }) { tab in
                     Button { selectedTab = tab } label: {
                         HStack(spacing: 10) {
                             Image(systemName: tab.icon)
@@ -67,6 +70,27 @@ struct MainSettingsView: View {
             .padding(.horizontal, 8)
 
             Spacer()
+            Button { selectedTab = .updates } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.down.circle")
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(updates.model.hasUpdate ? "Update Available" : "Updates")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Text(updates.model.hasUpdate ? "Version \(updates.model.version)" : "Check for new versions")
+                            .font(.system(size: 10.5))
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.system(size: 10))
+                }
+                .foregroundStyle(selectedTab == .updates ? .white : Theme.text2)
+                .padding(12)
+                .background(selectedTab == .updates ? Theme.accent : Theme.card)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.line, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("updates-sidebar")
+            .padding(10)
         }
         .frame(maxHeight: .infinity)
         .background(Theme.sidebar)
@@ -146,6 +170,10 @@ struct MainSettingsView: View {
             StatisticsSettingsView()
         case .about:
             AboutSettingsView()
+        case .updates:
+            UpdatesSettingsView(model: updates.model, canCheck: updates.canCheck,
+                                automaticChecks: Binding(get: { updates.automaticChecks }, set: { updates.setAutomaticChecks($0) }),
+                                check: { updates.check() })
         }
     }
 }

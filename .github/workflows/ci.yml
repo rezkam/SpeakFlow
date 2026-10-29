@@ -40,6 +40,11 @@ jobs:
       - name: Validate release scripts
         run: bash -n scripts/build-release.sh scripts/verify-release-artifact.sh scripts/build-portable-release.sh scripts/verify-artifact-privacy.sh
 
+      - name: Validate update metadata
+        run: |
+          bash -n scripts/embed-sparkle.sh
+          python3 scripts/test-update-release.py
+
       - name: Install SwiftLint
         run: brew install swiftlint
 

@@ -4,7 +4,7 @@ set -euo pipefail
 [[ $# == 2 ]] || { echo 'Usage: stage-local-rc.sh NEW_AGENTS_DIRECTORY PORTABLE_BIN_DIRECTORY' >&2; exit 1; }
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 python3 - "$ROOT_DIR" "$1" "$2" <<'PY'
-import pathlib, plistlib, shutil, subprocess, sys
+import os, pathlib, plistlib, shutil, subprocess, sys
 root = pathlib.Path(sys.argv[1]).resolve()
 allowed = root / '.agents'
 target = pathlib.Path(sys.argv[2]).absolute()
@@ -28,6 +28,10 @@ try:
     resources.mkdir()
     shutil.copy2(bin_dir / 'SpeakFlow', macos / 'SpeakFlow')
     run('swift', str(root / 'scripts/release-resources.swift'), 'package', str(bin_dir), str(app))
+    linked = subprocess.check_output(['otool', '-L', str(macos / 'SpeakFlow')], text=True)
+    if 'Sparkle.framework/' in linked:
+        subprocess.run(['bash', str(root / 'scripts/embed-sparkle.sh'), str(bin_dir), str(app)],
+                       check=True, env={**os.environ, 'SPEAKFLOW_SIGNING_IDENTITY': '-'})
     iconset = target / 'AppIcon.iconset'
     iconset.mkdir()
     for size in (16, 32, 128, 256, 512):

@@ -7,6 +7,7 @@ let package = Package(
         .macOS("26.0")
     ],
     dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
         // Only VAD is used. The optional text engine contains upstream build paths.
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.17.7", traits: []),
         .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.4.3"),
@@ -23,7 +24,7 @@ let package = Package(
         // Main executable
         .executableTarget(
             name: "SpeakFlow",
-            dependencies: ["SpeakFlowCore"],
+            dependencies: ["SpeakFlowCore", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/App",
             resources: [
                 .process("../Resources")

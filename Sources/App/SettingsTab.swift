@@ -10,6 +10,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case providers = "accounts"
     case statistics
     case about
+    case updates
 
     var id: String { rawValue }
 
@@ -20,6 +21,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .providers: "Providers"
         case .statistics: "Statistics"
         case .about: "About"
+        case .updates: "Updates"
         }
     }
 
@@ -30,6 +32,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .providers: "cloud"
         case .statistics: "chart.bar"
         case .about: "info.circle"
+        case .updates: "arrow.down.circle"
         }
     }
 
@@ -40,6 +43,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .providers: "Connect accounts and pick the active model"
         case .statistics: "Your dictation usage at a glance"
         case .about: "SpeakFlow version and credits"
+        case .updates: "New versions, release notes, and installation"
         }
     }
 }
