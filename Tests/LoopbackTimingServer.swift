@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// A loopback-only fixture. It never captures or logs incoming request bytes.
+/// A loopback-only fixture. Request bytes stay in bounded memory and are never logged.
 final class LoopbackTimingServer: @unchecked Sendable {
     private let listener: NWListener
 
@@ -16,10 +16,7 @@ final class LoopbackTimingServer: @unchecked Sendable {
         let reply = response
         listener.newConnectionHandler = { connection in
             connection.start(queue: queue)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, error in
-                guard error == nil else { connection.cancel(); return }
-                connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
-            }
+            Self.receiveRequest(on: connection, progress: LoopbackRequestProgress(), reply: reply)
         }
         let readiness = AsyncThrowingStream<Void, Error> { continuation in
             listener.stateUpdateHandler = { state in
@@ -49,4 +46,36 @@ final class LoopbackTimingServer: @unchecked Sendable {
 
     func cancel() { listener.cancel() }
     deinit { listener.cancel() }
+
+    private static func receiveRequest(on connection: NWConnection, progress: LoopbackRequestProgress, reply: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
+            guard let data, error == nil else { connection.cancel(); return }
+            var next = progress
+            if next.receive(data) {
+                connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+            } else if isComplete || next.isOversized {
+                connection.cancel()
+            } else {
+                receiveRequest(on: connection, progress: next, reply: reply)
+            }
+        }
+    }
+}
+
+/// Handles the fixed-length HTTP requests sent by this fixture's URLSession client.
+struct LoopbackRequestProgress: Sendable {
+    private var bytes = Data()
+    var isOversized: Bool { bytes.count > 65536 }
+
+    mutating func receive(_ chunk: Data) -> Bool {
+        bytes.append(chunk)
+        guard !isOversized, let separator = bytes.range(of: Data("\r\n\r\n".utf8)),
+              let header = String(data: bytes[..<separator.lowerBound], encoding: .utf8) else { return false }
+        let lengthLine = header.components(separatedBy: "\r\n").first {
+            $0.lowercased().hasPrefix("content-length:")
+        }
+        guard let lengthLine, let length = Int(lengthLine.dropFirst("content-length:".count)
+            .trimmingCharacters(in: .whitespaces)), length >= 0 else { return false }
+        return bytes.count - separator.upperBound >= length
+    }
 }

@@ -16,6 +16,13 @@ private final class TimingFixtureProtocol: URLProtocol, @unchecked Sendable {
 
 @Suite("Provider timing transport")
 struct ProviderTimingTransportTests {
+    @Test func loopbackFixtureWaitsForTheEntireUpload() {
+        var request = LoopbackRequestProgress()
+        let completed = ["POST /fixture HTTP/1.1\r\nContent-Len", "gth: 4\r\n\r\na", "bc", "d"]
+            .map { request.receive(Data($0.utf8)) }
+        #expect(completed == [false, false, false, true])
+    }
+
     @Test func nativeLoopbackRequestCollectsActualNetworkMilestones() async throws {
         let server = try await LoopbackTimingServer()
         defer { server.cancel() }
