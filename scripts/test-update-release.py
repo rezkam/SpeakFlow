@@ -46,6 +46,7 @@ class UpdateReleaseTests(unittest.TestCase):
         updates.create_appcast(archive, "https://example.com/update.zip", "2.0.0", "Fix <text> & typing", base64.b64encode(bytes(64)).decode(), feed)
         item = ET.parse(feed).find("channel/item")
         self.assertEqual(item.find("description").text, "Fix <text> & typing")
+        self.assertEqual(item.find("description").get(f"{{{updates.SPARKLE}}}format"), "plain-text")
         self.assertEqual(item.find("enclosure").get("length"), str(archive.stat().st_size))
         self.assertEqual(item.find(f"{{{updates.SPARKLE}}}version").text, "2.0.0")
 
