@@ -52,8 +52,13 @@ e2e_transcript() {
 
 # Fixed scenarios must not inherit unrelated assertions or live inputs.
 e2e_prepare_scenario() {
-    local variable
+    local variable selected_auth="${SPEAKFLOW_E2E_AUTH_FILE:-}"
     for variable in ${!SPEAKFLOW_E2E_@}; do unset "$variable"; done
+    # Only transcription scenarios may use an explicitly selected export. Noise
+    # and silence scenarios intentionally remain unauthenticated.
+    if [[ "${1:-}" == transcription && -n "$selected_auth" ]]; then
+        export SPEAKFLOW_E2E_AUTH_FILE="$selected_auth"
+    fi
     export SPEAKFLOW_ISOLATED_STORAGE=1
     export SPEAKFLOW_MUTE_SOUNDS=1
 }

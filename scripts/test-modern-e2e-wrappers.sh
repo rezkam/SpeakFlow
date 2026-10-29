@@ -6,12 +6,21 @@ mkdir -p .agents/tests
 TEST_DIR="$(mktemp -d "$ROOT_DIR/.agents/tests/modern-wrappers.XXXXXX")"
 mkdir -p "$TEST_DIR/bin"
 export WRAPPER_CALLS="$TEST_DIR/calls"
+printf '{"accessToken":"synthetic-access","refreshToken":"synthetic-refresh","accountId":"fixture-account","lastRefresh":0}' > "$TEST_DIR/auth.json"
+export SPEAKFLOW_E2E_AUTH_FILE="$TEST_DIR/auth.json"
+export WRAPPER_EXPECT_AUTH="$SPEAKFLOW_E2E_AUTH_FILE"
+# A mistaken network/tool path must fail, never contact a provider.
+for command in curl wget nc; do
+    printf '#!/bin/sh\nexit 98\n' > "$TEST_DIR/bin/$command"
+    chmod +x "$TEST_DIR/bin/$command"
+done
 cat > "$TEST_DIR/bin/swift" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$*" == 'run --disable-sandbox SpeakFlowLiveE2E' ]] || exit 65
 [[ "${SPEAKFLOW_ISOLATED_STORAGE:-}" == 1 && "${SPEAKFLOW_MUTE_SOUNDS:-}" == 1 ]] || exit 66
 [[ -z "${SPEAKFLOW_E2E_UNRELATED:-}" ]] || exit 67
+[[ "${SPEAKFLOW_E2E_AUTH_FILE:-}" == "$WRAPPER_EXPECT_AUTH" && -s "$SPEAKFLOW_E2E_AUTH_FILE" ]] || exit 72
 assertions=none
 if [[ "${SPEAKFLOW_E2E_TEST_NOISE_REJECTION:-}" == 1 ]]; then
     [[ -s "${SPEAKFLOW_E2E_AUDIO_FILE_PATH:-}" ]] || exit 68

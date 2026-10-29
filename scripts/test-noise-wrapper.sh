@@ -36,6 +36,7 @@ expected='run --disable-sandbox SpeakFlowLiveE2E --silence-only'
 [[ "${SPEAKFLOW_ISOLATED_STORAGE:-}" == 1 && "${SPEAKFLOW_MUTE_SOUNDS:-}" == 1 ]] || exit 66
 [[ "${SPEAKFLOW_E2E_TEST_NOISE_REJECTION:-}" == 1 ]] || exit 67
 [[ -z "${SPEAKFLOW_E2E_EXPECT_PHRASE:-}" ]] || exit 68
+[[ -z "${SPEAKFLOW_E2E_AUTH_FILE:-}" && -z "${SPEAKFLOW_E2E_UNRELATED:-}" ]] || exit 72
 [[ -s "${SPEAKFLOW_E2E_AUDIO_FILE_PATH:-}" ]] || exit 69
 case "$WRAPPER_SCENARIO" in
     pass) echo 'E2E_RESULT status=pass assertions=noChunks chunks=0 auto_end_seconds=none' ;;
@@ -55,7 +56,7 @@ for wrapper in run-noise-rejection-e2e.sh test-noise-rejection.sh; do
     for scenario in pass missing-result missing-assertion failure-verdict process-failure fixture-failure missing-fixture; do
         : > "$WRAPPER_CALLS"
         rc=0
-        SPEAKFLOW_E2E_EXPECT_PHRASE=inherited WRAPPER_NAME="$wrapper" WRAPPER_SCENARIO="$scenario" bash "scripts/$wrapper" > "$TEST_DIR/$wrapper-$scenario.log" 2>&1 || rc=$?
+        SPEAKFLOW_E2E_AUTH_FILE=synthetic-auth.json SPEAKFLOW_E2E_UNRELATED=inherited SPEAKFLOW_E2E_EXPECT_PHRASE=inherited WRAPPER_NAME="$wrapper" WRAPPER_SCENARIO="$scenario" bash "scripts/$wrapper" > "$TEST_DIR/$wrapper-$scenario.log" 2>&1 || rc=$?
         if [[ "$scenario" == pass ]]; then
             [[ "$rc" == 0 ]] || { echo "FAIL: $wrapper rejected asserted pass (exit=$rc)"; exit 1; }
             [[ "$(wc -l < "$WRAPPER_CALLS" | tr -d ' ')" == 4 ]] || { echo 'FAIL: not all four fixtures ran'; exit 1; }

@@ -26,6 +26,7 @@ public final class HotkeyListener {
     }
 
     private let tapState = OSAllocatedUnfairLock(initialState: DoubleTapState())
+    private var registrationGeneration: UInt64 = 0
     private let doubleTapInterval: TimeInterval = 0.4
 
     public var onActivate: (() -> Void)?
@@ -145,6 +146,7 @@ public final class HotkeyListener {
     }
 
     public func stop() {
+        registrationGeneration &+= 1
         #if DEBUG
         Self._testStopHook?()
         #endif
@@ -298,20 +300,21 @@ public final class HotkeyListener {
             #if DEBUG
             _testDoubleTapDetected?()
             #endif
-            Task { @MainActor [weak self] in
-                self?.onActivate?()
-            }
+            enqueueActivation()
         }
     }
 
     // MARK: - Key Combo Detection (using NSEvent monitor)
 
     private func startKeyComboDetection(type: HotkeyType) {
+        let generation = registrationGeneration
         let monitor = eventMonitorDriver.addGlobal { [weak self] event in
-            self?.handleKeyDown(event: event, type: type)
+            guard let self, self.registrationGeneration == generation else { return }
+            self.handleKeyDown(event: event, type: type)
         }
         let local = eventMonitorDriver.addLocal { [weak self] event in
-            self?.handleKeyDown(event: event, type: type)
+            guard let self, self.registrationGeneration == generation else { return event }
+            self.handleKeyDown(event: event, type: type)
             return event
         }
         tapState.withLockUnchecked {
@@ -353,8 +356,14 @@ public final class HotkeyListener {
                 "modifiers": modifierDescription(event.modifierFlags)
             ]) { _, new in new }
         )
+        enqueueActivation()
+    }
+
+    private func enqueueActivation() {
+        let generation = registrationGeneration
         Task { @MainActor [weak self] in
-            self?.onActivate?()
+            guard let self, self.registrationGeneration == generation else { return }
+            self.onActivate?()
         }
     }
 

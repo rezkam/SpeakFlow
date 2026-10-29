@@ -51,7 +51,7 @@ run_case() {
 
     set +e
     (
-        e2e_prepare_scenario
+        e2e_prepare_scenario transcription
         export SPEAKFLOW_E2E_TEST_AUTO_END=true
         # These windows exercise five seconds of trailing silence, not the product default.
         export SPEAKFLOW_E2E_AUTO_END_SILENCE_SECONDS=5

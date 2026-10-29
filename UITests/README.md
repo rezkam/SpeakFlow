@@ -30,7 +30,8 @@ The app exposes a dedicated test window when launched with:
 ## Run
 
 - In Xcode: run the `SpeakFlowUITests` test target (`Cmd+U`).
-- From terminal (used by `make test` / `make check`): `./scripts/run-ui-tests.sh`
+- From terminal, after creating the Xcode project and UI test scheme: `./scripts/run-ui-tests.sh`
+- `make test`, `make check`, and `swift test` run SwiftPM tests. They do not run this Xcode UI test bundle.
 
 ## Notes
 

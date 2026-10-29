@@ -11,9 +11,9 @@ for command in osascript kill killall pkill rm open security gh xcrun hdiutil di
 done
 # Reuse a genuinely built, private-path-free resource fixture.
 source "$ROOT_DIR/scripts/lib/redact-diagnostics.sh"
-bash "$ROOT_DIR/scripts/test-portable-release.sh" 2>&1 | redact_diagnostics > "$FIXTURE/portable.log"
-BIN="$(find "$ROOT_DIR/.agents/tests" -path '*/retired-build/release' -type l | head -1)"
-[[ -n "$BIN" ]]
+bash "$ROOT_DIR/scripts/test-portable-release.sh" "$FIXTURE/portable" 2>&1 | redact_diagnostics > "$FIXTURE/portable.log"
+BIN="$FIXTURE/portable/retired-build/release"
+[[ -d "$BIN" ]]
 stage() { PATH="$FIXTURE/guards:$PATH" bash "$ROOT_DIR/scripts/stage-local-rc.sh" "$@"; }
 stage "$FIXTURE/stage" "$BIN"
 APP="$FIXTURE/stage/SpeakFlow.app"

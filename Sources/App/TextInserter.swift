@@ -147,6 +147,84 @@ final class TextInserter: TextInserting {
     private var operationSequence: UInt64 = 0
     private var observabilitySessionId: UUID?
 
+    struct EditorSnapshot: Equatable {
+        var text: String
+        var selection: NSRange
+    }
+
+    var editorSnapshotForTesting: (() -> EditorSnapshot?)?
+    var onDeliveryFailure: (() -> Void)?
+    private var expectedEditorSnapshot: EditorSnapshot?
+    private var ownedStart = 0
+    private var streamingOwnershipActive = false
+    private var streamingDeliveryFailed = false
+    private var streamingDesiredText = ""
+
+    private func editorSnapshot() -> EditorSnapshot? {
+        if let editorSnapshotForTesting { return editorSnapshotForTesting() }
+        guard let targetElement else { return nil }
+        var value: CFTypeRef?
+        var selection: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(targetElement, kAXValueAttribute as CFString, &value) == .success,
+              let text = value as? String,
+              AXUIElementCopyAttributeValue(targetElement, kAXSelectedTextRangeAttribute as CFString, &selection) == .success,
+              let selection, CFGetTypeID(selection) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(unsafeBitCast(selection, to: AXValue.self), .cfRange, &range),
+              range.location >= 0, range.length >= 0,
+              range.location <= text.utf16.count, range.length <= text.utf16.count - range.location else { return nil }
+        return EditorSnapshot(text: text, selection: NSRange(location: range.location, length: range.length))
+    }
+
+    private func refuseStreamingDelivery() {
+        guard !streamingDeliveryFailed else { return }
+        streamingDeliveryFailed = true
+        onDeliveryFailure?()
+        observabilityEvent("streaming_delivery_unverified", level: .warning)
+    }
+
+    private func snapshotAfterKey(_ event: CGEvent) -> EditorSnapshot? {
+        guard !streamingDeliveryFailed, let expected = expectedEditorSnapshot,
+              expected.selection.length == 0, editorSnapshot() == expected,
+              let index = Range(expected.selection, in: expected.text)?.lowerBound else { return nil }
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
+        if code == Int64(Self.enterKeyCode) { return expected }
+        var replacement = expected.selection
+        let inserted: String
+        if code == Int64(Self.deleteKeyCode) {
+            let prefix = expected.text[..<index]
+            guard let last = prefix.last else { return nil }
+            let length = String(last).utf16.count
+            guard replacement.location - length >= ownedStart else { return nil }
+            replacement = NSRange(location: replacement.location - length, length: length)
+            inserted = ""
+        } else {
+            var length = 0
+            event.keyboardGetUnicodeString(maxStringLength: 0, actualStringLength: &length, unicodeString: nil)
+            var buffer = [UniChar](repeating: 0, count: length)
+            event.keyboardGetUnicodeString(maxStringLength: buffer.count, actualStringLength: &length, unicodeString: &buffer)
+            inserted = String(utf16CodeUnits: buffer, count: length)
+        }
+        return EditorSnapshot(
+            text: (expected.text as NSString).replacingCharacters(in: replacement, with: inserted),
+            selection: NSRange(location: replacement.location + inserted.utf16.count, length: 0)
+        )
+    }
+
+    private func acknowledge(_ expected: EditorSnapshot, generation: UInt64) async -> Bool {
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        while isCurrent(generation), !Task.isCancelled {
+            if editorSnapshot() == expected {
+                expectedEditorSnapshot = expected
+                return true
+            }
+            if ContinuousClock.now >= deadline { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        if isCurrent(generation), !Task.isCancelled { refuseStreamingDelivery() }
+        return false
+    }
+
     private var captureAccessibility = TargetCaptureAccessibility.live
 
     private init() {}
@@ -209,6 +287,10 @@ final class TextInserter: TextInserting {
 
     @discardableResult
     func captureTarget() -> Bool {
+        defer {
+            expectedEditorSnapshot = editorSnapshot()
+            ownedStart = expectedEditorSnapshot?.selection.location ?? 0
+        }
         #if DEBUG
         if let captureTargetForTesting { return captureTargetForTesting() }
         #endif
@@ -260,9 +342,11 @@ final class TextInserter: TextInserting {
     /// Provider diffs describe intent, not delivery. Compute the actual correction
     /// only when this snapshot reaches the queue head, using posted key pairs.
     func updateStreamingText(_ text: String, isFinal: Bool) {
+        streamingOwnershipActive = true
         let segment = sanitizeTextForInsertion(text)
         let desired = streamingCommittedText + segment + (isFinal && !segment.isEmpty ? " " : "")
         if isFinal { streamingCommittedText = desired }
+        streamingDesiredText = desired
         pendingStreamingSnapshot = desired
         guard !streamingReconciliationQueued else { return }
         // One dedicated worker and one latest-snapshot slot stay bounded even when
@@ -487,8 +571,13 @@ final class TextInserter: TextInserting {
         textInsertionTask = Task { [weak self] in
             await previousTask?.value
 
-            guard let self,
-                  await self.ensureTargetFocused(generation: generation),
+            guard let self, self.isCurrent(generation), !Task.isCancelled else { return }
+            if self.streamingOwnershipActive &&
+                (self.streamingDeliveryFailed || self.streamingDesiredText != self.streamingPostedText) {
+                self.refuseStreamingDelivery()
+                return
+            }
+            guard await self.ensureTargetFocused(generation: generation),
                   let keyDown = CGEvent(
                       keyboardEventSource: nil,
                       virtualKey: Self.enterKeyCode,
@@ -549,6 +638,10 @@ final class TextInserter: TextInserting {
         streamingReconciliationQueued = false
         streamingCommittedText = ""
         streamingPostedText = ""
+        streamingDesiredText = ""
+        streamingOwnershipActive = false
+        streamingDeliveryFailed = false
+        expectedEditorSnapshot = nil
         textInsertionTask?.cancel()
         textInsertionTask = nil
         queueGeneration &+= 1
@@ -570,6 +663,10 @@ final class TextInserter: TextInserting {
         streamingReconciliationQueued = false
         streamingCommittedText = ""
         streamingPostedText = ""
+        streamingDesiredText = ""
+        streamingOwnershipActive = false
+        streamingDeliveryFailed = false
+        expectedEditorSnapshot = nil
         textInsertionTask = nil
         queueGeneration &+= 1
         queuedInsertionCount = 0
@@ -1006,6 +1103,14 @@ final class TextInserter: TextInserting {
                 continue
             }
 
+            var acknowledgedSnapshot: EditorSnapshot?
+            if streamingOwnershipActive {
+                guard isTargetAppFrontmost(), let next = snapshotAfterKey(keyDown) else {
+                    refuseStreamingDelivery()
+                    return false
+                }
+                acknowledgedSnapshot = next
+            }
             eventPoster(keyDown)
             if releaseDelayNanoseconds > 0 {
                 // Cancellation can end this delay early, but cannot suppress
@@ -1013,6 +1118,11 @@ final class TextInserter: TextInserting {
                 try? await Task.sleep(nanoseconds: releaseDelayNanoseconds)
             }
             eventPoster(keyUp)
+            // Enter may submit or replace the field; only text edits need an acknowledgement.
+            if let acknowledgedSnapshot,
+               keyDown.getIntegerValueField(.keyboardEventKeycode) != Int64(Self.enterKeyCode) {
+                return await acknowledge(acknowledgedSnapshot, generation: generation)
+            }
             return true
         }
     }

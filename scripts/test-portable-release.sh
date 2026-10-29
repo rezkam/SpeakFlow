@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT_DIR/.agents/tests"
-FIXTURE="$(mktemp -d "$ROOT_DIR/.agents/tests/portable-release.XXXXXX")"
+FIXTURE="${1:-$(mktemp -d "$ROOT_DIR/.agents/tests/portable-release.XXXXXX")}"
 mkdir -p "$FIXTURE/Sources/SpeakFlow" "$FIXTURE/Fixture.app/Contents/MacOS"
 cat > "$FIXTURE/Package.swift" <<'SWIFT'
 // swift-tools-version:6.0

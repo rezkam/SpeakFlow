@@ -4,7 +4,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 # shellcheck source=SCRIPTDIR/lib/e2e-result.sh
 source "$ROOT_DIR/scripts/lib/e2e-result.sh"
-e2e_prepare_scenario
+e2e_prepare_scenario transcription
 export SPEAKFLOW_E2E_TEST_AUTO_END=true
 export SPEAKFLOW_E2E_AUTO_SPEAK_TEXT="Hello world, this is a short test of the voice activity detection system."
 export SPEAKFLOW_E2E_TIMEOUT_SECONDS=15

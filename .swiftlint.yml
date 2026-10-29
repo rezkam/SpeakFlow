@@ -1,6 +1,7 @@
 # SwiftLint Configuration for SpeakFlow
 
 excluded:
+  - .agents
   - .build
   - Package.swift
   - Sources/LiveE2E

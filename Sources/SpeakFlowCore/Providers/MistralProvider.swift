@@ -327,6 +327,10 @@ public actor MistralStreamingSession: StreamingSession {
     }
 
     public func close() async throws {
+        // Terminal input boundary: no parser may accept another delta while the
+        // final snapshot is suspended in publication. Concurrent closes can still
+        // claim the same pending delivery tasks below, exactly once.
+        isClosing = true
         // Consume before yielding so a concurrent boundary cannot flush it twice.
         let remainingText = pendingDeltaText
         pendingDeltaText = ""
@@ -341,7 +345,6 @@ public actor MistralStreamingSession: StreamingSession {
 
         // A parser may be suspended after consuming its delta but before yielding.
         // Claim its final without waiting for that parser, then finish the stream.
-        isClosing = true
         let finalIds = pendingFinals.keys.sorted()
         let deliveries = finalIds.compactMap { deliverFinal($0) }
         for delivery in deliveries { await delivery.value }

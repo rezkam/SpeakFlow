@@ -271,6 +271,7 @@ public final class TranscriptionQueueBridge {
 
     public func submitResult(ticket: TranscriptionTicket, text: String) async {
         await queue.submitResult(ticket: ticket, text: text)
+        await checkCompletion()
     }
 
     func markFailed(ticket: TranscriptionTicket) async {

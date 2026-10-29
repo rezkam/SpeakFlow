@@ -7,6 +7,7 @@ import Foundation
 protocol TextInserting: AnyObject {
     /// PID of the app that owned the target element when `captureTarget()` was called.
     var targetPid: pid_t { get }
+    var onDeliveryFailure: (() -> Void)? { get set }
     func setObservabilitySessionId(_ sessionId: UUID?)
     /// Captures the focused field as the only destination for this recording.
     /// Returns false when no safe destination could be identified; callers must
@@ -28,6 +29,7 @@ protocol TextInserting: AnyObject {
 }
 
 extension TextInserting {
+    var onDeliveryFailure: (() -> Void)? { get { nil } set {} }
     func setObservabilitySessionId(_ sessionId: UUID?) {}
 
     func replaceTail(replacingChars: Int, with text: String) {

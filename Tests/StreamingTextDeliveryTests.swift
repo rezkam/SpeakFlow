@@ -17,6 +17,14 @@ struct StreamingTextDeliveryTests {
         inserter._testSetTargetProcessLiveness { $0 == 42_424 }
         inserter._testSetFlagsProvider { [] }
         inserter._testSetFocusObserver { .init(focusedPid: 42_424, field: .same) }
+        inserter.editorSnapshotForTesting = {
+            var text = ""
+            for (code, value) in zip(posted.keyCodes, posted.keyDowns) {
+                if code == 51 { if !text.isEmpty { text.removeLast() } }
+                else if code != 36 { text += value }
+            }
+            return .init(text: text, selection: NSRange(location: text.utf16.count, length: 0))
+        }
         inserter._testSetEventPoster { posted.record($0) }
         let providers = SpyProviderSettings()
         providers.activeProviderId = ProviderId.deepgram

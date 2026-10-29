@@ -121,6 +121,12 @@ final class RecordingController {
         self.settings = settings
         self.transcription = transcription
         self.playSoundEffect = playSoundEffect
+        self.textInserter.onDeliveryFailure = { [weak self] in
+            self?.appState.showBanner(
+                "Text delivery stopped because the editor position or content could not be verified. Automatic submit is disabled. Review the text, then start a new dictation.",
+                style: .error, duration: 15
+            )
+        }
         self.keyInterceptor.onEscapePressed = { [weak self] in self?.cancelRecording() }
         self.keyInterceptor.onEnterPressed = { [weak self] in
             guard let self else { return }
@@ -507,6 +513,13 @@ final class RecordingController {
                 self.keyInterceptor.stop()
                 // A delivered Escape cancels the recording; nothing is left to finish.
                 guard self.ownsFinalization(generation) else { return }
+                if controller?.finalEventDeliveryCompleted == false {
+                    self.shouldPressEnterOnComplete = false
+                    self.appState.showBanner(
+                        "Final text delivery timed out. Automatic submit was cancelled. Review the text before submitting.",
+                        style: .error, duration: 15
+                    )
+                }
                 await self.finishFinalization(generation: generation, playCompletion: false)
                 if self.liveStreamingController === controller {
                     self.liveStreamingController = nil

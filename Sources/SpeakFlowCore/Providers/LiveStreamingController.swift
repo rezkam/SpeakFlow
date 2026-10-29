@@ -293,6 +293,15 @@ public final class LiveStreamingController {
     private var audioEngine: AVAudioEngine?
     private var session: StreamingSession?
     private var eventTask: Task<Void, Never>?
+    // Survives normal stop's startup invalidation; cancel/replacement retire it
+    // before suspension so dequeued events cannot act on a later recording.
+    private var eventListenerId: UUID?
+    private var eventListenerFinished = false
+    public private(set) var finalEventDeliveryCompleted = true
+#if DEBUG
+    /// Pause the real listener after dequeue, before controller delivery.
+    var beforeEventDelivery: (() async -> Void)?
+#endif
     internal var isActive = false
     /// Increments whenever an initial startup is superseded or explicitly stopped.
     /// A provider handshake may complete after stop/cancel, so its captured
@@ -474,6 +483,10 @@ public final class LiveStreamingController {
         suppressSessionClosedCallback = false
         startupGeneration &+= 1
         let generation = startupGeneration
+        eventListenerId = nil
+        eventTask?.cancel()
+        eventTask = nil
+        finalEventDeliveryCompleted = true
 
         // Store for reconnection 
         reconnectProvider = provider
@@ -606,12 +619,8 @@ public final class LiveStreamingController {
 
             self.session = streamSession
 
-            // Start listening to events
-            eventTask = Task { [weak self] in
-                for await event in streamSession.events {
-                    self?.handleEvent(event)
-                }
-            }
+            // Start listening to events.
+            listen(to: streamSession)
 
             // Activate streaming — audio tap will now send data to provider
             activateSession(streamSession)
@@ -708,11 +717,24 @@ public final class LiveStreamingController {
                     try await activeSession.close()
                 }
             } catch { logger.debug("Session close failed: \(error.localizedDescription)") }
+
+            // Transport yield only acknowledges enqueue. Await actual controller
+            // delivery before insertion/Enter, bounded for nonterminating streams.
+            let deadline = ContinuousClock.now + .seconds(max(0, controlMessageTimeout))
+            while !eventListenerFinished, ContinuousClock.now < deadline,
+                  startupGeneration == stopGeneration, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            guard startupGeneration == stopGeneration, !Task.isCancelled else { return }
+            finalEventDeliveryCompleted = eventListenerFinished
+            if !finalEventDeliveryCompleted {
+                observabilityEvent("stop_final_delivery_timeout", level: .warning)
+            }
         }
         // Cancellation or a replacement start owns the state after suspension.
         guard startupGeneration == stopGeneration, !Task.isCancelled else { return }
         session = nil
-
+        eventListenerId = nil
         eventTask?.cancel()
         eventTask = nil
 
@@ -744,6 +766,10 @@ public final class LiveStreamingController {
         // Explicit user action: suppress onSessionClosed for this shutdown path.
         suppressSessionClosedCallback = true
         startupGeneration &+= 1
+        let cancelGeneration = startupGeneration
+        eventListenerId = nil
+        eventTask?.cancel()
+        eventTask = nil
 
         // Cancel any in-flight reconnection attempt so it doesn't resume after we cancel.
         reconnectTask?.cancel()
@@ -765,6 +791,7 @@ public final class LiveStreamingController {
                 try await closingSession.close()
             }
         }
+        guard startupGeneration == cancelGeneration else { return }
         session = nil
 
         eventTask?.cancel()
@@ -1351,14 +1378,8 @@ public final class LiveStreamingController {
 
             self.session = newSession
 
-            // Wire the new event stream
-            let newEventTask = Task { [weak self] in
-                for await event in newSession.events {
-                    self?.handleEvent(event)
-                }
-            }
-            eventTask?.cancel()
-            eventTask = newEventTask
+            // Retire the old connection's callbacks when wiring its replacement.
+            listen(to: newSession)
 
             // The interim on screen came from audio the old session already
             // received; the new session will not transcribe it again. Commit it
@@ -1381,10 +1402,29 @@ public final class LiveStreamingController {
         }
     }
 
+    /// Completion acknowledges handleEvent delivery, not provider enqueue.
+    private func listen(to session: StreamingSession) {
+        eventTask?.cancel()
+        let id = UUID()
+        eventListenerId = id
+        eventListenerFinished = false
+        eventTask = Task { [weak self] in
+            for await event in session.events {
+#if DEBUG
+                await self?.beforeEventDelivery?()
+#endif
+                guard !Task.isCancelled, self?.eventListenerId == id else { break }
+                self?.handleEvent(event)
+            }
+            if self?.eventListenerId == id { self?.eventListenerFinished = true }
+        }
+    }
+
     // MARK: - Cleanup helpers
 
     private func cleanup() async {
         observabilityEvent("cleanup_full", level: .debug)
+        eventListenerId = nil
         cancelKeepAliveTimer()
         audioSessionRef.shutdown()
         audioEngine?.inputNode.removeTap(onBus: 0)
@@ -1409,6 +1449,7 @@ public final class LiveStreamingController {
     /// `activateSession()` re-arms the ref when the new session is ready.
     private func cleanupSessionOnly() async {
         observabilityEvent("cleanup_session_only", level: .debug)
+        eventListenerId = nil
         cancelKeepAliveTimer()
         audioSessionRef.deactivatePreservingBuffer()
         do { try await session?.close() }
