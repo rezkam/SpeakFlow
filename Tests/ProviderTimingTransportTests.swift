@@ -1,4 +1,6 @@
 import Foundation
+import Network
+import os
 import Testing
 @testable import SpeakFlowCore
 
@@ -21,6 +23,38 @@ struct ProviderTimingTransportTests {
         let completed = ["POST /fixture HTTP/1.1\r\nContent-Len", "gth: 4\r\n\r\na", "bc", "d"]
             .map { request.receive(Data($0.utf8)) }
         #expect(completed == [false, false, false, true])
+    }
+
+    @Test func loopbackFixtureWaitsForCompleteUploadBeforeReplying() async throws {
+        let server = try await LoopbackTimingServer()
+        defer { server.cancel() }
+        let portNumber = try #require(server.request().url?.port)
+        let port = try #require(NWEndpoint.Port(rawValue: UInt16(portNumber)))
+        let connection = NWConnection(host: .ipv4(.loopback), port: port, using: .tcp)
+        defer { connection.cancel() }
+        let received = OSAllocatedUnfairLock(initialState: false)
+        connection.start(queue: DispatchQueue(label: "fixture-http-client"))
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
+            if let data, !data.isEmpty { received.withLock { $0 = true } }
+        }
+        func send(_ data: Data) async throws {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                })
+            }
+        }
+        // Split the body across writes, as a real upload can arrive in multiple reads.
+        try await send(Data("POST /fixture HTTP/1.1\r\nHost: fixture.invalid\r\nContent-Length: 4\r\n\r\na".utf8))
+        try await Task.sleep(for: .milliseconds(100))
+        try #require(!received.withLock { $0 }, "The fixture must not respond to a partial upload")
+        try await send(Data("bcd".utf8))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !received.withLock({ $0 }), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(received.withLock { $0 }, "The fixture must reply after the complete upload")
     }
 
     @Test func nativeLoopbackRequestCollectsActualNetworkMilestones() async throws {

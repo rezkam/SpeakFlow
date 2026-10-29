@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import CoreServices
 import OSLog
 import SpeakFlowCore
@@ -104,15 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
-            // Only pre-warm audio if microphone is already granted — accessing
-            // AVAudioEngine.inputNode triggers the OS microphone permission dialog.
-            if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
-                Task.detached(priority: .background) {
-                    let engine = AVAudioEngine()
-                    _ = engine.inputNode.outputFormat(forBus: 0)
-                    Logger.audio.info("Audio subsystem pre-warmed")
-                }
-            }
+
         }
 
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName

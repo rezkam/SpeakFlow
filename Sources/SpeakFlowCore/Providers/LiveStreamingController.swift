@@ -34,7 +34,7 @@ import OSLog
 // - Only attempted once (`hasAttemptedReconnect` flag).
 // - Only when `isActive = true` (user didn't explicitly stop).
 // - Provider and config stored as `reconnectProvider`/`reconnectConfig`.
-// - Audio engine stays running during reconnection — no audio gap.
+// - Audio capture stays running during reconnection, preserving queued audio.
 // - After reconnection, interim text state is reset (the server has no prior context).
 //
 // **Configuration:**
@@ -290,7 +290,8 @@ public final class LiveStreamingController {
     private let logger = Logger(subsystem: "SpeakFlow", category: "LiveStreaming")
 
     // Audio capture
-    private var audioEngine: AVAudioEngine?
+    private let microphoneSelection: MicrophoneSelection?
+    private var microphoneCapture: RoutedMicrophoneCapture?
     private var session: StreamingSession?
     private var eventTask: Task<Void, Never>?
     // Survives normal stop's startup invalidation; cancel/replacement retire it
@@ -428,13 +429,14 @@ public final class LiveStreamingController {
 
     private var hasStartedTurn = false
 
-    /// When `true`, `start()` skips all `AVAudioEngine` / CoreAudio setup so unit tests
+    /// When `true`, `start()` skips Core Audio capture setup so unit tests
     /// never touch the real microphone, install audio taps, or consume mic permissions.
     /// Passed in by `RecordingController` when `testMode == .live`.
-    private let skipAudioEngineForTesting: Bool
+    private let skipAudioCaptureForTesting: Bool
 
-    public init(skipAudioEngineForTesting: Bool = false) {
-        self.skipAudioEngineForTesting = skipAudioEngineForTesting
+    public init(skipAudioCaptureForTesting: Bool = false, microphoneSelection: MicrophoneSelection? = nil) {
+        self.microphoneSelection = microphoneSelection
+        self.skipAudioCaptureForTesting = skipAudioCaptureForTesting
     }
 
     private func observabilityEvent(
@@ -475,7 +477,7 @@ public final class LiveStreamingController {
                 "providerId": provider.id,
                 "sampleRate": String(config.sampleRate),
                 "encoding": config.encoding.rawValue,
-                "skipAudioEngineForTesting": skipAudioEngineForTesting ? "true" : "false"
+                "skipAudioCaptureForTesting": skipAudioCaptureForTesting ? "true" : "false"
             ]
         )
 
@@ -494,104 +496,26 @@ public final class LiveStreamingController {
         hasAttemptedReconnect = false
 
         do {
-            // --- Audio engine setup (skipped in unit tests) ---
-            // skipAudioEngineForTesting is set by RecordingController when testMode == .live
+            // --- Audio capture setup (skipped in unit tests) ---
+            // skipAudioCaptureForTesting is set by RecordingController when testMode == .live
             // so tests never touch the real microphone, install CoreAudio taps, or hold
             // mic permissions.  All logic below this block runs in both paths.
-            if !skipAudioEngineForTesting {
-            // Set up audio engine FIRST — synchronously, before any await.
-            // AVAudioEngine / CoreAudio internally asserts on dispatch_get_main_queue().
-            // After an await, Swift concurrency may resume on a cooperative thread pool
-            // thread that satisfies @MainActor but isn't the real main dispatch queue,
-            // causing "BUG IN CLIENT OF LIBDISPATCH" assertion failures.
-            let engine = AVAudioEngine()
-            let inputNode = engine.inputNode
-            let inputFormat = inputNode.outputFormat(forBus: 0)
-
-            guard let outputFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: Double(config.sampleRate),
-                channels: 1,
-                interleaved: false
-            ) else {
-                logger.error("Failed to create audio format")
+            if !skipAudioCaptureForTesting {
+            // Start local capture before awaiting provider readiness.
+            try await startMicrophoneCapture(sampleRate: Double(config.sampleRate))
+            guard generation == startupGeneration, !Task.isCancelled else {
+                if generation == startupGeneration { stopMicrophoneCapture() }
                 return false
             }
-
-            guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-                logger.error("Failed to create audio converter")
-                return false
-            }
-
-            let sampleRate = Double(config.sampleRate)
-            let sessionRef = self.audioSessionRef
-
-            // Install audio tap — runs on audio thread, uses thread-safe sessionRef.
-            // Must NOT capture self or any @MainActor state — Swift 6 inserts
-            // isolation checks that crash on the audio thread.
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { @Sendable buffer, _ in
-                let inputSampleRate = inputFormat.sampleRate
-                let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * sampleRate / inputSampleRate)
-                guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
-
-                var error: NSError?
-                nonisolated(unsafe) var consumed = false
-                converter.convert(to: convertedBuffer, error: &error) { _, status in
-                    if consumed {
-                        status.pointee = .noDataNow
-                        return nil
-                    }
-                    consumed = true
-                    status.pointee = .haveData
-                    return buffer
-                }
-
-                guard let channelData = convertedBuffer.floatChannelData?[0] else { return }
-                let frames = Int(convertedBuffer.frameLength)
-
-                // ── Vectorised float→int16 PCM conversion ─────────────────────────
-                //
-                // Previous: per-sample loop with 341 iterations, each calling
-                //   `withUnsafeBytes(of:) { pcmData.append(contentsOf: $0) }`
-                //   → 341 function calls + bounds checks per 21ms tap callback
-                //   → ~16,000 calls/sec on the real-time audio thread
-                //
-                // Now: vDSP 3-step pipeline + one Data copy — zero per-sample overhead.
-                //   1. vDSP_vclip: clamp to [-1, 1]  (= max(-1, min(1, x)))
-                //   2. vDSP_vsmul: multiply by 32767  (= scale to Int16 range)
-                //   3. vDSP_vfix16: truncate to Int16  (= Int16(Float) truncation)
-                //
-                // This is the hottest code path in the app (fires every ~21ms).
-                // All three vDSP calls operate in-place on a stack-like scratch buffer,
-                // keeping the real-time audio thread allocation-free and branch-free.
-                //
-                // NOTE: vDSP_vfixr16 (rounds instead of truncates) is NOT used here —
-                // it would collapse [-1,1] to {-1,0,1} without a pre-scale step.
-                // The 3-step pipeline keeps conversion deterministic and allocation-free.
-                let n = vDSP_Length(frames)
-                // `UnsafeBufferPointer` → mutable scratch. channelData is owned by
-                // convertedBuffer which lives for the full closure scope.
-                var scratch = [Float](UnsafeBufferPointer(start: channelData, count: frames))
-                var low: Float = -1.0, high: Float = 1.0, scale: Float = 32767.0
-                vDSP_vclip(scratch, 1, &low, &high, &scratch, 1, n)
-                vDSP_vsmul(scratch, 1, &scale, &scratch, 1, n)
-                var int16Buffer = [Int16](repeating: 0, count: frames)
-                vDSP_vfix16(scratch, 1, &int16Buffer, 1, n)
-                let pcmData = int16Buffer.withUnsafeBytes { Data($0) }
-                sessionRef.enqueueAudio(pcmData)
-            }
-
-            try engine.start()
-            self.audioEngine = engine
             onAudioCaptureStarted?()
             observabilityEvent("audio_capture_started", metadata: ["providerId": provider.id])
             } else {
                 // Test mode has no physical engine, but it models a successful local
                 // capture start so controller-level lifecycle tests cover this boundary.
                 onAudioCaptureStarted?()
-            } // end if !skipAudioEngineForTesting
+            } // end if !skipAudioCaptureForTesting
 
-            // NOW connect to provider (async WebSocket) — audio engine is already running
+            // NOW connect to provider (async WebSocket), audio capture is already running
             // and buffered via sessionRef.isActive being false until we set it below.
             logger.info("Connecting to \(provider.displayName, privacy: .public)...")
             let streamSession = try await provider.startSession(config: config)
@@ -602,6 +526,7 @@ public final class LiveStreamingController {
             guard generation == startupGeneration, !Task.isCancelled else {
                 logger.info("Initial streaming start invalidated before provider session became ready")
                 observabilityEvent("start_invalidated_after_handshake", level: .debug)
+                if generation == startupGeneration { stopMicrophoneCapture() }
                 try? await streamSession.close()
                 return false
             }
@@ -613,6 +538,7 @@ public final class LiveStreamingController {
             guard generation == startupGeneration, !Task.isCancelled else {
                 logger.info("Initial streaming start invalidated while configuring provider session")
                 observabilityEvent("start_invalidated_during_session_configuration", level: .debug)
+                if generation == startupGeneration { stopMicrophoneCapture() }
                 try? await streamSession.close()
                 return false
             }
@@ -646,6 +572,78 @@ public final class LiveStreamingController {
         }
     }
 
+    private func startMicrophoneCapture(sampleRate: Double) async throws {
+        let capture = RoutedMicrophoneCapture(selection: microphoneSelection ?? .shared)
+        let sessionRef = audioSessionRef
+        capture.onFailure = { [weak self] error in self?.onError?(error) }
+        microphoneCapture = capture
+        try await capture.start { inputFormat in
+            guard let outputFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+                channels: 1, interleaved: false
+            ), let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+                throw MicrophoneError.invalidFormat
+            }
+            return { @Sendable buffer in
+                let inputSampleRate = inputFormat.sampleRate
+                let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * sampleRate / inputSampleRate)
+                guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
+
+                var error: NSError?
+                nonisolated(unsafe) var consumed = false
+                converter.convert(to: convertedBuffer, error: &error) { _, status in
+                    if consumed {
+                        status.pointee = .noDataNow
+                        return nil
+                    }
+                    consumed = true
+                    status.pointee = .haveData
+                    return buffer
+                }
+
+                guard let channelData = convertedBuffer.floatChannelData?[0] else { return }
+                let frames = Int(convertedBuffer.frameLength)
+
+                // ── Vectorised float→int16 PCM conversion ─────────────────────────
+                //
+                // Previous: per-sample loop with 341 iterations, each calling
+                //   `withUnsafeBytes(of:) { pcmData.append(contentsOf: $0) }`
+                //   → 341 function calls + bounds checks per 21ms tap callback
+                //   → ~16,000 calls/sec on the real-time audio thread
+                //
+                // Now: vDSP 3-step pipeline + one Data copy, zero per-sample overhead.
+                //   1. vDSP_vclip: clamp to [-1, 1]  (= max(-1, min(1, x)))
+                //   2. vDSP_vsmul: multiply by 32767  (= scale to Int16 range)
+                //   3. vDSP_vfix16: truncate to Int16  (= Int16(Float) truncation)
+                //
+                // This is the hottest code path in the app (fires every ~21ms).
+                // All three vDSP calls operate in-place on a stack-like scratch buffer,
+                // keeping the real-time audio thread allocation-free and branch-free.
+                //
+                // NOTE: vDSP_vfixr16 (rounds instead of truncates) is NOT used here,
+                // it would collapse [-1,1] to {-1,0,1} without a pre-scale step.
+                // The 3-step pipeline keeps conversion deterministic and allocation-free.
+                let n = vDSP_Length(frames)
+                // `UnsafeBufferPointer` → mutable scratch. channelData is owned by
+                // convertedBuffer which lives for the full closure scope.
+                var scratch = [Float](UnsafeBufferPointer(start: channelData, count: frames))
+                var low: Float = -1.0, high: Float = 1.0, scale: Float = 32767.0
+                vDSP_vclip(scratch, 1, &low, &high, &scratch, 1, n)
+                vDSP_vsmul(scratch, 1, &scale, &scratch, 1, n)
+                var int16Buffer = [Int16](repeating: 0, count: frames)
+                vDSP_vfix16(scratch, 1, &int16Buffer, 1, n)
+                let pcmData = int16Buffer.withUnsafeBytes { Data($0) }
+                sessionRef.enqueueAudio(pcmData)
+            }
+
+        }
+    }
+
+    private func stopMicrophoneCapture() {
+        microphoneCapture?.stop()
+        microphoneCapture = nil
+    }
+
     /// Stop streaming: close mic, finalize and close provider session.
     public func stop(trailingFinalTimeout: Double = 2.0) async {
         observabilityEvent(
@@ -662,13 +660,11 @@ public final class LiveStreamingController {
         reconnectTask = nil
 
         // ALWAYS tear down mic capture, even if isActive is false.
-        // During reconnection, isActive is temporarily false but the audio engine
+        // During reconnection, isActive is temporarily false but the audio capture
         // is intentionally left running for seamless reconnect. If the user presses
         // stop during that window, we must immediately stop capture — leaving the
         // mic open violates the user's expectation that stop means stop.
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        stopMicrophoneCapture()
         // Capture has stopped; deliver what was already captured (for example
         // audio queued behind network backpressure) before finalizing, bounded
         // so a stalled network cannot hold stop open. Cancel discards instead.
@@ -776,9 +772,7 @@ public final class LiveStreamingController {
         reconnectTask = nil
 
         // ALWAYS tear down mic capture — same rationale as stop().
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        stopMicrophoneCapture()
         audioSessionRef.shutdown()
 
         // Just like stop(), tear down the rest even if already inactive.
@@ -989,7 +983,7 @@ public final class LiveStreamingController {
                             return
                         }
 
-                        // Clean up the dead session (but keep audio engine running)
+                        // Clean up the dead session (but keep audio capture running)
                         await self.cleanupSessionOnly()
 
                         // Check for cancellation again after cleanup
@@ -1352,7 +1346,7 @@ public final class LiveStreamingController {
     /// This method:
     /// 1. Opens a new session with the same provider and config
     /// 2. Wires the new session's event stream
-    /// 3. Reactivates streaming (audio engine is already running, tap stays installed)
+    /// 3. Reactivates streaming (audio capture is already running, tap stays installed)
     ///
     /// Returns `true` on success, `false` if the reconnect attempt itself fails.
     ///
@@ -1427,9 +1421,7 @@ public final class LiveStreamingController {
         eventListenerId = nil
         cancelKeepAliveTimer()
         audioSessionRef.shutdown()
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        stopMicrophoneCapture()
         session = nil
         eventTask?.cancel()
         eventTask = nil
@@ -1438,7 +1430,7 @@ public final class LiveStreamingController {
         lastTranscriptionEventAt = nil
     }
 
-    /// Clean up only the session (WebSocket) while keeping the audio engine running.
+    /// Clean up only the session (WebSocket) while keeping the audio capture running.
     /// Used during reconnection to avoid an audio gap.
     ///
     /// IMPORTANT: Must clear audioSessionRef so the audio tap stops dispatching
@@ -1473,15 +1465,15 @@ extension LiveStreamingController {
         audioSessionRef.isActive
     }
 
-    /// Whether the audio engine is still allocated (mic capture is running).
-    /// nil means the engine has been torn down and mic capture has stopped.
-    public var _testAudioEngineIsNil: Bool {
-        audioEngine == nil
+    /// Whether the audio capture is still allocated (mic capture is running).
+    /// nil means capture has been torn down and mic capture has stopped.
+    public var _testAudioCaptureIsNil: Bool {
+        microphoneCapture == nil
     }
 
-    /// Inject a dummy audio engine to simulate active mic capture in tests.
-    public func _testSetAudioEngine(_ engine: AVAudioEngine?) {
-        audioEngine = engine
+    /// Inject a dummy audio capture to simulate active mic capture in tests.
+    func _testSetAudioCapture(_ capture: RoutedMicrophoneCapture?) {
+        microphoneCapture = capture
     }
 
     /// Force set the audio session ref state for tests.

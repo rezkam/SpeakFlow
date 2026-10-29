@@ -781,7 +781,7 @@ struct RecorderStartFailureTests {
             #expect(!recorder._testIsRecording, "isRecording must be false after failed start")
             #expect(!recorder._testHasProcessingTimer, "No orphan processing timer")
             #expect(!recorder._testHasCheckTimer, "No orphan check timer")
-            #expect(!recorder._testHasAudioEngine, "No orphan audio engine")
+            #expect(!recorder._testHasAudioCapture, "No orphan audio engine")
         }
     }
 
