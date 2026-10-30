@@ -51,7 +51,7 @@ struct LocalSpeechModelCard: View {
             Text(model.mode == .batch ? "Transcribes completed recording chunks. Apple Silicon required."
                 : "Streams cumulative text while you speak. 1120 ms export; this is not a latency guarantee.")
                 .font(.callout).lineLimit(2).frame(height: descriptionHeight, alignment: .topLeading)
-            Text("Download: \(model.manifest.transferBytes.formatted()) bytes · \(model.manifest.license)\nRuntime RAM: not yet qualified · Revision \(model.manifest.revision.prefix(8))")
+            Text("Download: \(ModelDisplayFormatting.size(model.manifest.transferBytes)) · \(model.manifest.license)\nLive app memory and CPU shown above · Revision \(model.manifest.revision.prefix(8))")
                 .font(.caption).foregroundStyle(Theme.text2).lineLimit(2)
             HStack(spacing: 8) {
                 Button("Download") { controller.reviewDownload(model.id) }.disabled(!controller.canDownload(model.id))

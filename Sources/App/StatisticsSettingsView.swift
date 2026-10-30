@@ -319,7 +319,9 @@ struct StatisticsSettingsView: View {
         case historicalProviderId:
             "Historical data"
         default:
-            providerId
+            ProviderRegistry.shared.provider(for: providerId)?.displayName
+                ?? LocalModelsController.shared.reviewedModels.first(where: { $0.providerID == providerId })?.name
+                ?? (providerId.hasPrefix("local:") ? "Local model (older revision)" : providerId)
         }
     }
 

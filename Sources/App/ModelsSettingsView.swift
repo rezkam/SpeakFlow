@@ -4,6 +4,7 @@ import SpeakFlowCore
 struct ModelsSettingsView: View {
     @State var vad = VADInstallController.shared
     @State var models = LocalModelsController.shared
+    @State private var resources = LocalProcessResourceUsage()
     @FocusState private var downloadFocused: Bool
     @ScaledMetric private var vadCardHeight = 248.0
     @ScaledMetric private var vadStatusHeight = 38.0
@@ -14,6 +15,7 @@ struct ModelsSettingsView: View {
                 .font(.callout)
                 .foregroundStyle(Theme.text2)
             localPreferences
+            resourceUsage
             Text(models.resourceWarning ?? "")
                 .font(.caption).foregroundStyle(Theme.text2)
                 .lineLimit(2).frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .topLeading)
@@ -33,7 +35,7 @@ struct ModelsSettingsView: View {
                     .font(.caption).foregroundStyle(Theme.text2)
                 Text("Detects speech and silence for local voice activity detection. Does not transcribe words.")
                     .font(.callout).fixedSize(horizontal: false, vertical: true)
-                Text("Download: 1,063,425 bytes · License: MIT")
+                Text("Download: \(ModelDisplayFormatting.size(LocalVADAssets.manifest.transferBytes)) · License: MIT")
                     .font(.caption).foregroundStyle(Theme.text2)
                 HStack {
                     Button("Download") { vad.reviewDownload() }
@@ -76,6 +78,7 @@ struct ModelsSettingsView: View {
             if vad !== models.vad { await vad.refresh() }
             await models.refresh()
             while !Task.isCancelled {
+                resources.sample()
                 do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
                 await models.refreshRuntime()
             }
@@ -89,11 +92,29 @@ struct ModelsSettingsView: View {
         }
     }
 
+    private var resourceUsage: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Live SpeakFlow resources").font(.subheadline.bold())
+            HStack {
+                Text("Memory: \(resources.memoryBytes.map { ModelDisplayFormatting.size(Int64($0)) } ?? "Unavailable")")
+                Text("Resident: \(resources.residentBytes.map { ModelDisplayFormatting.size(Int64($0)) } ?? "Unavailable")")
+                Text("CPU: \(resources.cpuPercent.map { String(format: "%.1f%%", $0) } ?? "Measuring...")")
+            }
+            .font(.caption).monospacedDigit()
+            Text("Whole app, including loaded models. Model-only and shared accelerator memory are not isolated. CPU: 100% equals one core.")
+                .font(.caption).foregroundStyle(Theme.text2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12).background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
+    }
+
     private var confirmation: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(vad.isDeleteReview ? "Delete this voice activity revision?" : "Download voice activity detection?").font(.headline)
             Text("Silero VAD v6.2.1 · MIT license")
-            Text("5 files · 1,063,425 bytes")
+            Text("5 files · \(ModelDisplayFormatting.size(LocalVADAssets.manifest.transferBytes))")
             Text("Source: FluidInference/silero-vad-coreml\nRevision: b419383c55c110e2c9271fa6ee0ea83d03c70d96")
                 .font(.caption).textSelection(.enabled)
             if vad.isDeleteReview {
@@ -101,14 +122,14 @@ struct ModelsSettingsView: View {
                     ? "Recordings requiring voice activity detection will be unavailable until these files are downloaded again. Other models remain installed."
                     : "Only the named incomplete transfers are removed. Installed models remain available.")
                     .font(.callout).fixedSize(horizontal: false, vertical: true)
-                Text(vad.measuredBytes.map { "Measured files: \($0.formatted()) bytes." } ?? "Installed size could not be measured.")
+                Text(vad.measuredBytes.map { "Measured files: \(ModelDisplayFormatting.size($0))." } ?? "Installed size could not be measured.")
                     .font(.caption)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(vad.availableRemovalTargets, id: \.name) { target in
                             Toggle(isOn: Binding(get: { vad.removalTargets.contains(target) },
                                 set: { vad.selectRemovalTarget(target.name, included: $0) })) {
-                                Text("\(target.name)\n\(target.bytes.formatted()) bytes").font(.caption2)
+                                Text("\(target.name)\n\(ModelDisplayFormatting.size(target.bytes))").font(.caption2)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -143,7 +164,7 @@ struct ModelsSettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(manifest.id == LocalVADAssets.manifest.id ? "Silero VAD v6.2.1" :
                         models.models.first(where: { $0.id == review.modelID })?.name ?? manifest.id).font(.subheadline.bold())
-                    Text("\(manifest.artifacts.count) files · \(manifest.transferBytes.formatted()) bytes · \(manifest.license)")
+                    Text("\(manifest.artifacts.count) files · \(ModelDisplayFormatting.size(manifest.transferBytes)) · \(manifest.license)")
                         .font(.caption)
                     Text("Source: \(manifest.repository)\nRevision: \(manifest.revision)")
                         .font(.caption2).textSelection(.enabled)
@@ -151,17 +172,17 @@ struct ModelsSettingsView: View {
             }
             if review.kind == .download {
                 let total = review.manifests.reduce(0) { $0 + $1.transferBytes }
-                Text("Total: \(total.formatted()) bytes. Files are verified before installation. No audio is uploaded.")
+                Text("Total: \(ModelDisplayFormatting.size(total)). Files are verified before installation. No audio is uploaded.")
                     .font(.callout)
             } else {
-                Text(review.installedBytes.map { "Measured files: \($0.formatted()) bytes." } ?? "Installed size could not be measured.")
+                Text(review.installedBytes.map { "Measured files: \(ModelDisplayFormatting.size($0))." } ?? "Installed size could not be measured.")
                     .font(.callout)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(review.availableRemovalTargets, id: \.name) { target in
                             Toggle(isOn: Binding(get: { models.confirmation?.removalTargets.contains(target) == true },
                                 set: { models.selectRemovalTarget(target.name, included: $0) })) {
-                                Text("\(target.name)\n\(target.bytes.formatted()) bytes").font(.caption2)
+                                Text("\(target.name)\n\(ModelDisplayFormatting.size(target.bytes))").font(.caption2)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }

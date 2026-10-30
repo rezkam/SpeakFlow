@@ -240,7 +240,7 @@ final class LocalModelsController {
                 if dependencies.contains(LocalVADAssets.manifest) { try await self.vad.installAsDependency(LocalVADAssets.manifest) }
                 try await self.store.installer.install(model.manifest, consent: model.manifest) { [weak self] event in
                     await MainActor.run {
-                        self?.entry(model.id).message = "\(event.phase.rawValue.capitalized): \(event.completedBytes) of \(event.totalBytes) bytes."
+                        self?.entry(model.id).message = "\(event.phase.rawValue.capitalized): \(ModelDisplayFormatting.size(event.completedBytes)) of \(ModelDisplayFormatting.size(event.totalBytes))."
                     }
                 }
                 self.entry(model.id).isInstalled = true

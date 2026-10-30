@@ -250,7 +250,7 @@ final class VADInstallController {
             try await installer.install(approved, consent: approved) { [weak self] event in
                 let message: String
                 switch event.phase {
-                case .downloading: message = "Downloading: \(event.completedBytes) of \(event.totalBytes) bytes."
+                case .downloading: message = "Downloading: \(ModelDisplayFormatting.size(event.completedBytes)) of \(ModelDisplayFormatting.size(event.totalBytes))."
                 case .verifying: message = "Verifying downloaded voice activity files..."
                 case .preparing: message = "Preparing the verified installation..."
                 }
