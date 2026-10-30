@@ -310,7 +310,63 @@ and approval of the release version and notes. Do not publish before that approv
 
 ### Menu bar icon missing (macOS 26)
 
-Control Center can file SpeakFlow under the app that launched it (for example a terminal
-or agent app). If that app is not allowed in System Settings > Menu Bar, the icon is
-hidden. Launch SpeakFlow from Finder or `open -a`. Check the
-`com.apple.controlcenter:appStatusItems` log for "Moving host to blocked list".
+Treat this as a recurring development-launch issue. Do not ask the user to rediscover
+these steps or assume the app's own enabled toggle proves its icon is visible.
+
+Control Center can associate SpeakFlow's status item with its launcher, including Codex
+or Ghostty. A blocked launcher can hide the icon even when SpeakFlow's standalone
+registration is allowed. Compiling alone is not evidence of the cause; inspect the
+stored associations and runtime logs.
+
+#### Diagnose from configuration first
+
+1. Identify the running executable and derive its bundle identifier from the installed
+   app's `Contents/Info.plist`. Check for additional running instances and installed or
+   development copies. Prefer `/Applications/SpeakFlow.app` as the installed app; do not
+   remove build copies, test preferences, or app bundles without specific approval.
+2. Inspect the app's `NSStatusItem VisibleCC Item-0` preference, but do not stop there.
+   The authoritative association store is
+   `$HOME/Library/Group Containers/group.com.apple.controlcenter/Library/Preferences/group.com.apple.controlcenter.plist`.
+   Its `trackedApplications` value is Data containing a nested binary property list,
+   not JSON. Decode it with Foundation's `PropertyListSerialization`.
+3. Find every reference to the derived bundle identifier, especially inside
+   `menuItemLocations` on records whose `location` belongs to another app. Check Codex,
+   Ghostty, other development launchers, and any ad-hoc executable registrations.
+   Compare nearby `.bak-*` files read-only if a prior repair is relevant.
+4. A standalone bundle identity record and its separate allowed location record are
+   normal, not duplicate apps. The desired state is one standalone SpeakFlow ownership
+   registration with `isAllowed = true`, without SpeakFlow listed under launchers.
+   Do not collapse the store into one raw record.
+
+#### Targeted repair
+
+1. Explain the exact launcher associations found and obtain approval before removing
+   them. Obtain permission for a timestamped backup of the current plist, which may
+   contain local paths. Preserve existing backups; never restore an entire old backup
+   over the current settings just to repair SpeakFlow.
+2. Remove only SpeakFlow's entry from the approved launchers' `menuItemLocations` arrays.
+   Preserve each launcher's permission, other menu items, unrelated records, and the
+   standalone allowed SpeakFlow registration. Do not enable the launcher globally.
+   An empty launcher menu-item array can remain; deleting the launcher is unnecessary.
+3. Serialize the updated nested array back to binary-plist Data. Update only
+   `trackedApplications` using a preferences-aware write, such as `defaults write` with
+   the plist path (without `.plist`) and `-data` containing the serialized hex bytes.
+   Avoid a raw on-disk edit that the preferences cache may overwrite.
+4. Restart `ControlCenter` to reload its associations. Re-read and decode the live
+   plist afterward: the approved launcher references must be absent, SpeakFlow's own
+   registration must remain allowed, and unrelated settings must be unchanged.
+   Control Center may reorder records on reload; compare their contents as a multiset,
+   not by array index, while still checking that no records were added or lost.
+5. Inspect `com.apple.controlcenter:appStatusItems` logs for SpeakFlow being unblocked
+   and added to displayable items, rather than "Moving host to blocked list". If the
+   user requested config-only inspection, respect that boundary and report visual
+   visibility as unverified instead of claiming the icon is visible.
+
+#### Prevent recurrence during development
+
+Launch the installed app through Finder or Launch Services (`open -a SpeakFlow`), not by
+executing a build binary directly from a development launcher. Keep one intended running
+instance. After installing or launching an RC, repeat the association check before
+handoff; Launch Services alone is not proof that ownership stayed correct. If stale
+launcher ownership returns, report it and apply the targeted repair only with the
+required approval. Never silently delete registrations or unrelated app copies.
