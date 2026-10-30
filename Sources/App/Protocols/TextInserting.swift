@@ -15,6 +15,7 @@ protocol TextInserting: AnyObject {
     /// not start a recording that would type without one.
     @discardableResult
     func captureTarget() -> Bool
+    func isTargetAppFrontmost() -> Bool
     /// Atomically replaces a tail segment by deleting `replacingChars` from the end
     /// and then typing `text`. Implementations should preserve ordering as one unit.
     func replaceTail(replacingChars: Int, with text: String)

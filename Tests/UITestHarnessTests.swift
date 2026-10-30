@@ -8,7 +8,7 @@ struct UITestHarnessTests {
     @Test @MainActor
     func keyboardAndButtonCallbacksReachTheRecordingToggle() throws {
         guard NativeUIProbeSupport.isChild(for: "UITestHarnessTests") else {
-            try NativeUIProbeSupport.runChild(suite: "UITestHarnessTests")
+            try NativeUIProbeSupport.runChild(suite: "UITestHarnessTests", expectedTests: 1)
             return
         }
         _ = NSApplication.shared

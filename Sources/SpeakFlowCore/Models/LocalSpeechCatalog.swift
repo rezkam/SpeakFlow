@@ -41,24 +41,31 @@ public enum LocalSpeechCatalog {
             throw LocalModelError.invalidManifest
         }
         return try approved.map { id in
-            guard let manifest = manifests.first(where: { $0.id == id.rawValue }) else {
-                throw LocalModelError.invalidManifest
-            }
-            try manifest.validate()
-            let name: String
-            let mode: LocalSpeechMode
-            switch id {
-            case .parakeet110M:
-                name = "Parakeet 110M"
-                mode = .batch
-            case .parakeetV2:
-                name = "Parakeet 0.6B v2"
-                mode = .batch
-            case .nemotron1120:
-                name = "Nemotron 3.5 Streaming 0.6B"
-                mode = .streaming
-            }
-            return LocalSpeechModel(id: id, name: name, mode: mode, manifest: manifest)
+            guard let manifest = manifests.first(where: { $0.id == id.rawValue }) else { throw LocalModelError.invalidManifest }
+            return try model(manifest)
         }
+    }
+
+    public static func retainedModels() throws -> [LocalSpeechModel] {
+        guard let url = Bundle.module.url(forResource: "LocalSpeechRetainedManifests", withExtension: "json") else {
+            throw LocalModelError.invalidManifest
+        }
+        let manifests = try JSONDecoder().decode([LocalModelManifest].self, from: Data(contentsOf: url))
+        let retained = try manifests.map(model)
+        _ = try LocalModelVersionCatalog(preferred: models(), retained: retained)
+        return retained
+    }
+
+    private static func model(_ manifest: LocalModelManifest) throws -> LocalSpeechModel {
+        try manifest.validate()
+        guard let id = LocalSpeechModelID(rawValue: manifest.id) else { throw LocalModelError.invalidManifest }
+        let name: String
+        let mode: LocalSpeechMode
+        switch id {
+        case .parakeet110M: name = "Parakeet 110M"; mode = .batch
+        case .parakeetV2: name = "Parakeet 0.6B v2"; mode = .batch
+        case .nemotron1120: name = "Nemotron 3.5 Streaming 0.6B"; mode = .streaming
+        }
+        return LocalSpeechModel(id: id, name: name, mode: mode, manifest: manifest)
     }
 }

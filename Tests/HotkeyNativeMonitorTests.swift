@@ -9,7 +9,7 @@ struct HotkeyNativeMonitorTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_UI_PROBES"] == "1")) @MainActor
     func applicationDispatchReachesTheLocalMonitor() async throws {
         guard NativeUIProbeSupport.isChild(for: "HotkeyNativeMonitorTests") else {
-            try NativeUIProbeSupport.runChild(suite: "HotkeyNativeMonitorTests")
+            try NativeUIProbeSupport.runChild(suite: "HotkeyNativeMonitorTests", expectedTests: 1)
             return
         }
         _ = NSApplication.shared

@@ -10,6 +10,7 @@ import SpeakFlowCore
 /// lives in the controllers — this class only handles app-level concerns.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var localModelResources: LocalModelResourceMonitor?
     private var uiTestHarness: UITestHarnessController?
     private let accessibilityPrewarmer = ApplicationAccessibilityPrewarmer()
     private var windowCloseObserver: Any?
@@ -74,8 +75,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registry.register(DeepgramProvider())
         registry.register(MistralProvider())
         registry.register(MistralBatchProvider())
+        let localModels = LocalModelsController.shared
+        localModels.register(in: registry)
+        ProviderSettings.shared.onActiveProviderChanged = { localModels.providerSelectionChanged($0) }
+        Task { await localModels.bootstrap() }
 
         let recording = RecordingController.shared
+        recording.modelOperationInProgress = { localModels.blocksRecording }
+        if !isUITestMode {
+            localModelResources = LocalModelResourceMonitor { event in
+                if event == .sleep { recording.prepareForSystemSleep() }
+                localModels.handleResourceEvent(event)
+            }
+        }
         let permissions = PermissionController.shared
         configureObservabilityForCurrentSettings()
 
@@ -84,28 +96,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recording.testMode = useMockRecordingInUITests ? .mock : .live
         } else {
             permissions.checkInitialPermissions()
-
-            if VADProcessor.isAvailable && Settings.shared.vadEnabled {
-                Task {
-                    let timedOut = await withTaskGroup(of: Bool.self) { group in
-                        group.addTask {
-                            await VADModelCache.shared.warmUp(threshold: Settings.shared.vadThreshold)
-                            return false
-                        }
-                        group.addTask {
-                            try? await Task.sleep(for: .seconds(15))
-                            return true
-                        }
-                        let result = await group.next() ?? false
-                        group.cancelAll()
-                        return result
-                    }
-                    if timedOut {
-                        Logger.audio.warning("VAD model warm-up timed out after 15s")
-                    }
-                }
-            }
-
         }
 
         let hotkeyName = HotkeySettings.shared.currentHotkey.displayName

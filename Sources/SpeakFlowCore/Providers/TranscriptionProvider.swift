@@ -290,10 +290,15 @@ public final class ProviderSettings {
 
     // MARK: - Active Provider
 
+    public var onActiveProviderChanged: (@MainActor (String) -> Void)?
+
     /// The currently active provider ID.
     public var activeProviderId: String {
         get { defaults.string(forKey: Keys.activeProvider) ?? ProviderId.chatGPT }
-        set { defaults.set(newValue, forKey: Keys.activeProvider) }
+        set {
+            defaults.set(newValue, forKey: Keys.activeProvider)
+            onActiveProviderChanged?(newValue)
+        }
     }
 
     // MARK: - API Key Storage (delegated to UnifiedAuthStorage)

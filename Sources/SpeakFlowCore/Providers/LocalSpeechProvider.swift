@@ -7,14 +7,31 @@ extension LocalSpeechModel {
 
 public struct LocalBatchSpeechProvider: BatchTranscriptionProvider {
     private let lease: LocalSpeechLease
+    private let requests: LocalBatchSpeechRequests
     public var id: String { lease.model.providerID }
     public var displayName: String { lease.model.name }
     public let mode = ProviderMode.batch
     public let isConfigured = true
     public var authRequirement: ProviderAuthRequirement { .none }
 
-    public init(lease: LocalSpeechLease) { self.lease = lease }
-    public func transcribe(audio: Data) async throws -> String {
+    public init(lease: LocalSpeechLease) {
+        self.lease = lease
+        requests = LocalBatchSpeechRequests(lease: lease)
+    }
+    public func transcribe(audio: Data) async throws -> String { try await requests.transcribe(audio) }
+}
+
+/// A batch recording has one native request in flight. Reject overlap before decoding
+/// another WAV, so a slow model cannot accumulate an unbounded queue of audio arrays.
+private actor LocalBatchSpeechRequests {
+    let lease: LocalSpeechLease
+    private var busy = false
+    init(lease: LocalSpeechLease) { self.lease = lease }
+    func transcribe(_ audio: Data) async throws -> String {
+        try Task.checkCancellation()
+        guard !busy else { throw LocalSpeechRuntimeError.audioBacklog }
+        busy = true
+        defer { busy = false }
         let samples = try LocalSpeechAudio.batchSamples(audio)
         do { return try await lease.transcribe(samples: samples) } catch { throw localSpeechFailure(error) }
     }

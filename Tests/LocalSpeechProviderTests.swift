@@ -204,3 +204,41 @@ struct LocalSpeechProviderTests {
     }
 
 }
+
+private actor ProviderBlockedBatchEngine: LocalBatchSpeechEngine {
+    let gate: ProviderPauseGate
+    init(gate: ProviderPauseGate) { self.gate = gate }
+    func transcribe(samples: [Float]) async throws -> String { await gate.wait(); return "fixture words" }
+    func cleanup() async {}
+}
+
+extension LocalSpeechProviderTests {
+    @Test func aBatchProviderRejectsOverlapInsteadOfGrowingANativeBacklog() async throws {
+        let gate = ProviderPauseGate(), engine = ProviderBlockedBatchEngine(gate: gate)
+        let runtime = LocalSpeechRuntime(root: root, verify: { _, root in root }, load: { _, _ in engine })
+        let lease = try await runtime.acquire(model(.parakeet110M))
+        let provider = LocalBatchSpeechProvider(lease: lease)
+        let audio = WavEncoder.encode(samples: [0, 0], sampleRate: 16000)
+        let first = Task { try await provider.transcribe(audio: audio) }
+        try await waitUntilAsync { await gate.started }
+        // Bound the failure observation so an unbounded native queue cannot hang the test.
+        actor ResultState {
+            var rejected = false
+            func reject() { rejected = true }
+        }
+        let state = ResultState()
+        let second = Task {
+            do { _ = try await provider.transcribe(audio: audio) }
+            catch LocalSpeechRuntimeError.audioBacklog { await state.reject() }
+            catch is CancellationError { }
+            catch { Issue.record("Unexpected batch admission failure") }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await state.rejected)
+        second.cancel()
+        await gate.open()
+        _ = try await first.value
+        await second.value
+        await lease.release()
+    }
+}

@@ -9,7 +9,7 @@ struct BatchInsertionNativeTests {
     func nativeBulkCommit() async throws {
         let suite = "BatchInsertionNativeTests"
         guard NativeUIProbeSupport.isChild(for: suite) else {
-            try NativeUIProbeSupport.runChild(suite: suite)
+            try NativeUIProbeSupport.runChild(suite: suite, expectedTests: 1)
             return
         }
         _ = NSApplication.shared

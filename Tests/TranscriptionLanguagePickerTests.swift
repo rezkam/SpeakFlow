@@ -9,7 +9,7 @@ struct TranscriptionLanguagePickerTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_UI_PROBES"] == "1")) @MainActor
     func realtimeIsAutomaticWhileBatchRemainsEditable() async throws {
         guard NativeUIProbeSupport.isChild(for: "TranscriptionLanguagePickerTests") else {
-            try NativeUIProbeSupport.runChild(suite: "TranscriptionLanguagePickerTests")
+            try NativeUIProbeSupport.runChild(suite: "TranscriptionLanguagePickerTests", expectedTests: 1)
             return
         }
         var language = "fr"

@@ -143,3 +143,15 @@ import FluidAudio
 private enum ModelHubPolicyProbe {
     static var offline: Bool { ModelHub.offlineMode }
 }
+
+extension ExplicitModelInstallerTests {
+    @Test func retainedPartialsNameTheirExactRevisionForConfirmedCleanup() async throws {
+        let root = root(), manifest = manifest()
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, _, _ in throw LocalModelError.transferFailed },
+                                               availableBytes: { _ in Int64.max })
+        await #expect(throws: LocalModelError.transferFailed) { try await installer.install(manifest, consent: manifest) }
+        let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        #expect(names.count == 1)
+        #expect(names.first?.hasPrefix("partial-\(manifest.installationName)-") == true)
+    }
+}

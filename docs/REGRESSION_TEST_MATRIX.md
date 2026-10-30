@@ -93,6 +93,42 @@ ordered final delivery through the existing live controller. Native session clos
 its owning recording lease until insertion and submit finish. Selecting another provider
 invalidates pending local selection without cancelling the recording already in progress.
 
+`LocalRecordingPreparationTests` and `KeyInterceptorPendingTests` cover microphone-off
+preparation, Enter pass-through and Escape cancellation, unavailable keyboard interception,
+late target/provider changes, sleep, and pending keys drained before recording starts.
+`LocalModelsControllerTests`, `LocalModelSelectionTests` and `VADInstallControllerTests`
+cover explicit action eligibility, exact consent, selection after successful load, failed-load
+preservation, unload without deletion, and in-use locks. `LocalModelRemovalTests` rejects
+unexpected nested symlinks before removal. Tests inject removal callbacks and retain fixtures.
+`LocalModelResourceMonitorTests` checks sleep, wake and thermal notification routing.
+Memory pressure cancels pending native loads and releases idle ASR/VAD handles while keeping
+active inference alive until its owners finish. Wake never restarts microphone capture.
+Startup keeps both speech and VAD cold unless preload is explicitly enabled. Batch preload
+loads required VAD first and stops on dependency failure. The configured idle interval
+applies to both caches; VAD expiry retains files and cannot retire an active processor lease.
+`LocalStreamingReliabilityTests` verifies that the existing bounded queue fails visibly for
+local inference instead of silently dropping old audio. Cloud buffering and reconnect retain
+their existing policy. Required native and hardware checks remain distinct from these suites.
+
+`LocalModelVersionTests` covers manual source metadata, unreviewed revisions, strict
+catalog compatibility and duplicate rejection. The preferred and retained app catalogs
+are the only installation authority. `LocalModelsControllerTests` exercises browsing a
+retained version without activation, explicit Load for rollback, offline check failure,
+and named partial cleanup. First-release retained metadata is empty; no extra checkpoint
+is silently approved. Cleanup reports logical file bytes and validates named targets again
+at confirmation, preserving other revisions and shared dependencies.
+
+Local capture overflow, overlapping batch requests, local inference errors and forced
+finalization deadlines cancel delivery and withhold submit. Existing cloud queue behavior
+remains covered by its original suites. No new release RAM limit is inferred from these
+correctness bounds.
+
+`LocalSpeechPacedIntegrationTests` is a separate opt-in public-fixture probe through the
+production live controller at capture pace. It saves numeric timing and memory counters
+only to an explicitly supplied metric descriptor. Process footprint and system page counters
+are not complete attribution of shared accelerator memory. Live Instruments evidence and
+real microphone/insertion checks are still required separately.
+
 `LocalSpeechEngineIntegrationTests` is an explicit installed-assets probe. Set
 `SPEAKFLOW_RUN_LOCAL_SPEECH_PROBES=1`, `SPEAKFLOW_LOCAL_MODEL_CACHE_ROOT` to a previously
 approved isolated model store, and `SPEAKFLOW_PUBLIC_SPEECH_FIXTURE` to an approved generic

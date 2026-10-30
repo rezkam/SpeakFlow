@@ -28,7 +28,7 @@ struct ProviderKeyValidationTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_UI_PROBES"] == "1")) @MainActor
     func removingAKeyRetiresItsHeldValidation() async throws {
         guard NativeUIProbeSupport.isChild(for: "ProviderKeyValidationTests") else {
-            try NativeUIProbeSupport.runChild(suite: "ProviderKeyValidationTests")
+            try NativeUIProbeSupport.runChild(suite: "ProviderKeyValidationTests", expectedTests: 1)
             return
         }
         let validator = HeldKeyValidator()
@@ -63,13 +63,13 @@ struct ProviderKeyValidationTests {
         }
         try await waitUntil { buttons(in: host).count == 2 }
         buttons(in: host)[0].performClick(nil)
-        try await waitUntil { !fields(in: host).isEmpty && buttons(in: host).count == 4 }
+        try await waitUntil { !fields(in: host).isEmpty }
         let field = try #require(fields(in: host).first)
         field.stringValue = "synthetic-key-123"
         field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
-        let save = try #require(buttons(in: host).last)
-        try await waitUntil { save.isEnabled }
-        save.performClick(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        // The configured account's model footer is 38 points below keyEntry.
+        try NativeUIProbeSupport.clickBottomTrailingAction(in: host, bottomInset: 62)
         try await waitUntil { validator.started }
         buttons(in: host)[1].performClick(nil)
         try await waitUntil { window.attachedSheet != nil }

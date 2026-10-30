@@ -8,6 +8,7 @@ protocol BannerPresenting: AnyObject {
     func refresh()
     var isRecording: Bool { get set }
     var isProcessingFinal: Bool { get set }
+    var isPreparingLocalModel: Bool { get set }
 }
 
 extension BannerPresenting {

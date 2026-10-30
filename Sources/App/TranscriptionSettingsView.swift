@@ -20,7 +20,11 @@ struct TranscriptionSettingsView: View {
                 configuredProviders: configured,
                 allModels: ModelCatalog.availableModels(for: configured),
                 onActivate: { model in ModelCatalog.activate(model, in: state) },
-                onManageProviders: { switchTab(.providers) }
+                onManageProviders: {
+                    let local = state.activeProviderId.hasPrefix("local:") || (activeProvider == nil
+                        && configured.contains { $0 is any LocalRecordingPreparing })
+                    switchTab(local ? .models : .providers)
+                }
             )
 
             universalSection(activeProvider: activeProvider)
@@ -39,15 +43,20 @@ struct TranscriptionSettingsView: View {
     private func universalSection(activeProvider: (any TranscriptionProvider)?) -> some View {
         SectionCard(
             "Universal",
-            footer: "These settings apply to the active model. Language is sent to the provider as a hint when the provider supports it. Auto-detect lets the model decide."
+            footer: state.activeProviderId.hasPrefix("local:")
+                ? "Local models in this release transcribe English. Loading and storage are managed in Models."
+                : "These settings apply to the active model. Language is sent as a hint when supported."
         ) {
             SettingRow(
                 "Language",
-                description: state.activeProviderId == ProviderId.mistral
+                description: state.activeProviderId.hasPrefix("local:") ? "This local model transcribes English."
+                    : state.activeProviderId == ProviderId.mistral
                     ? "Voxtral Realtime detects the spoken language automatically."
                     : "A BCP-47 hint sent to the provider. Auto-detect works in most cases. Setting a language can improve accuracy and first-token latency."
             ) {
-                languagePicker
+                if state.activeProviderId.hasPrefix("local:") {
+                    Text("English").foregroundStyle(Theme.text2)
+                } else { languagePicker }
             }
             SettingRow(
                 "Auto-end on silence",
@@ -104,7 +113,9 @@ struct TranscriptionSettingsView: View {
             case "gpt-4o-transcribe":
                 openAIBasic
             default:
-                Text("No model-specific options for \(modelId).")
+                Text(provider is any LocalRecordingPreparing
+                    ? "English speech is processed on this Mac. Manage this model in Models."
+                    : "No model-specific options for \(modelId).")
                     .font(.system(size: 12.5))
                     .foregroundStyle(Theme.text3)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -250,7 +261,7 @@ struct TranscriptionSettingsView: View {
                 "Context bias terms",
                 description: "Up to 100 comma-separated words or phrases that guide Voxtral toward correct spellings of names, technical terms, or domain vocabulary."
             ) {
-                TextField("Telavox, Voxtral, kubectl", text: state.binding(for: \.mistralContextBias))
+                TextField("ExampleApp, SampleTerm, kubectl", text: state.binding(for: \.mistralContextBias))
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
             }
@@ -608,19 +619,23 @@ struct TranscriptionSettingsView: View {
     }
 
     private func autoSelectProviderIfNeeded() {
+        guard !state.activeProviderId.hasPrefix("local:") else { return }
         let configured = ProviderRegistry.shared.configuredProviders
-        guard !configured.isEmpty,
-              !configured.contains(where: { $0.id == state.activeProviderId }) else { return }
-        ProviderSettings.shared.activeProviderId = configured[0].id
+        guard !configured.contains(where: { $0.id == state.activeProviderId }),
+              let cloud = configured.first(where: { !($0 is any LocalRecordingPreparing) }) else { return }
+        ProviderSettings.shared.activeProviderId = cloud.id
         state.refresh()
     }
 
     private func activeConfiguredProvider(from configured: [any TranscriptionProvider]) -> (any TranscriptionProvider)? {
-        configured.first { $0.id == state.activeProviderId } ?? configured.first
+        if let active = configured.first(where: { $0.id == state.activeProviderId }) { return active }
+        if state.activeProviderId.hasPrefix("local:") { return nil }
+        return configured.first { !($0 is any LocalRecordingPreparing) }
     }
 
     private func modelLabel(_ id: String) -> String {
-        ModelCatalog.all.first { $0.id == id }?.name ?? id
+        if let local = LocalModelsController.shared.reviewedModels.first(where: { $0.providerID == id }) { return local.name }
+        return ModelCatalog.all.first { $0.id == id }?.name ?? id
     }
 
     private func floatBinding(

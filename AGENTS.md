@@ -277,6 +277,14 @@ These suite filters define the main-feature safety net and must not be removed w
 - The bundled ASR catalog contains only reviewed immutable exports with complete download totals.
 - Local ASR configuration explicitly requests CPU plus Neural Engine; conflicting library overrides fail visibly.
 - Local engines serialize inference. Recording leases outlive native session closure and protect finalization; cancelled or timed-out native work cannot reselect a model or release an engine still in use.
+- Startup keeps speech and VAD cold unless preload is explicitly enabled. Batch preload requires VAD readiness first. Both caches honor the configured idle interval.
+- Memory pressure releases idle handles without deleting weights or interrupting active leases. Sleep cancels local capture and insertion; wake never resumes them automatically.
+- A local streaming backlog fails visibly at the existing bounded queue limit. Never silently discard local audio or submit after a local inference failure.
+- Upstream checks are manual metadata only. Only bundled reviewed manifests authorize installations or compatible retained-version rollback. A changed source SHA never activates itself.
+- Named partial cleanup and installation removal require current exact-target confirmation; changed measured targets and symbolic links are refused. Other revisions and shared VAD remain untouched.
+- Local batch inference rejects overlapping requests instead of retaining an unbounded audio backlog. Capture overflow, inference failure and local finalization deadlines cancel delivery and withhold submit.
+- Exact revisions cannot reuse another revision's resident engine. Replacement is blocked during active leases or native jobs.
+- Covered by `LocalRecordingPreparationTests`, `KeyInterceptorPendingTests`, `LocalModelsControllerTests`, `LocalModelSelectionTests`, `LocalModelVersionTests`, `VADInstallControllerTests`, `LocalModelRemovalTests`, `LocalModelResourceMonitorTests` and `LocalStreamingReliabilityTests`.
 - Covered by `LocalSpeechRuntimeTests` and `LocalSpeechProviderTests`. Real installed-engine probes are opt-in and never provision assets.
 - Covered by `LocalSpeechCatalogTests`, `LocalSpeechAccelerationTests`, `LocalVADConsentTests`, `LocalVADReadinessTests`, `ExplicitModelInstallerTests`,
   `ModelArtifactFileTests`, `ModelArtifactTransportTests`, `LocalModelManifestTests`, `VADModelVerificationTests`, `VADModelCacheTests` and `ModelsScreenTests`.

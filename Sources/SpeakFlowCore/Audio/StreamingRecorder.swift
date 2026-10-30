@@ -63,6 +63,8 @@ private final class AudioSampleQueue: @unchecked Sendable {
         var samples: [[Float]] = []
         var droppedBatchCount = 0
         var lastDropLogDate: Date = .distantPast
+        var failureHandler: (@Sendable () -> Void)?
+        var failed = false
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: QueueState())
@@ -79,32 +81,34 @@ private final class AudioSampleQueue: @unchecked Sendable {
         lock.withLock { $0.droppedBatchCount }
     }
 
+    var hasFailed: Bool { lock.withLock { $0.failed } }
+
+    func setFailureHandler(_ handler: (@Sendable () -> Void)?) {
+        lock.withLock { $0.failureHandler = handler; $0.failed = false }
+    }
+
     func enqueue(frames: [Float]) {
-        // Compute whether this drop should be logged while holding the lock
-        // (so the decision itself is race-free), but do the actual logging
-        // outside the lock to avoid calling into the logging subsystem while
-        // holding an unfair lock that the audio callback also contends on.
-        let droppedCountToLog: Int? = lock.withLock { state in
+        let outcome: (dropped: Int?, failure: (@Sendable () -> Void)?) = lock.withLock { state in
+            guard !state.failed else { return (nil, nil) }
             guard state.samples.count >= maxQueueSize else {
                 state.samples.append(frames)
-                return nil
+                return (nil, nil)
             }
-
+            if let failure = state.failureHandler {
+                state.failed = true
+                return (nil, failure)
+            }
             state.samples.removeFirst()
             state.droppedBatchCount += 1
             state.samples.append(frames)
-
             let now = Date()
-            guard now.timeIntervalSince(state.lastDropLogDate) >= self.dropLogInterval else {
-                return nil
-            }
+            guard now.timeIntervalSince(state.lastDropLogDate) >= self.dropLogInterval else { return (nil, nil) }
             state.lastDropLogDate = now
-            return state.droppedBatchCount
+            return (state.droppedBatchCount, nil)
         }
-
-        if let totalDropped = droppedCountToLog {
-            // swiftlint:disable:next line_length
-            Logger.audio.warning("Audio sample queue full — dropping oldest batch (droppedBatchCount=\(totalDropped, privacy: .public)). The main run loop may be stalled (menu tracking, window drag, etc.), losing buffered speech.")
+        outcome.failure?()
+        if let totalDropped = outcome.dropped {
+            Logger.audio.warning("Audio sample queue full: dropping the oldest batch (droppedBatchCount=\(totalDropped, privacy: .public)). Capture processing may be stalled.")
         }
     }
 
@@ -188,6 +192,9 @@ private func makeRecordingConsumer(
 public final class StreamingRecorder {
     private var microphoneCapture: RoutedMicrophoneCapture?
     public var onCaptureError: ((Error) -> Void)?
+    public var requiresLosslessAudio = false
+    public var hasAudioFailure: Bool { sampleQueue.hasFailed }
+    private var captureGeneration = UUID()
     private var audioBuffer: AudioBuffer?
     private var checkTimer: Timer?
     private var processingTimer: Timer?
@@ -358,6 +365,7 @@ public final class StreamingRecorder {
     @discardableResult
     public func start() async -> Bool {
         startupError = nil
+        configureCaptureQueue()
         hasEmittedChunk = false
         sessionStartDate = Date()
         isDiscardingAudio = false
@@ -489,7 +497,7 @@ public final class StreamingRecorder {
     }
 
     private func processQueuedSamples() async {
-        guard state.getRecording() else { return }
+        guard state.getRecording(), !sampleQueue.hasFailed else { return }
 
         let batches = sampleQueue.dequeueAll()
         guard !batches.isEmpty else { return }
@@ -931,7 +939,11 @@ public final class StreamingRecorder {
             audioFilter = nil
             idleNudgeController = nil
             turnClassifier = nil
-            defer { self.state.setVADActive(false) }
+            defer {
+                self.state.setVADActive(false)
+                self.vadProcessor = nil
+                self.sessionController = nil
+            }
             guard let buffer = self.audioBuffer else {
                 await filter?.stop()
                 return
@@ -1056,7 +1068,7 @@ public final class StreamingRecorder {
         while offset < samples.count {
             // Cancellation while an earlier callback was suspended retires the
             // remaining slices as well, before they can reach an uploader.
-            guard !isDiscardingAudio else { return false }
+            guard !isDiscardingAudio, !sampleQueue.hasFailed else { return false }
             let end = min(offset + Self.maxBatchSamples, samples.count)
             let wavData = createWav(from: Array(samples[offset..<end]))
             let duration = Double(end - offset) / sampleRate
@@ -1087,6 +1099,7 @@ public final class StreamingRecorder {
     /// Start a mock recording session using provided audio data.
     /// Used for E2E testing in environments without microphone hardware.
     public func startMock(audioData: [Float]) async {
+        configureCaptureQueue()
         hasEmittedChunk = false
         #if DEBUG
         mockSamplesFedForTesting = 0
@@ -1296,6 +1309,23 @@ private extension StreamingRecorder {
             )
             Logger.audio.debug("Turn classifier probability=\(String(format: "%.2f", probability), privacy: .public)")
             return probability
+        }
+    }
+}
+
+
+extension StreamingRecorder {
+    private func configureCaptureQueue() {
+        let generation = UUID()
+        captureGeneration = generation
+        guard requiresLosslessAudio else { sampleQueue.setFailureHandler(nil); return }
+        sampleQueue.setFailureHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.captureGeneration == generation, !self.isDiscardingAudio else { return }
+                self.isDiscardingAudio = true
+                self.onCaptureError?(LocalSpeechRuntimeError.audioBacklog)
+                if self.state.getRecording() { self.cancel() }
+            }
         }
     }
 }

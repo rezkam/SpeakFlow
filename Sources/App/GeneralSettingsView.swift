@@ -49,7 +49,11 @@ struct GeneralSettingsView: View {
             configuredProviders: configured,
             allModels: ModelCatalog.availableModels(for: configured),
             onActivate: { model in ModelCatalog.activate(model, in: state) },
-            onManageProviders: { switchTab(.providers) }
+            onManageProviders: {
+                let local = state.activeProviderId.hasPrefix("local:") || (activeProvider == nil
+                    && configured.contains { $0 is any LocalRecordingPreparing })
+                switchTab(local ? .models : .providers)
+            }
         )
     }
 
@@ -238,15 +242,18 @@ struct GeneralSettingsView: View {
     // MARK: - Helpers
 
     private func autoSelectProviderIfNeeded() {
+        guard !state.activeProviderId.hasPrefix("local:") else { return }
         let configured = ProviderRegistry.shared.configuredProviders
-        guard !configured.isEmpty,
-              !configured.contains(where: { $0.id == state.activeProviderId }) else { return }
-        ProviderSettings.shared.activeProviderId = configured[0].id
+        guard !configured.contains(where: { $0.id == state.activeProviderId }),
+              let cloud = configured.first(where: { !($0 is any LocalRecordingPreparing) }) else { return }
+        ProviderSettings.shared.activeProviderId = cloud.id
         state.refresh()
     }
 
     private func activeConfiguredProvider(from configured: [any TranscriptionProvider]) -> (any TranscriptionProvider)? {
-        configured.first { $0.id == state.activeProviderId } ?? configured.first
+        if let active = configured.first(where: { $0.id == state.activeProviderId }) { return active }
+        if state.activeProviderId.hasPrefix("local:") { return nil }
+        return configured.first { !($0 is any LocalRecordingPreparing) }
     }
 
     private func formatTimeout(_ seconds: Double) -> String {

@@ -5,6 +5,7 @@ import Testing
 final class SpyBannerPresenter: BannerPresenting {
     var isRecording = false
     var isProcessingFinal = false
+    var isPreparingLocalModel = false
     var bannerMessages: [(String, AppState.BannerStyle)] = []
     var refreshCount = 0
     var dismissCount = 0

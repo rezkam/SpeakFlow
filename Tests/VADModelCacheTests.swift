@@ -86,3 +86,92 @@ struct VADModelCacheTests {
         )
     }
 }
+
+
+extension VADModelCacheTests {
+    @Test func cancelledLoadRemainsTrackedUntilNativeWorkEnds() async throws {
+        actor Gate {
+            var waiter: CheckedContinuation<Void, Never>?
+            var calls = 0
+            func wait() async { calls += 1; await withCheckedContinuation { waiter = $0 } }
+            func open() { waiter?.resume(); waiter = nil }
+        }
+        struct SyntheticFailure: Error {}
+        let gate = Gate()
+        let cache = VADModelCache(managerFactory: { _ in
+            await gate.wait()
+            throw SyntheticFailure()
+        })
+        await cache.warmUp()
+        try await waitUntilAsync { await gate.calls == 1 }
+        await cache.unload()
+        #expect(await cache.snapshot().isLoading)
+        #expect(!(await cache.snapshot().isLoaded))
+        await #expect(throws: LocalModelError.busy) { try await cache.load() }
+        await gate.open()
+        try await waitUntilAsync { !(await cache.snapshot().isLoading) }
+        #expect(!(await cache.snapshot().isLoaded))
+    }
+}
+
+
+extension VADModelCacheTests {
+    @Test func explicitLoadCancellationReturnsBeforeNonCooperativeNativeWork() async throws {
+        actor Gate {
+            var waiter: CheckedContinuation<Void, Never>?
+            var started = false
+            var returned = false
+            func wait() async { started = true; await withCheckedContinuation { waiter = $0 } }
+            func open() { waiter?.resume(); waiter = nil }
+            func finish() { returned = true }
+        }
+        struct SyntheticFailure: Error {}
+        let gate = Gate()
+        let cache = VADModelCache(managerFactory: { _ in await gate.wait(); throw SyntheticFailure() })
+        let task = Task {
+            do { try await cache.load() } catch { }
+            await gate.finish()
+        }
+        try await waitUntilAsync { await gate.started }
+        task.cancel()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await gate.returned)
+        #expect(await cache.snapshot().isLoading)
+        await gate.open()
+        await task.value
+        try await waitUntilAsync { !(await cache.snapshot().isLoading) }
+    }
+}
+
+
+extension VADModelCacheTests {
+    @Test(.enabled(if: VADModelTestSupport.integrationTestsEnabled()))
+    func activeProcessorLeaseRemainsVisibleAfterCacheUnloading() async throws {
+        let cache = VADModelCache()
+        let lease = try await cache.acquireManager(threshold: 0.5)
+        #expect(await cache.snapshot().isInUse)
+        await cache.unload()
+        #expect(!(await cache.snapshot().isLoaded))
+        #expect(await cache.snapshot().isInUse)
+        let result = try await lease.manager.process([Float](repeating: 0, count: 4096))
+        #expect(!result.isEmpty)
+        await lease.release()
+        #expect(!(await cache.snapshot().isInUse))
+    }
+}
+
+extension VADModelCacheTests {
+    @Test(.enabled(if: VADModelTestSupport.integrationTestsEnabled()))
+    func idleExpiryKeepsFilesAndNeverUnloadsAnActiveProcessorLease() async throws {
+        let cache = VADModelCache()
+        await cache.setIdleDuration(.milliseconds(30))
+        let lease = try await cache.acquireManager(threshold: 0.5)
+        try await Task.sleep(for: .milliseconds(80))
+        let active = await cache.snapshot()
+        #expect(active.isLoaded && active.isInUse)
+        await lease.release()
+        try await waitUntilAsync { !(await cache.snapshot().isLoaded) }
+        #expect(!(await cache.snapshot().isInUse))
+        #expect((try? LocalVADAssets.verifiedDirectory()) != nil)
+    }
+}

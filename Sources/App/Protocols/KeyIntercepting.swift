@@ -12,6 +12,8 @@ protocol KeyIntercepting: AnyObject {
     var onEscapePressed: (() -> Void)? { get set }
     var onEnterPressed: (() -> Void)? { get set }
     func start(targetPid: pid_t)
+    /// Observe pending-start Enter without consuming it; Escape remains consumed.
+    @discardableResult func startPending(targetPid: pid_t) -> Bool
     /// Ends interception for a recording that finished normally. Any key the
     /// tap already swallowed is delivered to its handler before this returns.
     func stop()

@@ -38,6 +38,8 @@ final class SpyTextInserter: TextInserting {
 
     /// Result `captureTarget()` reports; set false to simulate an AX failure.
     var captureSucceeds = true
+    var targetIsFrontmost = true
+    func isTargetAppFrontmost() -> Bool { targetIsFrontmost }
 
     @discardableResult
     func captureTarget() -> Bool {

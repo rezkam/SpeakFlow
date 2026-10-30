@@ -44,7 +44,9 @@ final class AppState: BannerPresenting {
     var canStartDictation: Bool {
         accessibilityGranted
             && microphoneGranted
-            && !providerRegistry.configuredProviders.isEmpty
+            && (activeProviderId.hasPrefix("local:")
+                ? providerRegistry.isProviderConfigured(activeProviderId)
+                : providerRegistry.configuredProviders.contains { !($0 is any LocalRecordingPreparing) })
             && !needsVADInstallation
     }
 
@@ -93,6 +95,7 @@ final class AppState: BannerPresenting {
     // MARK: - Recording
     var isRecording = false
     var isProcessingFinal = false
+    var isPreparingLocalModel = false
 
     // MARK: - Settings
     var currentHotkey: HotkeyType = .controlOptionD

@@ -10,7 +10,7 @@ struct SettingsRelaunchTests {
         guard NativeUIProbeSupport.isChild(for: suite) else {
             let defaultsSuite = "synthetic.settings.relaunch.\(UUID().uuidString)"
             for stage in ["write", "read"] {
-                try NativeUIProbeSupport.runChild(suite: suite, environmentOverrides: [
+                try NativeUIProbeSupport.runChild(suite: suite, expectedTests: 1, environmentOverrides: [
                     "SPEAKFLOW_SETTINGS_STAGE": stage,
                     "SPEAKFLOW_SETTINGS_SUITE": defaultsSuite
                 ])

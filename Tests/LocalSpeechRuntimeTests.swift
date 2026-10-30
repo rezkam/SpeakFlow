@@ -264,3 +264,63 @@ struct LocalSpeechRuntimeTests {
         #expect(await held.snapshot().loaded.isEmpty)
     }
 }
+
+
+extension LocalSpeechRuntimeTests {
+    @Test func pressureReleasesIdleModelsButPreservesSelectionAndRecordingLeases() async throws {
+        let engine = RuntimeFixtureEngine()
+        let runtime = runtime(engine)
+        let model = try model()
+        let lease = try await runtime.acquire(model)
+        await runtime.releaseIdleResources()
+        #expect(await engine.cleanups == 0)
+        #expect(await runtime.snapshot().inUse == [model.id])
+        #expect(try await lease.transcribe(samples: [0]) == "fixture speech")
+        await lease.release()
+        #expect(await engine.cleanups == 1)
+        #expect(await runtime.snapshot().loaded.isEmpty)
+        #expect(await runtime.snapshot().selected == model.id)
+    }
+
+    @Test func pressureCancelsPendingLoadWithoutLateSelection() async throws {
+        let gate = RuntimeLoadGate(), engine = RuntimeFixtureEngine()
+        let runtime = LocalSpeechRuntime(root: root, verify: { _, root in root }, load: { _, _ in
+            await gate.wait()
+            return engine
+        })
+        let model = try model()
+        let task = Task { try await runtime.loadAndSelect(model) }
+        try await waitUntilAsync { await gate.started }
+        await runtime.releaseIdleResources()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        await gate.open()
+        try await waitUntilAsync { await engine.cleanups == 1 }
+        #expect(await runtime.snapshot().selected == nil)
+    }
+
+    @Test func aDifferentRevisionCannotReuseAnExistingEngineOrReplaceAnActiveLease() async throws {
+        let first = try model()
+        let manifest = first.manifest
+        let other = LocalSpeechModel(id: first.id, name: first.name, mode: first.mode,
+            manifest: LocalModelManifest(id: manifest.id, repository: manifest.repository,
+                revision: String(repeating: "a", count: 40), license: manifest.license,
+                modelDirectory: manifest.modelDirectory, artifacts: manifest.artifacts))
+        actor Loads {
+            var revisions: [String] = []
+            func add(_ revision: String) { revisions.append(revision) }
+        }
+        let loads = Loads()
+        let engine = RuntimeFixtureEngine()
+        let runtime = LocalSpeechRuntime(root: root, verify: { _, root in root }, load: { model, _ in
+            await loads.add(model.manifest.revision)
+            return engine
+        })
+        let lease = try await runtime.acquire(first)
+        await #expect(throws: LocalModelError.busy) { try await runtime.loadAndSelect(other) }
+        await lease.release()
+        try await runtime.loadAndSelect(other)
+        #expect(await loads.revisions == [first.manifest.revision, other.manifest.revision])
+        #expect(await engine.cleanups == 1)
+        try await runtime.unload(other.id)
+    }
+}

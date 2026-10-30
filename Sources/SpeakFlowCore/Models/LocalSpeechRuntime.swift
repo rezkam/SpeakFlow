@@ -15,10 +15,12 @@ public protocol LocalStreamingSpeechEngine: LocalSpeechEngine {
 }
 
 public enum LocalSpeechRuntimeError: Error, LocalizedError, Equatable {
-    case expiredLease, loadTimedOut, unsupportedMode, loadFailed, inferenceFailed, missingModel, unsupportedPlatform
+    case expiredLease, loadTimedOut, unsupportedMode, loadFailed, inferenceFailed, missingModel, unsupportedPlatform, audioBacklog, finalizationTimedOut
 
     public var errorDescription: String? {
         switch self {
+        case .finalizationTimedOut: "Local transcription did not finish before the recording deadline. Automatic submit was cancelled. Review any existing text and start a new recording."
+        case .audioBacklog: "Local inference could not keep up with captured audio. Recording was cancelled without submitting. Start a new recording or load a different model."
         case .expiredLease: "This local recording has ended. Start a new recording to continue."
         case .loadTimedOut: "Model loading exceeded the time limit. No microphone was started. Try again after loading stops."
         case .unsupportedMode: "This model does not support the requested recording mode."
@@ -30,13 +32,15 @@ public enum LocalSpeechRuntimeError: Error, LocalizedError, Equatable {
     }
 }
 
-public struct LocalSpeechRuntimeSnapshot: Sendable {
+public struct LocalSpeechRuntimeSnapshot: Sendable, Equatable {
+    public static let empty = LocalSpeechRuntimeSnapshot(selected: nil, loaded: [], inUse: [], retiring: [], loading: nil, loadedRevisions: [:])
     public let selected: LocalSpeechModelID?
     public let loaded: Set<LocalSpeechModelID>
     public let inUse: Set<LocalSpeechModelID>
     public let retiring: Set<LocalSpeechModelID>
     /// Includes cancelled or timed-out loads until their native work and cleanup finish.
     public let loading: LocalSpeechModelID?
+    public let loadedRevisions: [LocalSpeechModelID: String]
 }
 
 /// One recording owns its lease through finalization. Ending it retires new work immediately;
@@ -74,6 +78,7 @@ public actor LocalSpeechRuntime {
 
     private struct Resident {
         let engine: any LocalSpeechEngine
+        let manifest: LocalModelManifest
         var leases: Set<UUID> = []
         var jobs = 0
         var tail: Task<Void, Never>?
@@ -90,6 +95,7 @@ public actor LocalSpeechRuntime {
     private var leases: [UUID: LocalSpeechModelID] = [:]
     private var jobs: [UUID: [UUID: Task<String, Error>]] = [:]
     private var retiring: Set<LocalSpeechModelID> = []
+    private var evictAfterUse: Set<LocalSpeechModelID> = []
     private var idleTasks: [LocalSpeechModelID: Task<Void, Never>] = [:]
     private var idleTokens: [LocalSpeechModelID: UUID] = [:]
     private var operation: (token: UUID, model: LocalSpeechModelID)?
@@ -111,7 +117,8 @@ public actor LocalSpeechRuntime {
     public func snapshot() -> LocalSpeechRuntimeSnapshot {
         LocalSpeechRuntimeSnapshot(selected: selected, loaded: Set(residents.keys),
             inUse: Set(residents.compactMap { !$0.value.leases.isEmpty || $0.value.jobs > 0 ? $0.key : nil }),
-            retiring: retiring, loading: operation?.model ?? nativeLoad?.model)
+            retiring: retiring, loading: operation?.model ?? nativeLoad?.model,
+            loadedRevisions: residents.mapValues { $0.manifest.revision })
     }
 
     public func loadAndSelect(_ model: LocalSpeechModel) async throws {
@@ -119,7 +126,9 @@ public actor LocalSpeechRuntime {
         guard operation == nil, nativeLoad == nil, retiring.isEmpty else { throw LocalModelError.busy }
         let selectionRequest = UUID()
         selectionGeneration = selectionRequest
-        if residents[model.id] == nil {
+        if let resident = residents[model.id], resident.manifest != model.manifest,
+           !resident.leases.isEmpty || resident.jobs > 0 { throw LocalModelError.busy }
+        if residents[model.id]?.manifest != model.manifest {
             let token = UUID()
             operation = (token, model.id)
             nativeLoad = (token, model.id)
@@ -161,10 +170,16 @@ public actor LocalSpeechRuntime {
                 throw error
             }
             nativeLoadFinished(token)
-            residents[model.id] = Resident(engine: engine)
+            if residents[model.id] != nil { await removeResident(model.id) }
+            guard selectionGeneration == selectionRequest, !Task.isCancelled else {
+                await engine.cleanup()
+                throw CancellationError()
+            }
+            residents[model.id] = Resident(engine: engine, manifest: model.manifest)
         }
         try Task.checkCancellation()
         selected = model.id
+        evictAfterUse.remove(model.id)
         cancelIdle(model.id)
         for id in Array(residents.keys) where id != model.id { await retireIfIdle(id) }
         guard selectionGeneration == selectionRequest else { throw CancellationError() }
@@ -181,7 +196,8 @@ public actor LocalSpeechRuntime {
     }
 
     public func acquire(_ model: LocalSpeechModel) async throws -> LocalSpeechLease {
-        if residents[model.id] == nil { try await loadAndSelect(model) }
+        guard operation == nil, nativeLoad == nil, retiring.isEmpty else { throw LocalModelError.busy }
+        if residents[model.id]?.manifest != model.manifest { try await loadAndSelect(model) }
         try Task.checkCancellation()
         guard var resident = residents[model.id], resident.leases.isEmpty, resident.jobs == 0 else {
             throw LocalModelError.busy
@@ -199,6 +215,15 @@ public actor LocalSpeechRuntime {
         guard let resident = residents[id] else { return }
         guard resident.leases.isEmpty, resident.jobs == 0 else { throw LocalModelError.busy }
         await removeResident(id)
+    }
+
+    /// Resource warnings retire idle handles immediately. An active recording keeps its
+    /// engine until both its lease and native jobs end. Installed files and selection remain.
+    public func releaseIdleResources() async {
+        selectionGeneration = UUID()
+        cancelPendingLoad?()
+        evictAfterUse.formUnion(residents.keys)
+        for id in Array(residents.keys) { await retireIfIdle(id) }
     }
 
     public func setIdleDuration(_ duration: Duration) {
@@ -282,10 +307,11 @@ public actor LocalSpeechRuntime {
     }
     private func retireIfIdle(_ id: LocalSpeechModelID) async {
         guard let resident = residents[id], resident.leases.isEmpty, resident.jobs == 0 else { return }
-        if id == selected { scheduleIdle(id) } else { await removeResident(id) }
+        if id == selected && !evictAfterUse.contains(id) { scheduleIdle(id) } else { await removeResident(id) }
     }
     private func removeResident(_ id: LocalSpeechModelID) async {
         cancelIdle(id)
+        evictAfterUse.remove(id)
         guard let resident = residents.removeValue(forKey: id) else { return }
         retiring.insert(id)
         await resident.engine.cleanup()

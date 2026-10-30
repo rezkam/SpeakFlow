@@ -35,6 +35,8 @@ final class KeyInterceptor: KeyIntercepting {
         /// One-shot Enter capture token. Armed at recording start, consumed by the
         /// first intercepted Enter so subsequent Enters pass through normally.
         var enterCaptureArmed: Bool = false
+        /// Pending model loading observes Enter without swallowing it or arming submit.
+        var pendingStart = false
         /// Keys the tap already swallowed whose handler has not run yet. Set in the
         /// same critical section that decides to swallow, so a swallowed key is
         /// always either delivered (async hop or `stop()`) or deliberately
@@ -144,7 +146,15 @@ final class KeyInterceptor: KeyIntercepting {
 
     // MARK: - Start / Stop
 
-    func start(targetPid: pid_t) {
+    func start(targetPid: pid_t) { register(targetPid: targetPid, pendingStart: false) }
+
+    @discardableResult
+    func startPending(targetPid: pid_t) -> Bool {
+        register(targetPid: targetPid, pendingStart: true)
+        return state.withLockUnchecked { $0.isActive }
+    }
+
+    private func register(targetPid: pid_t, pendingStart: Bool) {
         let targetApplicationURL = targetPid == 0 ? nil : applicationURLLookup(targetPid)
         // A tap still registered from an earlier recording is reused, but the
         // new recording must own it: its target app and a fresh Enter token.
@@ -154,7 +164,8 @@ final class KeyInterceptor: KeyIntercepting {
             let previous = s.targetPid
             s.targetPid = targetPid
             s.targetApplicationURL = targetApplicationURL
-            s.enterCaptureArmed = true
+            s.enterCaptureArmed = !pendingStart
+            s.pendingStart = pendingStart
             s.tapKeyDowns = 0
             s.tapSyntheticKeyDowns = 0
             s.systemKeyDownsAtStart = systemKeyDownCounter()
@@ -174,7 +185,8 @@ final class KeyInterceptor: KeyIntercepting {
         state.withLockUnchecked {
             $0.targetPid = targetPid
             $0.targetApplicationURL = targetApplicationURL
-            $0.enterCaptureArmed = true
+            $0.enterCaptureArmed = !pendingStart
+            $0.pendingStart = pendingStart
         }
         let secureInputOwner = secureInputOwnerProvider()
         HotkeyDiagnostics.record(
@@ -357,6 +369,7 @@ final class KeyInterceptor: KeyIntercepting {
             $0.targetPid = 0
             $0.targetApplicationURL = nil
             $0.enterCaptureArmed = false
+            $0.pendingStart = false
             $0.pendingKeys = PendingKeys()
             $0.recordingEventTap = nil
             $0.recordingTapThread = nil
@@ -385,7 +398,9 @@ final class KeyInterceptor: KeyIntercepting {
 
         // Cancellation is global during a captured recording. Only submission
         // depends on keyboard focus; an unavailable AX query must not block Escape.
-        guard targetPid != 0 else { return Unmanaged.passUnretained(event) }
+        guard targetPid != 0, !observePendingStartEnter(keyCode, generation: generation) else {
+            return Unmanaged.passUnretained(event)
+        }
         if keyCode != 53,
            !isFocusInTarget(keyCode: keyCode, targetPid: targetPid, targetApplicationURL: targetApplicationURL) {
             return Unmanaged.passUnretained(event)
@@ -425,6 +440,17 @@ final class KeyInterceptor: KeyIntercepting {
         default:
             return Unmanaged.passUnretained(event)
         }
+    }
+
+    private nonisolated func observePendingStartEnter(_ keyCode: Int64, generation: UInt64) -> Bool {
+        guard keyCode == 36 || keyCode == 76 else { return false }
+        let observed = state.withLockUnchecked { value -> Bool in
+            guard value.isActive, value.registrationGeneration == generation, value.pendingStart else { return false }
+            value.pendingKeys.enter = true
+            return true
+        }
+        if observed { scheduleDelivery() }
+        return observed
     }
 
     /// Only intercept Enter when the target app has keyboard focus.

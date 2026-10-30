@@ -54,6 +54,8 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         var pendingBytes = 0
         var droppedChunks = 0
         var isShutdown = false
+        var losslessFailure: (@Sendable (Error) -> Void)?
+        var failed = false
         /// A frame has been dequeued and its send has not returned yet.
         var sendInFlight = false
         var sampleRate = 16_000
@@ -84,7 +86,7 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
 
     init() {
         var continuation: AsyncStream<Void>.Continuation!
-        self.sendSignalStream = AsyncStream<Void> { c in
+        self.sendSignalStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { c in
             continuation = c
         }
         self.sendSignalContinuation = continuation
@@ -122,6 +124,8 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         state.withLock { $0.isShutdown }
     }
 
+    var hasFailed: Bool { state.withLock { $0.failed } }
+
     /// Provider offsets count only sent samples. A dropped frame must not advance
     /// that clock. Keep bounded history for late finals; never extrapolate a
     /// timestamp outside retained audio, where capture discontinuities are unknown.
@@ -154,29 +158,36 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
         }
     }
 
+    func requireLosslessDelivery(onFailure: (@Sendable (Error) -> Void)?) {
+        state.withLock { $0.losslessFailure = onFailure; $0.failed = false }
+    }
+
     func enqueueAudio(_ data: Data, capturedAt: ContinuousClock.Instant = .now) {
         guard !data.isEmpty else { return }
-        let shouldSignal = state.withLock { state in
-            guard !state.isShutdown else { return false }
+        let outcome: (signal: Bool, failure: (@Sendable (Error) -> Void)?) = state.withLock { state in
+            guard !state.isShutdown, !state.failed else { return (false, nil) }
+            if state.pendingBytes + data.count > Self.maxBufferedAudioBytes, let failure = state.losslessFailure {
+                state.failed = true
+                state.active = false
+                state.pendingAudio.removeAll()
+                state.pendingBytes = 0
+                return (false, failure)
+            }
             if data.count > Self.maxBufferedAudioBytes {
                 state.droppedChunks &+= 1
-                return false
+                return (false, nil)
             }
-
-            while state.pendingBytes + data.count > Self.maxBufferedAudioBytes,
-                  !state.pendingAudio.isEmpty {
+            while state.pendingBytes + data.count > Self.maxBufferedAudioBytes, !state.pendingAudio.isEmpty {
                 let dropped = state.pendingAudio.removeFirst()
                 state.pendingBytes -= dropped.data.count
                 state.droppedChunks &+= 1
             }
-
             state.pendingAudio.append(CapturedFrame(data: data, capturedAt: capturedAt))
             state.pendingBytes += data.count
-            return state.active && state.session != nil
+            return (state.active && state.session != nil, nil)
         }
-        if shouldSignal {
-            sendSignalContinuation.yield(())
-        }
+        outcome.failure?(LocalSpeechRuntimeError.audioBacklog)
+        if outcome.signal { sendSignalContinuation.yield(()) }
     }
 
     func deactivatePreservingBuffer() {
@@ -245,13 +256,16 @@ private final class LiveStreamingAudioSessionRef: @unchecked Sendable {
                     state.withLock { $0.sendInFlight = false }
                 } catch {
                     logger.warning("Audio send failed: \(error.localizedDescription, privacy: .public)")
-                    let isCurrent = state.withLock { state in
+                    let outcome: (current: Bool, failure: (@Sendable (Error) -> Void)?) = state.withLock { state in
                         state.sendInFlight = false
-                        guard state.connectionGeneration == generation else { return false }
+                        guard state.connectionGeneration == generation else { return (false, nil) }
                         state.active = false
-                        return true
+                        guard !state.failed else { return (true, nil) }
+                        if state.losslessFailure != nil { state.failed = true }
+                        return (true, state.losslessFailure)
                     }
-                    if isCurrent { break }
+                    outcome.failure?(error)
+                    if outcome.current { break }
                 }
             }
 
@@ -308,6 +322,7 @@ public final class LiveStreamingController {
     /// A provider handshake may complete after stop/cancel, so its captured
     /// generation must still match before it can activate a returned session.
     private var startupGeneration: UInt64 = 0
+    private var nativeLocalSession = false
 
     // Thread-safe reference for audio callback (runs off MainActor)
     private let audioSessionRef = LiveStreamingAudioSessionRef()
@@ -485,6 +500,17 @@ public final class LiveStreamingController {
         suppressSessionClosedCallback = false
         startupGeneration &+= 1
         let generation = startupGeneration
+        nativeLocalSession = provider is LocalStreamingSpeechProvider
+        if nativeLocalSession {
+            audioSessionRef.requireLosslessDelivery { [weak self] error in
+                Task { @MainActor [weak self] in
+                    guard let self, self.startupGeneration == generation else { return }
+                    self.stopMicrophoneCapture()
+                    self.onError?(error)
+                    await self.cancel()
+                }
+            }
+        } else { audioSessionRef.requireLosslessDelivery(onFailure: nil) }
         eventListenerId = nil
         eventTask?.cancel()
         eventTask = nil
@@ -670,6 +696,11 @@ public final class LiveStreamingController {
         // so a stalled network cannot hold stop open. Cancel discards instead.
         if session != nil {
             let drained = await audioSessionRef.drain(timeout: stopDrainTimeout)
+            if nativeLocalSession && (!drained || audioSessionRef.hasFailed) {
+                await failNativeFinalization(audioSessionRef.hasFailed
+                    ? LocalSpeechRuntimeError.inferenceFailed : LocalSpeechRuntimeError.audioBacklog)
+                return
+            }
             observabilityEvent(
                 "stop_audio_drained",
                 level: drained ? .debug : .warning,
@@ -698,21 +729,29 @@ public final class LiveStreamingController {
                 try await withControlMessageDeadline(timeout: controlMessageTimeout) {
                     try await activeSession.finalize()
                 }
-            } catch { logger.debug("Session finalize failed: \(error.localizedDescription)") }
+            } catch {
+                if nativeLocalSession { await failNativeFinalization(error); return }
+                logger.debug("Session finalize failed: \(error.localizedDescription)")
+            }
 
             // Wait briefly for post-finalize trailing finals, but close early once
             // transcription events have gone quiet.
             let finalizeElapsed = finalizeStarted.duration(to: .now)
             let elapsedSeconds = Double(finalizeElapsed.components.seconds)
                 + Double(finalizeElapsed.components.attoseconds) / 1e18
-            await waitForTrailingFinals(maxWait: max(0, trailingFinalTimeout - elapsedSeconds))
+            // Native finalize has already emitted its one trailing result. Its event
+            // stream is drained below; it has no remote trailing-response window.
+            if !nativeLocalSession { await waitForTrailingFinals(maxWait: max(0, trailingFinalTimeout - elapsedSeconds)) }
 
             // Close the WebSocket
             do {
                 try await withControlMessageDeadline(timeout: controlMessageTimeout) {
                     try await activeSession.close()
                 }
-            } catch { logger.debug("Session close failed: \(error.localizedDescription)") }
+            } catch {
+                if nativeLocalSession { await failNativeFinalization(error); return }
+                logger.debug("Session close failed: \(error.localizedDescription)")
+            }
 
             // Transport yield only acknowledges enqueue. Await actual controller
             // delivery before insertion/Enter, bounded for nonterminating streams.
@@ -754,6 +793,12 @@ public final class LiveStreamingController {
 
         logger.info("Live streaming stopped")
         observabilityEvent("stop_completed")
+    }
+
+    private func failNativeFinalization(_ error: Error) async {
+        finalEventDeliveryCompleted = false
+        onError?((error as? LocalSpeechRuntimeError) ?? LocalSpeechRuntimeError.inferenceFailed)
+        await cancel()
     }
 
     /// Cancel without waiting for final results.

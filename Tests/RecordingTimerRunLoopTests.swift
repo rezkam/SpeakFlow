@@ -10,7 +10,7 @@ struct RecordingTimerRunLoopTests {
     func nativeTimersFireWhileTrackingAndRetireOnStop() async throws {
         let suite = "RecordingTimerRunLoopTests"
         guard NativeUIProbeSupport.isChild(for: suite) else {
-            try NativeUIProbeSupport.runChild(suite: suite)
+            try NativeUIProbeSupport.runChild(suite: suite, expectedTests: 1)
             return
         }
         for cancel in [false, true] {

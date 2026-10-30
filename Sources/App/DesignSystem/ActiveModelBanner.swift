@@ -23,6 +23,11 @@ struct ActiveModelBanner: View {
         }
     }
 
+    private var prefersModels: Bool {
+        activeProvider is any LocalRecordingPreparing || (activeProvider == nil
+            && (activeModelId.hasPrefix("local:") || configuredProviders.contains { $0 is any LocalRecordingPreparing }))
+    }
+
     private var emptyState: some View {
         Button(action: onManageProviders) {
             HStack(spacing: 14) {
@@ -40,7 +45,7 @@ struct ActiveModelBanner: View {
                         .font(.system(size: 10.5, weight: .bold))
                         .tracking(0.8)
                         .foregroundStyle(Theme.orange)
-                    Text("Connect a provider to start transcribing")
+                    Text(prefersModels ? "Open Models to download or load local speech" : "Connect a provider to start transcribing")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(Theme.text2)
                 }
@@ -48,7 +53,7 @@ struct ActiveModelBanner: View {
                 Spacer()
 
                 HStack(spacing: 4) {
-                    Text("Connect")
+                    Text(prefersModels ? "Models" : "Connect")
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                 }
@@ -90,7 +95,7 @@ struct ActiveModelBanner: View {
                         .font(.system(size: 10.5, weight: .bold))
                         .tracking(0.8)
                         .foregroundStyle(Theme.accent)
-                    Text("\(activeProvider?.displayName ?? "-") · \(activeModelLabel)")
+                    Text(activeProvider is any LocalRecordingPreparing || activeProvider?.displayName == activeModelLabel ? activeModelLabel : "\(activeProvider?.displayName ?? "-") · \(activeModelLabel)")
                         .font(.system(size: 14.5, weight: .semibold))
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
@@ -291,6 +296,7 @@ struct ActiveModelBanner: View {
         case ProviderId.chatGPT: "ChatGPT"
         case ProviderId.deepgram: "Deepgram"
         case ProviderId.mistral: "Mistral"
+        case "local": "On-device models"
         default: accountId
         }
     }
@@ -366,6 +372,10 @@ extension ModelCatalog {
     /// `ProviderSettings.shared` / `Settings.shared` and refreshing `state` so observers pick it up.
     @MainActor
     static func activate(_ model: ModelDescriptor, in state: AppState) {
+        if model.providerRegistryId.hasPrefix("local:") {
+            LocalModelsController.shared.load(providerID: model.providerRegistryId)
+            return
+        }
         ProviderSettings.shared.activeProviderId = model.providerRegistryId
         switch model.providerRegistryId {
         case ProviderId.deepgram:
@@ -385,7 +395,8 @@ extension ModelCatalog {
     /// (namely ChatGPT) that have no dedicated model-selection key.
     @MainActor
     static func activeModelId(for providerId: String, in state: AppState) -> String {
-        switch providerId {
+        if providerId.hasPrefix("local:") { return providerId }
+        return switch providerId {
         case ProviderId.deepgram:
             state.deepgramModel
         case ProviderId.mistral:
@@ -399,10 +410,18 @@ extension ModelCatalog {
 
     /// Filters the catalog down to models belonging to a currently configured provider.
     static func availableModels(for configured: [any TranscriptionProvider]) -> [ModelDescriptor] {
-        all.filter { model in
+        let cloud = all.filter { model in
             configured.contains { provider in
                 provider.id == model.providerAccountId || provider.id == model.providerRegistryId
             }
         }
+        let local = configured.compactMap { provider -> ModelDescriptor? in
+            guard let provider = provider as? LocalRecordingProvider else { return nil }
+            let versions = configured.compactMap { $0 as? LocalRecordingProvider }.filter { $0.model.id == provider.model.id }
+            let name = versions.count > 1 ? "\(provider.model.name) · \(provider.model.manifest.revision.prefix(8))" : provider.model.name
+            return ModelDescriptor(id: provider.id, providerAccountId: "local", providerRegistryId: provider.id,
+                name: name, mode: provider.mode, latency: "On device · English", pricing: "No account required")
+        }
+        return cloud + local
     }
 }

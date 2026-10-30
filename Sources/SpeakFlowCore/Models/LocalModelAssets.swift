@@ -23,7 +23,7 @@ public enum LocalModelError: Error, LocalizedError, Equatable {
         case .missingVAD: "Download the required voice activity model in Models before recording."
         case .invalidAssets: "Model files failed verification. Review the files in Models before trying again."
         case .invalidManifest: "The model manifest is incomplete or unsafe. Installation is unavailable."
-        case .consentRequired: "Review and confirm this exact model download first."
+        case .consentRequired: "Review and confirm the exact model files first."
         case .alreadyInstalled: "This model revision is already installed."
         case .transferFailed: "Download failed. Partial files are kept for explicit cleanup."
         case .insufficientSpace: "There is not enough free storage for this download."
@@ -182,6 +182,38 @@ public enum LocalVADAssets {
 }
 
 public enum LocalModelFiles {
+    public static func removalTarget(_ manifest: LocalModelManifest, consent: LocalModelManifest?, root: URL) throws -> URL {
+        guard consent == manifest else { throw LocalModelError.consentRequired }
+        try manifest.validate()
+        let target = root.appendingPathComponent(manifest.installationName, isDirectory: true)
+        try rejectSymbolicLinks(target)
+        guard try target.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw LocalModelError.invalidAssets }
+        _ = try measuredBytes(at: target)
+        return target
+    }
+
+    /// Validates the whole owned tree before measuring or removing it, including links
+    /// not listed in a receipt. Never follows directory links or ignores enumeration errors.
+    public static func measuredBytes(at directory: URL) throws -> Int64 {
+        try rejectSymbolicLinks(directory)
+        var pending = [directory]
+        var total: Int64 = 0
+        while let folder = pending.popLast() {
+            for file in try FileManager.default.contentsOfDirectory(at: folder,
+                includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey, .fileSizeKey]) {
+                let values = try file.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey, .fileSizeKey])
+                guard values.isSymbolicLink != true else { throw LocalModelError.invalidAssets }
+                if values.isDirectory == true { pending.append(file) }
+                else if values.isRegularFile == true, let size = values.fileSize {
+                    let (sum, overflow) = total.addingReportingOverflow(Int64(size))
+                    guard !overflow else { throw LocalModelError.invalidAssets }
+                    total = sum
+                } else { throw LocalModelError.invalidAssets }
+            }
+        }
+        return total
+    }
+
     public static func verify(_ manifest: LocalModelManifest, installation: URL) throws {
         try manifest.validate()
         let receiptURL = installation.appendingPathComponent("receipt.json")

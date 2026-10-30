@@ -8,7 +8,7 @@ struct TextInserterNativeEditorTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_UI_PROBES"] == "1")) @MainActor
     func nativeEditorCorrectsAndContinuesAfterClearing() async throws {
         guard NativeUIProbeSupport.isChild(for: "TextInserterNativeEditorTests") else {
-            try NativeUIProbeSupport.runChild(suite: "TextInserterNativeEditorTests")
+            try NativeUIProbeSupport.runChild(suite: "TextInserterNativeEditorTests", expectedTests: 1)
             return
         }
         _ = NSApplication.shared

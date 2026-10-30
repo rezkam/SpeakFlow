@@ -40,7 +40,7 @@ public actor ExplicitModelInstaller {
         let destination = root.appendingPathComponent(manifest.installationName, isDirectory: true)
         guard !FileManager.default.fileExists(atPath: destination.path) else { throw LocalModelError.alreadyInstalled }
         guard try availableBytes(root) >= manifest.transferBytes else { throw LocalModelError.insufficientSpace }
-        let staging = root.appendingPathComponent("partial-\(manifest.id)-\(UUID().uuidString)", isDirectory: true)
+        let staging = root.appendingPathComponent("partial-\(manifest.installationName)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
         var completed: Int64 = 0
         for artifact in manifest.artifacts {

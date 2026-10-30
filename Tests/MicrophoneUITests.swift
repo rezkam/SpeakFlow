@@ -9,7 +9,7 @@ struct MicrophoneUITests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_UI_PROBES"] == "1")) @MainActor
     func settingsAndMenuShareSelectionAndRenderStates() async throws {
         guard NativeUIProbeSupport.isChild(for: "MicrophoneUITests") else {
-            try NativeUIProbeSupport.runChild(suite: "MicrophoneUITests")
+            try NativeUIProbeSupport.runChild(suite: "MicrophoneUITests", expectedTests: 1)
             return
         }
         RuntimeIsolation.isolateThisProcess()

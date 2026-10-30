@@ -9,16 +9,44 @@ import FluidAudio
 ///
 /// Only explicitly installed, verified app-owned assets are loaded.
 /// Warming and recording never resolve remote models or repair missing files.
+public struct VADModelCacheSnapshot: Sendable, Equatable {
+    public let isLoaded: Bool
+    public let isLoading: Bool
+    public let isInUse: Bool
+    public init(isLoaded: Bool, isLoading: Bool, isInUse: Bool = false) {
+        self.isLoaded = isLoaded; self.isLoading = isLoading; self.isInUse = isInUse
+    }
+}
+
+final class VADModelLease: Sendable {
+    let manager: VadManager
+    private let cache: VADModelCache
+    private let token: UUID
+    init(manager: VadManager, cache: VADModelCache, token: UUID) {
+        self.manager = manager; self.cache = cache; self.token = token
+    }
+    func release() async { await cache.release(token) }
+    deinit {
+        let cache = cache, token = token
+        Task { await cache.release(token) }
+    }
+}
+
 public actor VADModelCache {
     public static let shared = VADModelCache()
 
     private var cachedManager: VadManager?
     private var cachedThreshold: Float?
     private var warmUpTask: Task<VadManager, Error>?
+    private var loadGeneration = UUID()
+    private var nativeLoads: Set<UUID> = []
+    private var borrowers: Set<UUID> = []
+    private var idleDuration: Duration = .seconds(300)
+    private var idleTask: Task<Void, Never>?
+    private var idleGeneration = UUID()
     /// Threshold the current warm-up task was started with.
     /// Checked in getManager to avoid returning a manager with the wrong threshold.
     private var warmUpThreshold: Float = Config.vadThreshold
-    private let logger = Logger(subsystem: "SpeakFlow", category: "VADCache")
 
     /// Creates the underlying `VadManager`. Overridable so tests can inject a
     /// deterministic, network-free factory (e.g. one that throws or counts calls)
@@ -70,7 +98,7 @@ public actor VADModelCache {
     /// Pre-load the Silero VAD model in the background.
     /// Safe to call multiple times — concurrent callers coalesce into one load.
     public func warmUp(threshold: Float = Config.vadThreshold) {
-        guard cachedManager == nil, warmUpTask == nil else { return }
+        guard cachedManager == nil, warmUpTask == nil, nativeLoads.isEmpty else { return }
 
         warmUpThreshold = threshold
         warmUpTask = makeLoadTask(threshold: threshold)
@@ -80,62 +108,151 @@ public actor VADModelCache {
     /// Invalidates the cache when the threshold changes.
     func getManager(threshold: Float) async throws -> VadManager {
         if let cached = cachedManager, cachedThreshold == threshold {
+            scheduleIdleExpiry()
             return cached
         }
 
-        // Threshold changed — invalidate stale cache
-        if cachedThreshold != nil && cachedThreshold != threshold {
-            logger.info("VAD threshold changed, reloading model")
-            cachedManager = nil
-            cachedThreshold = nil
-            warmUpTask?.cancel()
-            warmUpTask = nil
-        }
-
-        // Await warm-up only if threshold matches
         if let pending = warmUpTask {
-            if warmUpThreshold == threshold {
-                let manager = try await pending.value
-                return manager
-            } else {
-                pending.cancel()
-                warmUpTask = nil
-            }
+            if warmUpThreshold == threshold { return try await pending.value }
+            // A settings change must not return the old threshold or overlap native
+            // loads. Retire the previous warm-up, then load the requested threshold.
+            unload()
+            _ = await pending.result
+            try Task.checkCancellation()
+            return try await getManager(threshold: threshold)
         }
-
-        // Cold path — load on demand, coalescing concurrent callers via warmUpTask
-        logger.warning("VAD model loaded on demand (no warm-up)")
+        guard nativeLoads.isEmpty else { throw LocalModelError.busy }
+        cachedManager = nil
+        cachedThreshold = nil
+        warmUpThreshold = threshold
         let task = makeLoadTask(threshold: threshold)
         warmUpTask = task
-        warmUpThreshold = threshold
         return try await task.value
     }
 
-    /// Loads the model via `managerFactory` and caches the result.
-    ///
-    /// The do/catch here is the single point of failure-recovery for both
-    /// `warmUp()` and the `getManager()` cold path: on success it caches the
-    /// manager and threshold; on failure it clears `warmUpTask` so the *next*
-    /// `warmUp()`/`getManager()` call attempts a fresh load instead of
-    /// re-awaiting (and rethrowing from) the same failed task forever.
-    private func makeLoadTask(threshold: Float) -> Task<VadManager, Error> {
-        Task {
+    func acquireManager(threshold: Float) async throws -> VADModelLease {
+        let manager = try await getManager(threshold: threshold)
+        try Task.checkCancellation()
+        let token = UUID()
+        borrowers.insert(token)
+        cancelIdleExpiry()
+        return VADModelLease(manager: manager, cache: self, token: token)
+    }
+
+    fileprivate func release(_ token: UUID) {
+        guard borrowers.remove(token) != nil else { return }
+        scheduleIdleExpiry()
+    }
+
+    public func setIdleDuration(_ duration: Duration) {
+        guard duration >= .zero else { return }
+        idleDuration = duration
+        scheduleIdleExpiry()
+    }
+
+    private func cancelIdleExpiry() {
+        idleGeneration = UUID()
+        idleTask?.cancel()
+        idleTask = nil
+    }
+
+    private func scheduleIdleExpiry() {
+        cancelIdleExpiry()
+        guard cachedManager != nil, borrowers.isEmpty else { return }
+        let generation = idleGeneration, duration = idleDuration
+        idleTask = Task { [weak self] in
+            do { try await Task.sleep(for: duration) } catch { return }
+            await self?.expireIdleHandle(generation)
+        }
+    }
+
+    private func expireIdleHandle(_ generation: UUID) {
+        guard idleGeneration == generation, borrowers.isEmpty else { return }
+        unload()
+    }
+
+    public func snapshot() -> VADModelCacheSnapshot {
+        VADModelCacheSnapshot(isLoaded: cachedManager != nil, isLoading: !nativeLoads.isEmpty, isInUse: !borrowers.isEmpty)
+    }
+
+    public func load(threshold: Float = Config.vadThreshold, timeout: Duration = .seconds(60)) async throws {
+        try Task.checkCancellation()
+        let result = VADModelLoadResult()
+        let worker = Task {
+            do { _ = await result.complete(.success(try await self.getManager(threshold: threshold))) }
+            catch { _ = await result.complete(.failure(error)) }
+        }
+        let deadline = Task {
             do {
-                let start = Date()
-                logger.info("VAD model load starting")
-                let manager = try await self.managerFactory(threshold)
-                let elapsed = Date().timeIntervalSince(start)
-                logger.info("VAD model load complete in \(String(format: "%.2f", elapsed))s")
-                self.cachedManager = manager
-                self.cachedThreshold = threshold
-                self.warmUpTask = nil
-                return manager
-            } catch {
-                self.warmUpTask = nil
-                logger.error("VAD model load failed: \(error.localizedDescription). Will retry on next attempt.")
-                throw error
+                try await Task.sleep(for: timeout)
+                if await result.complete(.failure(LocalSpeechRuntimeError.loadTimedOut)) {
+                    worker.cancel()
+                    self.unload()
+                }
+            } catch { }
+        }
+        defer { deadline.cancel() }
+        try await withTaskCancellationHandler {
+            try await result.value()
+            try Task.checkCancellation()
+        } onCancel: {
+            worker.cancel()
+            Task {
+                await self.unload()
+                _ = await result.complete(.failure(CancellationError()))
             }
         }
+    }
+
+    /// Retires the cache, never the immutable files. Existing inference owners keep their
+    /// manager alive until they finish. Late native loads cannot repopulate this cache.
+    public func unload() {
+        cancelIdleExpiry()
+        loadGeneration = UUID()
+        warmUpTask?.cancel()
+        warmUpTask = nil
+        cachedManager = nil
+        cachedThreshold = nil
+    }
+
+    private func makeLoadTask(threshold: Float) -> Task<VadManager, Error> {
+        let generation = UUID()
+        loadGeneration = generation
+        nativeLoads.insert(generation)
+        return Task {
+            defer {
+                self.nativeLoads.remove(generation)
+                if self.loadGeneration == generation { self.warmUpTask = nil }
+            }
+            let manager = try await self.managerFactory(threshold)
+            try Task.checkCancellation()
+            guard self.loadGeneration == generation else { throw CancellationError() }
+            self.cachedManager = manager
+            self.cachedThreshold = threshold
+            self.scheduleIdleExpiry()
+            return manager
+        }
+    }
+}
+
+/// A caller may stop waiting while CoreML completes. The cache tracks that native
+/// work independently, and its generation prevents any late result from becoming ready.
+private actor VADModelLoadResult {
+    private var result: Result<VadManager, Error>?
+    private var continuation: CheckedContinuation<Void, Error>?
+    func complete(_ result: Result<VadManager, Error>) -> Bool {
+        guard self.result == nil else { return false }
+        self.result = result
+        switch result {
+        case .success: continuation?.resume()
+        case .failure(let error): continuation?.resume(throwing: error)
+        }
+        continuation = nil
+        return true
+    }
+    func value() async throws {
+        if let result { _ = try result.get(); return }
+        try await withCheckedThrowingContinuation { continuation = $0 }
     }
 }
 
@@ -164,6 +281,7 @@ public actor VADModelCache {
 ///   See: `VADConfiguration.volumeGateEnabled`.
 public actor VADProcessor {
     private var vadManager: VadManager?
+    private var modelLease: VADModelLease?
     /// Holds a raw speech onset until it is sustained for `minSpeechDuration`.
     private var onsetGate = SpeechOnsetGate()
 
@@ -250,7 +368,9 @@ public actor VADProcessor {
 
         do {
             // Use shared cached model instead of loading fresh each time
-            vadManager = try await VADModelCache.shared.getManager(threshold: config.threshold)
+            let lease = try await VADModelCache.shared.acquireManager(threshold: config.threshold)
+            modelLease = lease
+            vadManager = lease.manager
             streamState = await vadManager?.makeStreamState()
             lastStreamStateRefresh = Date()
             isInitialized = true

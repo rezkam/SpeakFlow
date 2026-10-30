@@ -19,6 +19,15 @@ final class RecordingController {
         didSet { appState.isProcessingFinal = isProcessingFinal }
     }
 
+    var isPreparingLocalModel = false {
+        didSet { appState.isPreparingLocalModel = isPreparingLocalModel }
+    }
+    private var pendingLocalStart: Task<Void, Never>?
+    private var pendingLocalDeadline: Task<Void, Never>?
+    var localPreparationTimeout: Duration = .seconds(60)
+    private var pendingLocalGeneration = UUID()
+    var modelOperationInProgress: () -> Bool = { false }
+
     // MARK: - Internal
 
     var hotkeyListener: HotkeyListener?
@@ -34,6 +43,7 @@ final class RecordingController {
     /// while it is still current.
     private struct RecordingSession {
         let generation: UInt64
+        var localLease: LocalSpeechLease?
         var fullTranscript = ""
         var bulkInsertionFailed = false
         /// A captured Enter asked for a synthetic Enter after finalization.
@@ -61,8 +71,15 @@ final class RecordingController {
 
     /// Retires the current recording and starts a fresh session for the next.
     private func replaceSession() {
+        releaseLocalLease()
         transcription.queueBridge.invalidateDelivery()
         session = RecordingSession(generation: session.generation &+ 1)
+    }
+
+    private func releaseLocalLease() {
+        let lease = session.localLease
+        session.localLease = nil
+        if let lease { Task { await lease.release() } }
     }
 
     var fullTranscript: String {
@@ -146,6 +163,7 @@ final class RecordingController {
         self.keyInterceptor.onEscapePressed = { [weak self] in self?.cancelRecording() }
         self.keyInterceptor.onEnterPressed = { [weak self] in
             guard let self else { return }
+            if self.isPreparingLocalModel { self.cancelPendingLocalStart(); return }
             // Enter submit contract:
             // 1) First Enter while recording requests submit and stops capture.
             // 2) Enter capture is one-shot for the recording lifecycle.
@@ -267,6 +285,7 @@ final class RecordingController {
                 ]
             )
             self.presentRecordingError(error, providerId: self.providerSettings.activeProviderId)
+            if self.session.localLease != nil { self.cancelRecording() }
         }
     }
 
@@ -274,7 +293,13 @@ final class RecordingController {
 
     @objc func toggle() {
         if testMode != .off { uiTestToggleCount += 1 }
-        if isRecording { stopRecording(reason: .hotkey) } else { startRecording() }
+        if isPreparingLocalModel {
+            cancelPendingLocalStart()
+        } else if isRecording {
+            stopRecording(reason: .hotkey)
+        } else {
+            startRecording()
+        }
         onStateChanged?()
     }
 
@@ -282,7 +307,11 @@ final class RecordingController {
 
     func startRecording() {
         guard !updateInstallationInProgress() else { return }
-        guard !isRecording else { return }
+        guard !isRecording, !isPreparingLocalModel else { return }
+        guard !modelOperationInProgress() else {
+            presentRecordingError(message: "A model operation is running. Finish or cancel it in Models before dictating.")
+            return
+        }
         resetRecordingErrorPresentation()
         session.latestStreamingError = nil
         applyObservabilityConfigurationFromSettings()
@@ -315,7 +344,9 @@ final class RecordingController {
             )
             playSoundEffect(.error)
             presentRecordingError(
-                message: "Set up a transcription provider in Providers to start dictating"
+                message: provider is any LocalRecordingPreparing
+                    ? "Download and verify this speech model in Models before dictating."
+                    : "Set up a transcription provider in Providers to start dictating"
             )
             return
         }
@@ -330,7 +361,16 @@ final class RecordingController {
         }
 
         guard captureTargetOrRefuseStart() else { return }
+        if let local = provider as? any LocalRecordingPreparing {
+            prepareLocalRecording(local)
+            return
+        }
+        beginCapturedRecording(provider: provider)
+    }
+
+    private func beginCapturedRecording(provider: any TranscriptionProvider, lease: LocalSpeechLease? = nil) {
         replaceSession()
+        session.localLease = lease
 
         beginMetricsSession(providerId: provider.id, mode: provider.mode)
         maybeRecordSettingsSnapshot(
@@ -416,11 +456,13 @@ final class RecordingController {
         observabilityEvent("batch_recording_starting", metadata: ["providerId": provider.id])
         let generation = session.generation
         let startingRecorder = StreamingRecorder()
+        startingRecorder.requiresLosslessAudio = provider is LocalBatchSpeechProvider
         recorder = startingRecorder
         startingRecorder.onCaptureError = { [weak self] error in
-            guard let self, self.owns(generation), self.isRecording else { return }
+            guard let self, self.owns(generation) else { return }
             self.presentRecordingError(error, providerId: provider.id)
-            self.stopRecording(reason: .unknown)
+            if provider is LocalBatchSpeechProvider { self.cancelRecording() }
+            else if self.isRecording { self.stopRecording(reason: .unknown) }
         }
         startingRecorder.onChunkReady = { [weak self] chunk in
             // The recorder awaits acceptance, including final ticket allocation.
@@ -467,6 +509,7 @@ final class RecordingController {
             }
             if !started {
                 isRecording = false; isProcessingFinal = false; recorder = nil
+                self.releaseLocalLease()
                 self.keyInterceptor.cancel()
                 self.playSoundEffect(.error)
                 self.observabilityEvent("batch_recording_start_failed", level: .error)
@@ -579,6 +622,7 @@ final class RecordingController {
     }
 
     func cancelRecording() {
+        if isPreparingLocalModel { cancelPendingLocalStart(); return }
         guard isRecording || isProcessingFinal else { return }
         observabilityEvent(
             "recording_cancel_requested",
@@ -682,13 +726,26 @@ final class RecordingController {
         // Final-audio barrier: the stopping recorder must have enqueued its last chunk.
         await session.stoppingRecorder?.waitForStopCompletion()
         guard ownsFinalization(generation) else { return }
-        if !force, await !transcription.queueBridge.isIdle() {
-            // A later onAllComplete or the polling deadline finishes the job.
-            observabilityEvent("batch_finalization_deferred_pending", level: .debug)
-            #if DEBUG
-            batchFinalizationDeferredForTesting?()
-            #endif
+        if session.localLease != nil, session.stoppingRecorder?.hasAudioFailure == true {
+            presentRecordingError(message: LocalSpeechRuntimeError.audioBacklog.localizedDescription)
+            cancelRecording()
             return
+        }
+        let queueIdle = await transcription.queueBridge.isIdle()
+        guard ownsFinalization(generation) else { return }
+        if !queueIdle {
+            if force, session.localLease != nil {
+                presentRecordingError(message: LocalSpeechRuntimeError.finalizationTimedOut.localizedDescription)
+                cancelRecording()
+                return
+            }
+            if !force {
+                observabilityEvent("batch_finalization_deferred_pending", level: .debug)
+                #if DEBUG
+                batchFinalizationDeferredForTesting?()
+                #endif
+                return
+            }
         }
         // Retire outstanding provider results before waiting on insertion or submit.
         // A forced deadline must not let a late response type behind its Enter.
@@ -731,6 +788,11 @@ final class RecordingController {
             // A new recording that started over this one retired its Enter.
             guard ownsFinalization(generation) else { return }
         }
+        if let lease = session.localLease {
+            session.localLease = nil
+            await lease.release()
+            guard ownsFinalization(generation) else { return }
+        }
         textInserter.reset()
         textInserter.setObservabilitySessionId(nil)
         isProcessingFinal = false
@@ -740,6 +802,7 @@ final class RecordingController {
     // MARK: - Cleanup
 
     func shutdown() {
+        cancelPendingLocalStart()
         observabilityEvent("recording_controller_shutdown")
         endMetricsSession(reason: "SHUTDOWN")
         hotkeyListener?.stop(); hotkeyListener = nil
@@ -989,9 +1052,7 @@ extension RecordingController {
         } else {
             controller.autoEndSilenceDuration = 0
         }
-        controller.keepAliveEnabled = settings.streamingKeepAliveEnabled
-        controller.keepAliveInterval = settings.streamingKeepAliveInterval
-        controller.reconnectEnabled = settings.streamingReconnectEnabled
+        configureStreamingTransport(controller, provider: provider)
         controller.minimumFinalWordCount = settings.streamingMinimumFinalWordCount
         controller.onFinalLatency = { [weak self] seconds in
             guard let self, self.owns(generation) else { return }
@@ -1030,8 +1091,9 @@ extension RecordingController {
             self.observabilityEvent("streaming_reconnected", level: .warning, sessionId: sessionId)
         }
         controller.onError = { [weak self, weak controller] error in
-            guard let self, let controller, self.owns(generation), self.isRecording,
-                  self.liveStreamingController === controller else { return }
+            guard let self, let controller, self.owns(generation),
+                  self.liveStreamingController === controller,
+                  self.isRecording || (provider is LocalStreamingSpeechProvider && self.isProcessingFinal) else { return }
             Logger.audio.error("Streaming error: \(error.localizedDescription)")
             self.session.latestStreamingError = error
             self.observabilityEvent(
@@ -1040,6 +1102,10 @@ extension RecordingController {
                 metadata: ["error": error.localizedDescription]
             )
             self.presentRecordingError(error, providerId: provider.id)
+            if provider is LocalStreamingSpeechProvider {
+                self.cancelRecording()
+                return
+            }
             Task { @MainActor [weak self, weak controller] in
                 guard let self, let controller, self.owns(generation),
                       self.liveStreamingController === controller else { return }
@@ -1095,6 +1161,7 @@ extension RecordingController {
                 }
                 self.session.latestStreamingError = nil
                 isRecording = false; isProcessingFinal = false
+                self.releaseLocalLease()
                 liveStreamingController = nil
                 self.keyInterceptor.cancel()
                 self.playSoundEffect(.error)
@@ -1135,6 +1202,8 @@ extension RecordingController {
 extension RecordingController {
     /// Maps a transcription error to an actionable, user-friendly message.
     static func userFacingMessage(for error: Error, providerId: String) -> String {
+        if error is LocalSpeechRuntimeError || error is LocalModelError
+            || error is LocalSpeechComputeError || error is LocalSpeechAudioError { return error.localizedDescription }
         let kind = TranscriptionErrorKind.classify(error)
         switch kind {
         case .authentication:
@@ -1195,3 +1264,113 @@ extension RecordingController {
     }
 }
 #endif
+
+extension RecordingController {
+    private func prepareLocalRecording(_ provider: any LocalRecordingPreparing) {
+        let generation = UUID()
+        pendingLocalGeneration = generation
+        isPreparingLocalModel = true
+        guard keyInterceptor.startPending(targetPid: textInserter.targetPid) else {
+            cancelPendingLocalStart()
+            presentRecordingError(message: "Keyboard cancellation is unavailable. Check Accessibility permission and try again.")
+            return
+        }
+        appState.showBanner("Loading local speech. The microphone is off. Enter or Escape cancels.", style: .info, duration: 60)
+        pendingLocalDeadline = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await Task.sleep(for: self.localPreparationTimeout) } catch { return }
+            guard self.pendingLocalGeneration == generation, self.isPreparingLocalModel else { return }
+            self.cancelPendingLocalStart()
+            self.presentRecordingError(message: LocalSpeechRuntimeError.loadTimedOut.localizedDescription)
+        }
+        pendingLocalStart = Task { @MainActor [weak self] in
+            do {
+                guard let self else { return }
+                if provider.mode == .batch, self.settings.vadEnabled {
+                    try await VADModelCache.shared.load(threshold: self.settings.vadThreshold)
+                }
+                try Task.checkCancellation()
+                let prepared = try await provider.prepareRecording()
+                guard self.pendingLocalGeneration == generation, self.isPreparingLocalModel,
+                      self.providerSettings.activeProviderId == provider.id, !self.updateInstallationInProgress() else {
+                    if self.pendingLocalGeneration == generation { self.cancelPendingLocalStart() }
+                    await prepared.lease.release()
+                    return
+                }
+                let matchingMode = provider.mode == .batch
+                    ? prepared.provider is any BatchTranscriptionProvider
+                    : prepared.provider is any StreamingTranscriptionProvider
+                guard prepared.provider.id == provider.id, prepared.provider.mode == provider.mode, matchingMode else {
+                    self.cancelPendingLocalStart()
+                    self.presentRecordingError(message: LocalSpeechRuntimeError.loadFailed.localizedDescription)
+                    await prepared.lease.release()
+                    return
+                }
+                // Drain a pending key before arming the recording's one-shot Enter.
+                self.keyInterceptor.stop()
+                guard self.pendingLocalGeneration == generation, self.isPreparingLocalModel else {
+                    await prepared.lease.release()
+                    return
+                }
+                guard self.textInserter.isTargetAppFrontmost() else {
+                    self.cancelPendingLocalStart()
+                    self.presentRecordingError(message: "The original text field lost focus while loading. Click into it and start again.")
+                    await prepared.lease.release()
+                    return
+                }
+                self.pendingLocalStart = nil
+                self.pendingLocalDeadline?.cancel()
+                self.pendingLocalDeadline = nil
+                self.isPreparingLocalModel = false
+                self.appState.dismissBanner()
+                self.beginCapturedRecording(provider: prepared.provider, lease: prepared.lease)
+            } catch {
+                guard let self, self.pendingLocalGeneration == generation, self.isPreparingLocalModel else { return }
+                self.cancelPendingLocalStart()
+                if !(error is CancellationError) {
+                    let message = (error as? LocalSpeechRuntimeError)?.localizedDescription
+                        ?? (error as? LocalModelError)?.localizedDescription
+                        ?? (error as? LocalSpeechComputeError)?.localizedDescription
+                        ?? LocalSpeechRuntimeError.loadFailed.localizedDescription
+                    self.presentRecordingError(message: message)
+                }
+            }
+        }
+        onStateChanged?()
+    }
+
+    private func cancelPendingLocalStart() {
+        guard isPreparingLocalModel else { return }
+        pendingLocalGeneration = UUID()
+        pendingLocalStart?.cancel()
+        pendingLocalStart = nil
+        pendingLocalDeadline?.cancel()
+        pendingLocalDeadline = nil
+        isPreparingLocalModel = false
+        keyInterceptor.cancel()
+        textInserter.cancelAndReset()
+        appState.dismissBanner()
+        onStateChanged?()
+    }
+
+    private func configureStreamingTransport(_ controller: LiveStreamingController, provider: any StreamingTranscriptionProvider) {
+        controller.keepAliveEnabled = settings.streamingKeepAliveEnabled
+        controller.keepAliveInterval = settings.streamingKeepAliveInterval
+        controller.reconnectEnabled = settings.streamingReconnectEnabled
+        if provider is LocalStreamingSpeechProvider {
+            controller.keepAliveEnabled = false
+            controller.reconnectEnabled = false
+            controller.turnStartStrategies = [.firstTranscription]
+        }
+    }
+}
+
+extension RecordingController {
+    /// Sleep retires the captured target and pending local results. Wake never resumes
+    /// capture or insertion automatically; a new hotkey starts a new recording.
+    func prepareForSystemSleep() {
+        guard isPreparingLocalModel || session.localLease != nil else { return }
+        cancelRecording()
+        appState.showBanner("Local dictation cancelled because the Mac is going to sleep. Start a new recording after wake.", style: .info)
+    }
+}

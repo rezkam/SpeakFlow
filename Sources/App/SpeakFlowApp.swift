@@ -126,7 +126,7 @@ struct MenuBarView: View {
         Button(dictationLabel) {
             recordingController.toggle()
         }
-        .disabled(!state.isRecording && !state.canStartDictation)
+        .disabled(!state.isRecording && !state.isPreparingLocalModel && !state.canStartDictation)
 
         MicrophoneMenu(isRecording: state.isRecording)
 
@@ -158,12 +158,14 @@ struct MenuBarView: View {
     }
 
     private var dictationLabel: String {
-        (state.isRecording || state.isProcessingFinal)
+        if state.isPreparingLocalModel { return "Cancel Model Load (\(state.currentHotkey.displayName))" }
+        return (state.isRecording || state.isProcessingFinal)
             ? "Stop Dictation (\(state.currentHotkey.displayName))"
             : "Start Dictation (\(state.currentHotkey.displayName))"
     }
 
     private func switchProvider(_ id: String) {
+        if id.hasPrefix("local:") { LocalModelsController.shared.load(providerID: id); return }
         ProviderSettings.shared.activeProviderId = id
         state.refresh()
     }
