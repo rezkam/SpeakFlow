@@ -14,7 +14,7 @@ struct ModelsScreenTests {
         }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let store = root.appendingPathComponent(".agents/test-fixtures/models-ui-\(UUID().uuidString)")
-        let installer = ExplicitModelInstaller(root: store, fetch: { _, _ in throw LocalModelError.transferFailed },
+        let installer = ExplicitModelInstaller(root: store, fetch: { _, _, _, _ in throw LocalModelError.transferFailed },
                                                availableBytes: { _ in Int64.max })
         let controller = VADInstallController(root: store, installer: installer)
         let host = NSHostingView(rootView: ModelsSettingsView(vad: controller).padding(24)
@@ -76,7 +76,7 @@ private enum ModelsVisualProbe {
         guard ProcessInfo.processInfo.environment["SPEAKFLOW_ISOLATED_STORAGE"] == "1" else { return }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent(".agents/test-fixtures/models-visual-\(UUID().uuidString)")
-        let installer = ExplicitModelInstaller(root: root, fetch: { _, _ in throw LocalModelError.transferFailed },
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, _, _ in throw LocalModelError.transferFailed },
                                                availableBytes: { _ in Int64.max })
         let controller = VADInstallController(root: root, installer: installer)
         let view = NSHostingView(rootView: ModelsSettingsView(vad: controller).padding(24)

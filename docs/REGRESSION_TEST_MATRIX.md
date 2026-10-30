@@ -78,6 +78,12 @@ strict catalog membership. `LocalSpeechAccelerationTests` checks the explicit CP
 configuration and rejects conflicting library compute overrides, including under CI.
 `ExplicitModelInstallerTests` covers verified installation of both export layouts, denied or changed consent,
 checksums, receipts, unsafe paths, symlinks, cancellation and insufficient storage.
+`ModelArtifactFileTests` covers streamed SHA-256 and Git blob verification, changed tails,
+size mismatches, symlinks and LFS stubs. `ModelArtifactTransportTests` checks incremental disk
+progress, oversized and truncated bodies, redirect rejection before following, HTTP failures,
+existing-file preservation and cancellation of a stalled transfer. Cancelled installations retain
+inert partials without publishing a receipt or usable destination. Installation exposes separate
+download, verification and preparation phases.
 
 `make test-regression-core` never provisions models. Install the reviewed VAD manifest
 explicitly first, then point `SPEAKFLOW_VAD_MODEL_CACHE_ROOT` at that isolated app-owned

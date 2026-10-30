@@ -76,6 +76,8 @@ REGRESSION_SUITES=(
   "LocalVADConsentTests"
   "LocalVADReadinessTests"
   "ExplicitModelInstallerTests"
+  "ModelArtifactFileTests"
+  "ModelArtifactTransportTests"
   "LocalModelManifestTests"
   "LocalSpeechCatalogTests"
   "LocalSpeechAccelerationTests"

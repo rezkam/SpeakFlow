@@ -1,15 +1,25 @@
 import Foundation
 
+public struct ModelInstallProgress: Sendable {
+    public enum Phase: String, Sendable { case downloading, verifying, preparing }
+    public let phase: Phase
+    public let completedBytes: Int64
+    public let totalBytes: Int64
+}
+
 /// The only model network path. A matching reviewed manifest is required per transaction.
 public actor ExplicitModelInstaller {
-    public typealias Fetch = @Sendable (ModelArtifact, URL) async throws -> Data
+    public typealias TransferProgress = @Sendable (Int64) async throws -> Void
+    public typealias Fetch = @Sendable (ModelArtifact, URL, URL, @escaping TransferProgress) async throws -> Void
     public typealias AvailableBytes = @Sendable (URL) throws -> Int64
     private let root: URL
     private let fetch: Fetch
     private let availableBytes: AvailableBytes
     private var installing = false
 
-    public init(root: URL, fetch: @escaping Fetch = ModelArtifactTransport.fetch,
+    public init(root: URL, fetch: @escaping Fetch = { artifact, url, destination, progress in
+                    try await ModelArtifactTransport.transfer(artifact, url, to: destination, progress: progress)
+                },
                 availableBytes: @escaping AvailableBytes = ExplicitModelInstaller.freeBytes) {
         self.root = root
         self.fetch = fetch
@@ -17,7 +27,7 @@ public actor ExplicitModelInstaller {
     }
 
     public func install(_ manifest: LocalModelManifest, consent: LocalModelManifest?,
-                        progress: @Sendable (Int64, Int64) async -> Void = { _, _ in }) async throws {
+                        progress: @escaping @Sendable (ModelInstallProgress) async -> Void = { _ in }) async throws {
         guard consent == manifest else { throw LocalModelError.consentRequired }
         try manifest.validate()
         guard !installing else { throw LocalModelError.busy }
@@ -38,17 +48,24 @@ public actor ExplicitModelInstaller {
             guard try availableBytes(root) >= manifest.transferBytes - completed else {
                 throw LocalModelError.insufficientSpace
             }
-            let data = try await fetch(artifact, manifest.url(for: artifact))
-            try Task.checkCancellation()
             let file = staging.appendingPathComponent(artifact.path)
             try LocalModelFiles.rejectSymbolicLinks(file)
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: file, options: .withoutOverwriting)
-            try artifact.verify(data)
+            let before = completed
+            await progress(ModelInstallProgress(phase: .downloading, completedBytes: before, totalBytes: manifest.transferBytes))
+            try await fetch(artifact, manifest.url(for: artifact), file) { received in
+                guard received >= 0, received <= artifact.bytes else { throw LocalModelError.invalidAssets }
+                await progress(ModelInstallProgress(phase: .downloading,
+                    completedBytes: before + received, totalBytes: manifest.transferBytes))
+            }
+            try Task.checkCancellation()
+            await progress(ModelInstallProgress(phase: .verifying,
+                completedBytes: before + artifact.bytes, totalBytes: manifest.transferBytes))
+            try artifact.verify(fileAt: file)
             completed += artifact.bytes
-            await progress(completed, manifest.transferBytes)
         }
         try Task.checkCancellation()
+        await progress(ModelInstallProgress(phase: .preparing, completedBytes: completed, totalBytes: manifest.transferBytes))
         try JSONEncoder().encode(manifest).write(to: staging.appendingPathComponent("receipt.json"), options: .withoutOverwriting)
         try LocalModelFiles.verify(manifest, installation: staging)
         try Task.checkCancellation()
@@ -73,30 +90,72 @@ public enum ModelArtifactTransport {
             || host == "us.aws.cdn.hf.co" || host == "eu.aws.cdn.hf.co"
     }
 
-    public static func fetch(_ artifact: ModelArtifact, _ url: URL) async throws -> Data {
-        guard allows(url) else { throw LocalModelError.transferFailed }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
-        let session = URLSession(configuration: configuration, delegate: ModelRedirectPolicy(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        let (stream, response) = try await session.bytes(for: request)
-        guard let response = response as? HTTPURLResponse, response.statusCode == 200,
-              let finalURL = response.url, allows(finalURL),
-              response.expectedContentLength < 0 || response.expectedContentLength == artifact.bytes else {
+    public static func transfer(_ artifact: ModelArtifact, _ url: URL, to destination: URL,
+                                progress: @escaping ExplicitModelInstaller.TransferProgress = { _ in },
+                                configuration: URLSessionConfiguration = .ephemeral) async throws {
+        guard allows(url), artifact.bytes > 0,
+              let isolated = configuration.copy() as? URLSessionConfiguration else {
             throw LocalModelError.transferFailed
         }
-        var data = Data()
-        for try await byte in stream {
-            try Task.checkCancellation()
-            guard data.count < artifact.bytes else { throw LocalModelError.invalidAssets }
-            data.append(byte)
+        try Task.checkCancellation()
+        try LocalModelFiles.rejectSymbolicLinks(destination)
+        guard !FileManager.default.fileExists(atPath: destination.path) else { throw LocalModelError.invalidAssets }
+        isolated.httpCookieStorage = nil
+        isolated.urlCredentialStorage = nil
+        isolated.urlCache = nil
+        isolated.waitsForConnectivity = false
+        let session = URLSession(configuration: isolated, delegate: ModelRedirectPolicy(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        try await withTaskCancellationHandler {
+            do {
+                try Task.checkCancellation()
+                var request = URLRequest(url: url)
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                let (stream, response) = try await session.bytes(for: request)
+                guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                      let finalURL = response.url, allows(finalURL),
+                      response.expectedContentLength < 0 || response.expectedContentLength == artifact.bytes else {
+                    throw LocalModelError.transferFailed
+                }
+                try Task.checkCancellation()
+                try Data().write(to: destination, options: .withoutOverwriting)
+                let file = try FileHandle(forWritingTo: destination)
+                defer { try? file.close() }
+                var buffer = Data()
+                buffer.reserveCapacity(65_536)
+                var received: Int64 = 0
+                for try await byte in stream {
+                    try Task.checkCancellation()
+                    guard received < artifact.bytes else { throw LocalModelError.invalidAssets }
+                    buffer.append(byte)
+                    received += 1
+                    if buffer.count == 65_536 {
+                        try file.write(contentsOf: buffer)
+                        buffer.removeAll(keepingCapacity: true)
+                        try await progress(received)
+                    }
+                }
+                try Task.checkCancellation()
+                if !buffer.isEmpty { try file.write(contentsOf: buffer) }
+                guard received == artifact.bytes else { throw LocalModelError.invalidAssets }
+                try await progress(received)
+            } catch {
+                try Task.checkCancellation()
+                throw normalized(error)
+            }
+        } onCancel: {
+            session.invalidateAndCancel()
         }
-        try artifact.verify(data)
-        return data
+    }
+
+    private static func normalized(_ error: Error) -> Error {
+        if error is CancellationError { return CancellationError() }
+        if let error = error as? LocalModelError { return error }
+        let failure = error as NSError
+        if failure.domain == NSCocoaErrorDomain, failure.code == CocoaError.fileWriteOutOfSpace.rawValue {
+            return LocalModelError.insufficientSpace
+        }
+        return LocalModelError.transferFailed
     }
 }
 

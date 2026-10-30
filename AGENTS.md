@@ -273,10 +273,11 @@ These suite filters define the main-feature safety net and must not be removed w
 - Verify app-owned receipts, file sizes and hashes before local loading. External caches are not adopted.
 - Missing or corrupt required VAD blocks affected recording with actionable guidance. No silent fallback.
 - Core regression verifies a previously approved installation and fails if it is missing on supported hardware.
+- Transfer and integrity verification use bounded app-managed buffers. Cancellation retains only inert partial files.
 - The bundled ASR catalog contains only reviewed immutable exports with complete download totals.
 - Local ASR configuration explicitly requests CPU plus Neural Engine; conflicting library overrides fail visibly.
 - Covered by `LocalSpeechCatalogTests`, `LocalSpeechAccelerationTests`, `LocalVADConsentTests`, `LocalVADReadinessTests`, `ExplicitModelInstallerTests`,
-  `LocalModelManifestTests`, `VADModelVerificationTests`, `VADModelCacheTests` and `ModelsScreenTests`.
+  `ModelArtifactFileTests`, `ModelArtifactTransportTests`, `LocalModelManifestTests`, `VADModelVerificationTests`, `VADModelCacheTests` and `ModelsScreenTests`.
 
 ## RC and Release
 

@@ -46,20 +46,40 @@ public struct ModelArtifact: Codable, Hashable, Sendable {
         self.checksum = checksum
     }
 
-    public func verify(_ data: Data) throws {
-        guard data.count == bytes, !data.starts(with: Data("version https://git-lfs.github.com/spec/".utf8)) else {
+    public func verify(fileAt url: URL) throws {
+        do {
+            try LocalModelFiles.rejectSymbolicLinks(url)
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard bytes > 0, values.isRegularFile == true, values.fileSize.map(Int64.init) == bytes else {
+                throw LocalModelError.invalidAssets
+            }
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            var sha256 = SHA256()
+            var gitSHA1 = Insecure.SHA1()
+            if digest == .gitBlobSHA1 { gitSHA1.update(data: Data("blob \(bytes)\0".utf8)) }
+            var consumed: Int64 = 0
+            while let chunk = try file.read(upToCount: 65_536), !chunk.isEmpty {
+                try Task.checkCancellation()
+                guard Int64(chunk.count) <= bytes - consumed,
+                      consumed != 0 || !chunk.starts(with: Data("version https://git-lfs.github.com/spec/".utf8)) else {
+                    throw LocalModelError.invalidAssets
+                }
+                consumed += Int64(chunk.count)
+                switch digest {
+                case .sha256: sha256.update(data: chunk)
+                case .gitBlobSHA1: gitSHA1.update(data: chunk)
+                }
+            }
+            let actual = digest == .sha256 ? Array(sha256.finalize()) : Array(gitSHA1.finalize())
+            guard consumed == bytes, actual.map({ String(format: "%02x", $0) }).joined() == checksum else {
+                throw LocalModelError.invalidAssets
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
             throw LocalModelError.invalidAssets
         }
-        let actual: String
-        switch digest {
-        case .sha256:
-            actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        case .gitBlobSHA1:
-            // Small non-LFS files use the immutable repository's Git blob identity.
-            let blob = Data("blob \(data.count)\0".utf8) + data
-            actual = Insecure.SHA1.hash(data: blob).map { String(format: "%02x", $0) }.joined()
-        }
-        guard actual == checksum else { throw LocalModelError.invalidAssets }
     }
 }
 
@@ -166,13 +186,14 @@ public enum LocalModelFiles {
         try manifest.validate()
         let receiptURL = installation.appendingPathComponent("receipt.json")
         try rejectSymbolicLinks(receiptURL)
-        guard let receipt = try? JSONDecoder().decode(LocalModelManifest.self, from: Data(contentsOf: receiptURL)),
+        let receiptSize = try? receiptURL.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        guard let receiptSize, receiptSize <= 65_536,
+              let receipt = try? JSONDecoder().decode(LocalModelManifest.self, from: Data(contentsOf: receiptURL)),
               receipt == manifest else { throw LocalModelError.invalidAssets }
         for artifact in manifest.artifacts {
             let url = installation.appendingPathComponent(artifact.path)
             try rejectSymbolicLinks(url)
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { throw LocalModelError.invalidAssets }
-            try artifact.verify(data)
+            try artifact.verify(fileAt: url)
         }
         let expected = Set(manifest.artifacts.map(\.path) + ["receipt.json"])
         guard let entries = FileManager.default.enumerator(at: installation,

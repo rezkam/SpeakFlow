@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import Testing
 @testable import SpeakFlowCore
 
@@ -22,9 +23,8 @@ struct ExplicitModelInstallerTests {
 
     @Test func denialMakesNoRequestAndCreatesNoStore() async throws {
         let root = root()
-        let installer = ExplicitModelInstaller(root: root, fetch: { _, _ in
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, _, _ in
             Issue.record("Denied installation must not fetch anything")
-            return Data()
         })
         await #expect(throws: LocalModelError.consentRequired) {
             try await installer.install(manifest(), consent: nil)
@@ -34,11 +34,11 @@ struct ExplicitModelInstallerTests {
 
     @Test func exactConsentPublishesVerifiedReceiptAndFiles() async throws {
         let root = root(), manifest = manifest(), bytes = bytes
-        let installer = ExplicitModelInstaller(root: root, fetch: { artifact, url in
+        let installer = ExplicitModelInstaller(root: root, fetch: { artifact, url, file, _ in
             #expect(url.host == "huggingface.co")
             #expect(url.path.contains(manifest.revision))
             #expect(artifact.bytes == bytes.count)
-            return bytes
+            try bytes.write(to: file, options: .withoutOverwriting)
         }, availableBytes: { _ in Int64.max })
         try await installer.install(manifest, consent: manifest)
         try LocalModelFiles.verify(manifest, installation: root.appendingPathComponent(manifest.installationName))
@@ -49,7 +49,9 @@ struct ExplicitModelInstallerTests {
     func exportLayoutsInstallWithVerifiedReceipts(directory: String) async throws {
         let path = directory == "." ? "weights.bin" : "\(directory)/weights.bin"
         let root = root(), manifest = manifest(path: path, directory: directory), bytes = bytes
-        let installer = ExplicitModelInstaller(root: root, fetch: { _, _ in bytes }, availableBytes: { _ in Int64.max })
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, file, _ in
+            try bytes.write(to: file, options: .withoutOverwriting)
+        }, availableBytes: { _ in Int64.max })
         try await installer.install(manifest, consent: manifest)
         let installation = root.appendingPathComponent(manifest.installationName)
         try LocalModelFiles.verify(manifest, installation: installation)
@@ -57,9 +59,8 @@ struct ExplicitModelInstallerTests {
     }
 
     @Test func changedManifestInvalidatesConsent() async throws {
-        let installer = ExplicitModelInstaller(root: root(), fetch: { _, _ in
+        let installer = ExplicitModelInstaller(root: root(), fetch: { _, _, _, _ in
             Issue.record("Changed manifest must not transfer")
-            return Data()
         })
         await #expect(throws: LocalModelError.consentRequired) {
             try await installer.install(manifest(), consent: manifest(path: "fixture.mlmodelc/other.bin"))
@@ -68,7 +69,10 @@ struct ExplicitModelInstallerTests {
 
     @Test func invalidHashNeverPublishesAndRetainsPartialForExplicitCleanup() async throws {
         let root = root(), manifest = manifest()
-        let installer = ExplicitModelInstaller(root: root, fetch: { _, _ in Data("wrong".utf8) },
+        let invalidBytes = Data(repeating: 0, count: bytes.count)
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, file, _ in
+            try invalidBytes.write(to: file, options: .withoutOverwriting)
+        },
                                                availableBytes: { _ in Int64.max })
         await #expect(throws: LocalModelError.invalidAssets) {
             try await installer.install(manifest, consent: manifest)
@@ -78,9 +82,8 @@ struct ExplicitModelInstallerTests {
     }
 
     @Test func lowDiskRefusesBeforeTransfer() async throws {
-        let installer = ExplicitModelInstaller(root: root(), fetch: { _, _ in
+        let installer = ExplicitModelInstaller(root: root(), fetch: { _, _, _, _ in
             Issue.record("Low disk must refuse before network access")
-            return Data()
         }, availableBytes: { _ in 0 })
         let manifest = manifest()
         await #expect(throws: LocalModelError.insufficientSpace) {
@@ -96,7 +99,7 @@ struct ExplicitModelInstallerTests {
 
     @Test func cancelledInstallNeverPublishes() async throws {
         let root = root(), manifest = manifest()
-        let installer = ExplicitModelInstaller(root: root, fetch: { _, _ in throw CancellationError() },
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, _, _ in throw CancellationError() },
                                                availableBytes: { _ in Int64.max })
         await #expect(throws: CancellationError.self) { try await installer.install(manifest, consent: manifest) }
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(manifest.installationName).path))
@@ -104,7 +107,9 @@ struct ExplicitModelInstallerTests {
 
     @Test func missingOrChangedReceiptAndSymlinksAreNotTrusted() async throws {
         let root = root(), manifest = manifest(), bytes = bytes
-        let installer = ExplicitModelInstaller(root: root, fetch: { _, _ in bytes }, availableBytes: { _ in Int64.max })
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, file, _ in
+            try bytes.write(to: file, options: .withoutOverwriting)
+        }, availableBytes: { _ in Int64.max })
         try await installer.install(manifest, consent: manifest)
         let installation = root.appendingPathComponent(manifest.installationName)
         try Data("invalid receipt".utf8).write(to: installation.appendingPathComponent("receipt.json"))
@@ -112,6 +117,18 @@ struct ExplicitModelInstallerTests {
         let link = root.appendingPathComponent("linked-model")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: installation)
         #expect(throws: LocalModelError.invalidAssets) { try LocalModelFiles.verify(manifest, installation: link) }
+    }
+
+    @Test func reportsDownloadVerificationAndPreparationAsDistinctPhases() async throws {
+        let root = root(), manifest = manifest(), bytes = bytes
+        let phases = OSAllocatedUnfairLock(initialState: [String]())
+        let installer = ExplicitModelInstaller(root: root, fetch: { _, _, file, _ in
+            try bytes.write(to: file, options: .withoutOverwriting)
+        }, availableBytes: { _ in Int64.max })
+        try await installer.install(manifest, consent: manifest) { event in
+            phases.withLock { $0.append(event.phase.rawValue) }
+        }
+        #expect(phases.withLock { $0 } == ["downloading", "verifying", "preparing"])
     }
 
     @Test func approvedVADManifestIsComplete() throws {

@@ -58,8 +58,14 @@ final class VADInstallController {
         message = "Downloading approved voice activity files..."
         download = Task {
             do {
-                try await installer.install(approved, consent: approved) { [weak self] completed, total in
-                    await MainActor.run { self?.message = "Downloaded \(completed) of \(total) bytes. Verifying files..." }
+                try await installer.install(approved, consent: approved) { [weak self] event in
+                    let message: String
+                    switch event.phase {
+                    case .downloading: message = "Downloading: \(event.completedBytes) of \(event.totalBytes) bytes."
+                    case .verifying: message = "Verifying downloaded voice activity files..."
+                    case .preparing: message = "Preparing the verified installation..."
+                    }
+                    await MainActor.run { self?.message = message }
                 }
                 isInstalled = true
                 message = "Downloaded and verified. Voice activity detection is available."
