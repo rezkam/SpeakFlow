@@ -10,7 +10,7 @@ for mode in default silence; do
     expected=true
     if [[ "$mode" == silence ]]; then args+=(--silence-only); expected=false; fi
     rc=0
-    output="$("$BINARY" "${args[@]}" 2>&1)" || rc=$?
+    output="$("$BINARY" "${args[@]}")" || rc=$?
     [[ "$rc" == 0 ]] || { echo "FAIL: $mode runtime isolation is not unconditional"; exit 1; }
     [[ "$output" == "E2E_RUNTIME isolated=true transcription_allowed=$expected muted=true" ]] || {
         echo "FAIL: $mode runtime policy mismatch"; exit 1;

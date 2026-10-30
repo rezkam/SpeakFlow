@@ -18,7 +18,7 @@ test-regression-core:
 
 # Run tests with Thread Sanitizer (detects data races)
 test-tsan:
-	swift test --sanitize=thread
+	swift test --sanitize=thread --no-parallel
 
 # Run live end-to-end test (real microphone + real transcription API)
 test-live-e2e:

@@ -117,7 +117,7 @@ struct RegressionScriptTests {
         #expect(result.output.contains("FAILED: DictationReadinessTests"))
     }
 
-    @Test func regressionPrefetchAndModelSuitesShareAnIsolatedCache() throws {
+    @Test func regressionVerificationAndModelSuitesShareAnIsolatedCache() throws {
         let result = try runRegressionScript(vadIntegrationWasExplicitlySkipped: false, vadPlatformAvailable: true)
         #expect(result.terminationStatus == 0, "\(result.output)")
         #expect(result.output.contains("Status: ALL OK"))
@@ -176,6 +176,7 @@ struct RegressionScriptTests {
             #!/usr/bin/env bash
             set -euo pipefail
 
+            [[ -z "${SPEAKFLOW_PREFETCH_VAD_MODEL:-}" ]] || exit 69
             [[ -z "${SPEAKFLOW_RUN_LIVE_MISTRAL:-}" ]] || exit 64
             [[ "${SPEAKFLOW_ISOLATED_STORAGE:-}" == 1 ]] || exit 65
             [[ "${SPEAKFLOW_VAD_MODEL_CACHE_ROOT:-}" == "$EXPECTED_MODEL_CACHE_ROOT" ]] || exit 66
@@ -195,13 +196,13 @@ struct RegressionScriptTests {
               shift
             done
 
-            if [[ "$suite" == "VADModelPrefetchTests" ]]; then
+            if [[ "$suite" == "VADModelVerificationTests" ]]; then
               mkdir -p "$SPEAKFLOW_VAD_MODEL_CACHE_ROOT"
-              : > "$SPEAKFLOW_VAD_MODEL_CACHE_ROOT/prefetched"
+              : > "$SPEAKFLOW_VAD_MODEL_CACHE_ROOT/verified"
             fi
             if [[ "$suite" == "VADIntegrationTests" ]]; then
               if [[ "\(vadPlatformAvailable ? "1" : "0")" == 1 ]]; then
-                [[ -f "$SPEAKFLOW_VAD_MODEL_CACHE_ROOT/prefetched" ]] || exit 67
+                [[ -f "$SPEAKFLOW_VAD_MODEL_CACHE_ROOT/verified" ]] || exit 67
               fi
               \(explicitSkipOutput)
               echo '✔ Test run with \(vadPlatformAvailable ? 1 : 0) tests in 1 suite passed after 0.001 seconds.'

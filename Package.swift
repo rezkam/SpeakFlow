@@ -8,8 +8,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
-        // Only VAD is used. The optional text engine contains upstream build paths.
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.17.7", traits: []),
+        // Local speech and VAD only; optional text-engine traits remain disabled.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.18.0", traits: []),
         .package(url: "https://github.com/pointfreeco/swift-concurrency-extras.git", from: "1.4.3"),
     ],
     targets: [
@@ -19,7 +19,8 @@ let package = Package(
             dependencies: [
                 "FluidAudio"
             ],
-            path: "Sources/SpeakFlowCore"
+            path: "Sources/SpeakFlowCore",
+            resources: [.process("Models/Manifests")]
         ),
         // Main executable
         .executableTarget(

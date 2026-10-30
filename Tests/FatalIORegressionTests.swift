@@ -17,7 +17,7 @@ private enum FatalIOChild {
         process.executableURL = URL(fileURLWithPath: args[0])
         process.arguments = ["--test-bundle-path", args[bundleIndex + 1],
                              "--testing-library", "swift-testing", "--no-parallel", "--filter", suite]
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try TestProcessEnvironment.inherited()
         environment[key] = suite
         environment["SPEAKFLOW_ISOLATED_STORAGE"] = "1"
         environment["SPEAKFLOW_ISOLATE_TEST_AUDIO"] = "1"

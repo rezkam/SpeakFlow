@@ -87,6 +87,7 @@ final class RecordingController {
     let settings: any SettingsProviding
     let transcription: any TranscriptionCoordinating
     private let playSoundEffect: (SoundEffect) -> Void
+    private let validateModelAssets: @MainActor (ProviderMode, Bool) throws -> Void
 
     /// Test mode controls how the controller behaves outside production.
     /// - `off`: Normal production behavior with real permissions and recording.
@@ -112,7 +113,11 @@ final class RecordingController {
         providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared,
         settings: any SettingsProviding = SpeakFlowCore.Settings.shared,
         transcription: any TranscriptionCoordinating = Transcription.shared,
-        playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
+        playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() },
+        validateModelAssets: @escaping @MainActor (ProviderMode, Bool) throws -> Void = { mode, enabled in
+            guard mode == .batch, enabled, StreamingRecorder.requiresVADAssetsForCurrentProcess else { return }
+            _ = try LocalVADAssets.verifiedDirectory()
+        }
     ) {
         self.keyInterceptor = keyInterceptor
         self.textInserter = textInserter
@@ -123,6 +128,7 @@ final class RecordingController {
         self.settings = settings
         self.transcription = transcription
         self.playSoundEffect = playSoundEffect
+        self.validateModelAssets = validateModelAssets
         self.textInserter.onBulkInsertionFailure = { [weak self] in
             guard let self else { return }
             self.session.bulkInsertionFailed = true
@@ -314,6 +320,15 @@ final class RecordingController {
             return
         }
 
+        do {
+            try validateModelAssets(provider.mode, settings.vadEnabled)
+        } catch {
+            playSoundEffect(.error)
+            presentRecordingError(message: (error as? LocalModelError)?.localizedDescription
+                                  ?? LocalModelError.invalidAssets.localizedDescription)
+            return
+        }
+
         guard captureTargetOrRefuseStart() else { return }
         replaceSession()
 
@@ -456,7 +471,7 @@ final class RecordingController {
                 self.playSoundEffect(.error)
                 self.observabilityEvent("batch_recording_start_failed", level: .error)
                 self.presentRecordingError(
-                    message: "Transcription failed, audio recording could not start. Please try again."
+                    message: startingRecorder.startupError ?? "Transcription failed, audio recording could not start. Please try again."
                 )
                 self.endMetricsSession(reason: "START_FAILED")
             } else {

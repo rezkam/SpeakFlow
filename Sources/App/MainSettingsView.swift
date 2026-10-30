@@ -166,6 +166,8 @@ struct MainSettingsView: View {
             TranscriptionSettingsView(switchTab: { selectedTab = $0 })
         case .providers:
             ProvidersSettingsView()
+        case .models:
+            ModelsSettingsView()
         case .statistics:
             StatisticsSettingsView()
         case .about:

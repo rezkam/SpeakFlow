@@ -19,6 +19,17 @@ struct GeneralSettingsView: View {
         let _ = state.refreshVersion
         VStack(alignment: .leading, spacing: 18) {
             banner
+            if state.needsVADInstallation {
+                HStack {
+                    Text("Download the required voice activity model before recording.")
+                        .font(.callout)
+                    Spacer()
+                    Button("Open Models") { switchTab(.models) }
+                }
+                .padding(14)
+                .background(Theme.accentSoft)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
+            }
             MicrophoneSettingsView(isRecording: state.isRecording, permissionGranted: state.microphoneGranted)
             permissionsSection
             activationSection
@@ -48,7 +59,7 @@ struct GeneralSettingsView: View {
         SectionCard(
             "Permissions",
             footer: allPermissionsGranted
-                ? "All permissions granted. SpeakFlow is ready to use."
+                ? "All permissions granted."
                 : "Both permissions are required for SpeakFlow to work."
         ) {
             PermissionRow(

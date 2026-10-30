@@ -51,10 +51,12 @@ final class MockStreamingProvider: StreamingTranscriptionProvider, @unchecked Se
     var beforeStartSessionReturns: (@Sendable () async -> Void)?
 
     /// How many times `startSession()` was called.
-    var startSessionCallCount = 0
+    private let callCountLock = NSLock()
+    private var callCount = 0
+    var startSessionCallCount: Int { callCountLock.withLock { callCount } }
 
     func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
-        startSessionCallCount += 1
+        callCountLock.withLock { callCount += 1 }
         if let beforeStartSessionReturns { await beforeStartSessionReturns() }
         if startDelay > 0 {
             try await Task.sleep(for: .seconds(startDelay))
@@ -99,7 +101,9 @@ final class MultiSessionMockProvider: StreamingTranscriptionProvider, @unchecked
     var sessions: [any StreamingSession] = []
 
     /// Number of times `startSession()` was called.
-    var startSessionCallCount = 0
+    private let callCountLock = NSLock()
+    private var callCount = 0
+    var startSessionCallCount: Int { callCountLock.withLock { callCount } }
 
     /// Whether the next call should fail (overrides `sessions` queue).
     var nextCallShouldFail = false
@@ -108,7 +112,7 @@ final class MultiSessionMockProvider: StreamingTranscriptionProvider, @unchecked
     var reconnectDelay: TimeInterval = 0
 
     func startSession(config: StreamingSessionConfig) async throws -> StreamingSession {
-        startSessionCallCount += 1
+        callCountLock.withLock { callCount += 1 }
         if reconnectDelay > 0 {
             try await Task.sleep(for: .seconds(reconnectDelay))
         }

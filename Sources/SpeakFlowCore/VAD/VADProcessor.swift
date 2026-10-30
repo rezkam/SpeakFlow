@@ -1,3 +1,4 @@
+import CoreML
 import Foundation
 import OSLog
 import FluidAudio
@@ -6,10 +7,8 @@ import FluidAudio
 
 /// Caches the expensive-to-load Silero VAD CoreML model so it is only loaded once.
 ///
-/// On first launch the model may even need to be downloaded from HuggingFace,
-/// and CoreML compilation adds latency on every cold start.  Call
-/// `VADModelCache.shared.warmUp()` at app launch so subsequent
-/// `VADProcessor.initialize()` calls are near-instant.
+/// Only explicitly installed, verified app-owned assets are loaded.
+/// Warming and recording never resolve remote models or repair missing files.
 public actor VADModelCache {
     public static let shared = VADModelCache()
 
@@ -27,17 +26,23 @@ public actor VADModelCache {
     private let managerFactory: @Sendable (Float) async throws -> VadManager
 
     init(
-        managerFactory: @escaping @Sendable (Float) async throws -> VadManager = { threshold in
+        modelRoot: URL = VADModelCache.modelCacheRoot(),
+        managerFactory: (@Sendable (Float) async throws -> VadManager)? = nil
+    ) {
+        self.managerFactory = managerFactory ?? { threshold in
+            ModelNetworkPolicy.initialize()
+            let directory = try LocalVADAssets.verifiedDirectory(root: modelRoot)
             let config = VadConfig(defaultThreshold: threshold)
-            let models = try await ModelHub.loadModels(
-                .vad, modelNames: Array(ModelNames.VAD.requiredModels),
-                directory: VADModelCache.modelCacheRoot(), computeUnits: config.computeUnits
-            )
-            guard let model = models[ModelNames.VAD.sileroVadFile] else { throw VadError.modelLoadingFailed }
+            let modelConfig = MLModelConfiguration()
+            modelConfig.computeUnits = config.computeUnits
+            let model: MLModel
+            do {
+                model = try await MLModel.load(contentsOf: directory, configuration: modelConfig)
+            } catch {
+                throw LocalModelError.invalidAssets
+            }
             return VadManager(config: config, vadModel: model)
         }
-    ) {
-        self.managerFactory = managerFactory
     }
 
     /// Model loading and test gating use the same cache root. Isolated launches
@@ -57,10 +62,9 @@ public actor VADModelCache {
             guard let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
                 preconditionFailure("Application Support directory is unavailable")
             }
-            base = applicationSupport
+            base = applicationSupport.appendingPathComponent("SpeakFlow", isDirectory: true)
         }
-        return base.appendingPathComponent("FluidAudio", isDirectory: true)
-            .appendingPathComponent("Models", isDirectory: true)
+        return base.appendingPathComponent("Models", isDirectory: true)
     }
 
     /// Pre-load the Silero VAD model in the background.

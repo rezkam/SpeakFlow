@@ -11,7 +11,7 @@ import Testing
 /// FluidAudio's production cache or touching the user's actual model files.
 enum VADModelTestSupport {
     static let cacheRootOverrideEnvironmentKey = "SPEAKFLOW_VAD_MODEL_CACHE_ROOT"
-    static let prefetchEnvironmentKey = "SPEAKFLOW_PREFETCH_VAD_MODEL"
+    static let verificationEnvironmentKey = "SPEAKFLOW_VERIFY_VAD_MODEL"
     static let modelTestEnvironmentKey = "SPEAKFLOW_RUN_VAD_MODEL_TESTS"
 
     static func defaultCacheRoot(
@@ -29,8 +29,8 @@ enum VADModelTestSupport {
 
     static func modelURL(cacheRoot: URL) -> URL {
         cacheRoot
-            .appendingPathComponent(Repo.vad.folderName, isDirectory: true)
-            .appendingPathComponent(ModelNames.VAD.sileroVadFile)
+            .appendingPathComponent(LocalVADAssets.manifest.installationName, isDirectory: true)
+            .appendingPathComponent(LocalVADAssets.manifest.modelDirectory)
     }
 
     static func hasLocalModel(
@@ -60,11 +60,11 @@ enum VADModelTestSupport {
         )
     }
 
-    static func prefetchTestsEnabled(
+    static func verificationTestsEnabled(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         isVADAvailable: Bool = VADProcessor.isAvailable
     ) -> Bool {
-        environment[prefetchEnvironmentKey] == "1" && platformSupportsVAD(isAvailable: isVADAvailable)
+        environment[verificationEnvironmentKey] == "1" && platformSupportsVAD(isAvailable: isVADAvailable)
     }
 }
 
@@ -72,17 +72,16 @@ enum VADModelTestSupport {
 struct VADModelCacheLocationTests {
     @Test func isolatedProcessModelRootNeverUsesInstalledApplicationSupport() {
         let expected = RuntimeIsolation.current.dataDirectory
-            .appendingPathComponent("FluidAudio", isDirectory: true)
             .appendingPathComponent("Models", isDirectory: true)
         let root = VADModelTestSupport.configuredCacheRoot(environment: [:])
         #expect(root == expected)
     }
 
-    @Test func modelPathUsesFluidAudioPublicNames() throws {
+    @Test func modelPathUsesReviewedManifestIdentity() throws {
         let root = URL(fileURLWithPath: "/cache-root", isDirectory: true)
         let expected = root
-            .appendingPathComponent(Repo.vad.folderName, isDirectory: true)
-            .appendingPathComponent(ModelNames.VAD.sileroVadFile)
+            .appendingPathComponent(LocalVADAssets.manifest.installationName, isDirectory: true)
+            .appendingPathComponent(LocalVADAssets.manifest.modelDirectory)
         #expect(VADModelTestSupport.modelURL(cacheRoot: root) == expected)
     }
 
@@ -137,7 +136,7 @@ struct VADModelCacheLocationTests {
         }
     }
 
-    @Test func unsupportedPlatformsDisableModelAndPrefetchTests() {
+    @Test func unsupportedPlatformsDisableModelAndVerificationTests() {
         let root = URL(fileURLWithPath: "/cache-root", isDirectory: true)
         let modelPath = VADModelTestSupport.modelURL(cacheRoot: root).path
         #expect(VADModelTestSupport.platformSupportsVAD(isAvailable: true))
@@ -150,45 +149,45 @@ struct VADModelCacheLocationTests {
             isVADAvailable: false,
             fileExists: { $0 == modelPath }
         ))
-        #expect(!VADModelTestSupport.prefetchTestsEnabled(
-            environment: [VADModelTestSupport.prefetchEnvironmentKey: "1"],
+        #expect(!VADModelTestSupport.verificationTestsEnabled(
+            environment: [VADModelTestSupport.verificationEnvironmentKey: "1"],
             isVADAvailable: false
         ))
     }
 
-    @Test func prefetchRequiresExactOptInValue() {
-        #expect(VADModelTestSupport.prefetchTestsEnabled(
-            environment: [VADModelTestSupport.prefetchEnvironmentKey: "1"],
+    @Test func verificationRequiresExactOptInValue() {
+        #expect(VADModelTestSupport.verificationTestsEnabled(
+            environment: [VADModelTestSupport.verificationEnvironmentKey: "1"],
             isVADAvailable: true
         ))
         for value in ["", "0", "false"] {
-            #expect(!VADModelTestSupport.prefetchTestsEnabled(
-                environment: [VADModelTestSupport.prefetchEnvironmentKey: value],
+            #expect(!VADModelTestSupport.verificationTestsEnabled(
+                environment: [VADModelTestSupport.verificationEnvironmentKey: value],
                 isVADAvailable: true
             ))
         }
     }
 }
 
-@Suite("VAD model prefetch", .enabled(if: VADModelTestSupport.prefetchTestsEnabled()))
-struct VADModelPrefetchTests {
-    @Test func provisionSileroModelForRegressionCoverage() async throws {
+@Suite("VAD model verification", .enabled(if: VADModelTestSupport.verificationTestsEnabled()))
+struct VADModelVerificationTests {
+    @Test func verifySileroModelForRegressionCoverage() async throws {
         do {
             let vad = VADProcessor(config: .default)
             try await vad.initialize()
         } catch {
-            throw VADModelPrefetchError.provisioningFailed(error)
+            throw VADModelVerificationError.verificationFailed(error)
         }
     }
 }
 
-private enum VADModelPrefetchError: LocalizedError {
-    case provisioningFailed(Error)
+private enum VADModelVerificationError: LocalizedError {
+    case verificationFailed(Error)
 
     var errorDescription: String? {
         switch self {
-        case .provisioningFailed(let error):
-            return "Regression-core could not provision the Silero VAD model required for VADIntegrationTests: \(error.localizedDescription)"
+        case .verificationFailed(let error):
+            return "Regression-core could not verify the Silero VAD model required for VADIntegrationTests: \(error.localizedDescription)"
         }
     }
 }

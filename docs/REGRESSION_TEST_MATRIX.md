@@ -65,3 +65,28 @@ queued work, and interrupted posting withholds submit Enter. Embedded newlines a
 mapped to synthetic Return keys. The typing toggle retains the original paced path.
 Streaming behavior is unchanged. Posted events do not prove target application consumption;
 cross-process compatibility requires manual validation in the target editor or terminal.
+
+## Explicit local model installation
+
+`LocalVADConsentTests` verifies that missing assets explain installation and corrupt VAD
+refuses capture. `LocalVADReadinessTests` distinguishes batch VAD dependencies from cloud
+streaming endpointing. `VADInstallControllerTests` rejects stale availability checks.
+`LocalModelManifestTests` verifies root and nested export paths, exact repository components,
+reserved receipts and file-directory collisions on case-insensitive storage.
+`LocalSpeechCatalogTests` verifies the three reviewed English exports, complete byte totals and
+strict catalog membership. `LocalSpeechAccelerationTests` checks the explicit CPU plus Neural Engine
+configuration and rejects conflicting library compute overrides, including under CI.
+`ExplicitModelInstallerTests` covers verified installation of both export layouts, denied or changed consent,
+checksums, receipts, unsafe paths, symlinks, cancellation and insufficient storage.
+
+`make test-regression-core` never provisions models. Install the reviewed VAD manifest
+explicitly first, then point `SPEAKFLOW_VAD_MODEL_CACHE_ROOT` at that isolated app-owned
+store. The gate verifies the installed assets and runs the existing real-model suites.
+Missing assets on supported hardware fail the gate rather than silently skipping coverage.
+
+`ModelsScreenTests` opens the production Models view with synthetic isolated state,
+drives controller state through confirmation, cancellation and failed transfer, and checks retry
+availability and actual window geometry. It does not assume SwiftUI controls are `NSButton` subviews.
+Enable it with `SPEAKFLOW_RUN_UI_PROBES=1`. Captures contain only the synthetic test view.
+The persistent `ModelsVisualProbe` test fixture supports separate Computer checks of the actual
+Download, Cancel, Confirm download and Escape interactions without a network-capable transport.

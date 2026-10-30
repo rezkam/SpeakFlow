@@ -28,8 +28,8 @@ struct RecorderModelIsolationTests {
             throw ProbeError.blocked
         }
         let started = await recorder.start()
-        #expect(started)
         let optedIn = ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_VAD_MODEL_TESTS"] == "1"
+        #expect(started == !optedIn, "An explicitly exercised VAD failure must refuse capture")
         #expect(modelLoads == (optedIn ? 1 : 0), "Isolated capture must honor explicit CoreML opt-in")
         recorder.cancel()
         await recorder.waitForStopCompletion()

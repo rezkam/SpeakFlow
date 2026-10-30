@@ -23,15 +23,7 @@ struct VADModelCacheTests {
         // Verify that getManager can actually create/return a manager on supported platforms
 
         // This should succeed without throwing
-        let manager: VadManager
-        do {
-            manager = try await VADModelCache.shared.getManager(threshold: 0.5)
-        } catch let error as NSError where error.domain == NSURLErrorDomain
-            && (error.code == NSURLErrorCancelled || error.code == NSURLErrorNotConnectedToInternet) {
-            // Network unavailable or request cancelled by sandbox (e.g. macOS 26 CI).
-            // The model download requires outbound network; skip gracefully.
-            return
-        }
+        let manager = try await VADModelCache.shared.getManager(threshold: 0.5)
 
         // Verify the manager was actually created (check identity is stable)
         #expect(type(of: manager) == VadManager.self, "getManager must return a VadManager instance")
@@ -43,15 +35,8 @@ struct VADModelCacheTests {
         // cached instance. Uses a private cache to avoid interference from other
         // suites that touch VADModelCache.shared with different thresholds.
         let cache = VADModelCache()
-        let m1: VadManager
-        let m2: VadManager
-        do {
-            m1 = try await cache.getManager(threshold: 0.5)
-            m2 = try await cache.getManager(threshold: 0.5)
-        } catch let error as NSError where error.domain == NSURLErrorDomain
-            && (error.code == NSURLErrorCancelled || error.code == NSURLErrorNotConnectedToInternet) {
-            return
-        }
+        let m1 = try await cache.getManager(threshold: 0.5)
+        let m2 = try await cache.getManager(threshold: 0.5)
         #expect(m1 === m2, "getManager must return the same cached instance")
     }
 

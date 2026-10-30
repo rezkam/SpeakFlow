@@ -14,7 +14,7 @@ fi
 ARTIFACT_DIR="$ROOT_DIR/.agents/regression"
 mkdir -p "$ARTIFACT_DIR"
 export SPEAKFLOW_ISOLATED_STORAGE=1
-# Core regression is offline except for the explicit model prefetch below.
+# Core regression verifies previously approved local models. It never downloads assets.
 unset SPEAKFLOW_RUN_LIVE_MISTRAL
 export SPEAKFLOW_VAD_MODEL_CACHE_ROOT="${SPEAKFLOW_VAD_MODEL_CACHE_ROOT:-$ARTIFACT_DIR/vad-models}"
 source "$ROOT_DIR/scripts/lib/redact-diagnostics.sh"
@@ -73,6 +73,12 @@ REGRESSION_SUITES=(
   "VADStateMachineTests"
   "VADIntegrationTests"
   "VADModelCacheTests"
+  "LocalVADConsentTests"
+  "LocalVADReadinessTests"
+  "ExplicitModelInstallerTests"
+  "LocalModelManifestTests"
+  "LocalSpeechCatalogTests"
+  "LocalSpeechAccelerationTests"
   "VADTests"
   "LiveStreamingKeepAliveTests"
   "WebSocketSessionContractTests"
@@ -155,7 +161,7 @@ vad_platform_is_available() {
   [[ "$(uname -m)" == "arm64" ]]
 }
 
-run_vad_model_prefetch() {
+run_vad_model_verification() {
   if ! vad_platform_is_available; then
     VAD_INTEGRATION_EXPECTED=0
     echo "VAD model........ skipped (VAD requires arm64; current architecture: $(uname -m))"
@@ -163,45 +169,45 @@ run_vad_model_prefetch() {
     return 0
   fi
 
-  local prefetch_log
-  prefetch_log="$(mktemp "$ARTIFACT_DIR/vad-prefetch.log.XXXXXX")"
-  local prefetch_cmd
-  prefetch_cmd=(
+  local verification_log
+  verification_log="$(mktemp "$ARTIFACT_DIR/vad-verification.log.XXXXXX")"
+  local verification_cmd
+  verification_cmd=(
     env
     SPEAKFLOW_MUTE_SOUNDS=1
     SPEAKFLOW_ISOLATE_TEST_AUDIO=1
     SPEAKFLOW_OBSERVABILITY_PROFILE="$OBS_PROFILE"
     SPEAKFLOW_OBSERVABILITY_DIR="$OBS_DIR"
-    SPEAKFLOW_PREFETCH_VAD_MODEL=1
+    SPEAKFLOW_VERIFY_VAD_MODEL=1
     swift
     test
     --filter
-    VADModelPrefetchTests
+    VADModelVerificationTests
   )
   if [[ "$SKIP_BUILD" == "1" ]]; then
-    prefetch_cmd+=(--skip-build)
+    verification_cmd+=(--skip-build)
   fi
   if [[ -n "$SCRATCH_PATH" ]]; then
-    prefetch_cmd+=(--scratch-path "$SCRATCH_PATH")
+    verification_cmd+=(--scratch-path "$SCRATCH_PATH")
   fi
 
-  echo "VAD model........ prefetch Silero dependency"
-  if ! run_redacted "${prefetch_cmd[@]}" >"$prefetch_log"; then
-    cat "$prefetch_log" >>"$LOG_FILE"
-    echo "FAILED: could not provision the Silero model required by VADIntegrationTests"
+  echo "VAD model........ verify installed Silero dependency (offline)"
+  if ! run_redacted "${verification_cmd[@]}" >"$verification_log"; then
+    cat "$verification_log" >>"$LOG_FILE"
+    echo "FAILED: the approved Silero installation is missing or invalid; install it explicitly in Models before running this gate"
     echo "See log: $LOG_FILE"
-    cat "$prefetch_log"
+    cat "$verification_log"
     return 1
   fi
 
-  cat "$prefetch_log" >>"$LOG_FILE"
-  if grep -Eq 'Suite "VAD model prefetch" skipped\.' "$prefetch_log"; then
+  cat "$verification_log" >>"$LOG_FILE"
+  if grep -Eq 'Suite "VAD model verification" skipped\.' "$verification_log"; then
     VAD_INTEGRATION_EXPECTED=0
     echo "VAD model........ skipped (VAD is unavailable on this platform)"
     return 0
   fi
-  if ! grep -Eq 'Test .* started\.' "$prefetch_log"; then
-    echo "FAILED: VADModelPrefetchTests did not execute"
+  if ! grep -Eq 'Test .* started\.' "$verification_log"; then
+    echo "FAILED: VADModelVerificationTests did not execute"
     echo "See log: $LOG_FILE"
     return 1
   fi
@@ -216,7 +222,7 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   run_redacted "${build_cmd[@]}" >>"$LOG_FILE"
 fi
 
-run_vad_model_prefetch
+run_vad_model_verification
 
 run_suite() {
   local suite="$1"
@@ -283,7 +289,7 @@ run_suite() {
 
   if [[ "$suite" == "VADIntegrationTests" ]]; then
     if ! grep -Eq 'Test test.* started\.' "$suite_log"; then
-      echo "FAILED: VADIntegrationTests did not execute after Silero prefetch"
+      echo "FAILED: VADIntegrationTests did not execute after local Silero verification"
       echo "See log: $LOG_FILE"
       return 1
     fi
@@ -298,7 +304,7 @@ run_suite() {
       fi
       echo "VAD model cache... model-dependent tests skipped (VAD is unavailable on this platform)"
     elif ! grep -Eq 'Test testWarmUpIsIdempotent\(\) started\.' "$suite_log"; then
-      echo "FAILED: VADModelCacheTests model-dependent tests did not execute after Silero prefetch"
+      echo "FAILED: VADModelCacheTests model-dependent tests did not execute after local Silero verification"
       echo "See log: $LOG_FILE"
       return 1
     fi

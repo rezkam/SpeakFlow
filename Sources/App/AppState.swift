@@ -19,6 +19,9 @@ final class AppState: BannerPresenting {
     @ObservationIgnored
     private var providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared
 
+    @ObservationIgnored
+    private let vadAvailability: @MainActor () -> Bool
+
     // MARK: - Permissions
     var accessibilityGranted = false
     var microphoneGranted = false
@@ -42,6 +45,11 @@ final class AppState: BannerPresenting {
         accessibilityGranted
             && microphoneGranted
             && !providerRegistry.configuredProviders.isEmpty
+            && !needsVADInstallation
+    }
+
+    var needsVADInstallation: Bool {
+        vadEnabled && providerRegistry.provider(for: activeProviderId)?.mode == .batch && !vadAvailability()
     }
 
     /// Whether a specific provider is configured and ready to use.
@@ -223,7 +231,9 @@ final class AppState: BannerPresenting {
         observabilityCaptureTextPayloads = Settings.shared.observabilityCaptureTextPayloads
     }
 
-    init(providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared) {
+    init(providerRegistry: any ProviderRegistryProviding = ProviderRegistry.shared,
+         vadAvailability: @escaping @MainActor () -> Bool = { (try? LocalVADAssets.verifiedDirectory()) != nil }) {
+        self.vadAvailability = vadAvailability
         self.providerRegistry = providerRegistry
         refresh()
     }

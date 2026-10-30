@@ -21,7 +21,7 @@ enum NativeUIProbeSupport {
             "--test-bundle-path", arguments[bundleOption + 1],
             "--testing-library", "swift-testing", "--no-parallel", "--filter", suite
         ]
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try TestProcessEnvironment.inherited()
         environment.merge(environmentOverrides) { _, override in override }
         environment[childKey] = suite
         environment["SPEAKFLOW_RUN_UI_PROBES"] = "1"

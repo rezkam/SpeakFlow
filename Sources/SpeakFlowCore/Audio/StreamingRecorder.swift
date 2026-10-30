@@ -353,8 +353,11 @@ public final class StreamingRecorder {
     /// Start recording audio.
     /// Returns `true` if the audio capture started successfully, `false` on failure.
     /// On failure, all state is rolled back (engine, buffer, flags cleaned up).
+    public private(set) var startupError: String?
+
     @discardableResult
     public func start() async -> Bool {
+        startupError = nil
         hasEmittedChunk = false
         sessionStartDate = Date()
         isDiscardingAudio = false
@@ -546,16 +549,25 @@ public final class StreamingRecorder {
 
     #if DEBUG
     var beforeVADInitializationForTesting: (() throws -> Void)?
+    var forceVADInitializationForTesting = false
     #endif
 
     nonisolated static func allowsModelInitialization(isolatedAudio: Bool, environment: [String: String]) -> Bool {
         !isolatedAudio || environment["SPEAKFLOW_RUN_VAD_MODEL_TESTS"] == "1"
     }
 
+    public static var requiresVADAssetsForCurrentProcess: Bool {
+        allowsModelInitialization(isolatedAudio: shouldIsolateTestAudioCapture(), environment: ProcessInfo.processInfo.environment)
+    }
+
     private func initializeVAD() async {
-        guard Self.allowsModelInitialization(
+        var shouldInitialize = Self.allowsModelInitialization(
             isolatedAudio: Self.shouldIsolateTestAudioCapture(), environment: ProcessInfo.processInfo.environment
-        ) else {
+        )
+        #if DEBUG
+        shouldInitialize = shouldInitialize || forceVADInitializationForTesting
+        #endif
+        guard shouldInitialize else {
             state.setVADActive(false)
             return
         }
@@ -619,7 +631,9 @@ public final class StreamingRecorder {
             // swiftlint:disable:next line_length
             Logger.audio.warning("VAD CONFIG: vadThreshold=\(settings.vadThreshold, privacy: .public) minSilence=\(Config.vadMinSilenceAfterSpeech, privacy: .public) volumeGate=\(settings.vadVolumeGateEnabled, privacy: .public) minVol=\(settings.vadMinVolumeForSpeech, privacy: .public) smoothing=\(settings.vadVolumeSmoothingFactor, privacy: .public) stateReset=\(settings.vadStateResetInterval, privacy: .public)s autoEnd=\(settings.autoEndEnabled, privacy: .public) silenceDur=\(settings.autoEndSilenceDuration, privacy: .public) minSession=\(settings.autoEndMinSessionDuration, privacy: .public) maxChunk=\(settings.maxChunkDuration, privacy: .public) chunkDur=\(settings.chunkDuration.rawValue, privacy: .public) skipSilent=\(settings.skipSilentChunks, privacy: .public)")
         } catch {
-            Logger.audio.warning("VAD initialization failed: \(error.localizedDescription). Using fallback mode.")
+            Logger.audio.error("VAD initialization failed. Recording stopped; review the required model in Models.")
+            state.setRecording(false)
+            startupError = (error as? LocalModelError)?.localizedDescription ?? LocalModelError.invalidAssets.localizedDescription
             vadProcessor = nil
             sessionController = nil
             state.setVADActive(false)

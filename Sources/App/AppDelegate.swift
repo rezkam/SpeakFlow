@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let uiTestHotkeyCycle: [HotkeyType] = [.controlOptionD, .controlOptionSpace, .commandShiftD]
 
     override init() {
+        ModelNetworkPolicy.initialize()
         terminationReasonProvider = AppDelegate.currentTerminationReason
         terminationRequester = { NSApp.terminate(nil) }
         super.init()
@@ -35,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminationReasonProvider: @escaping @MainActor () -> OSType?,
         terminationRequester: @escaping @MainActor () -> Void = { NSApp.terminate(nil) }
     ) {
+        ModelNetworkPolicy.initialize()
         self.terminationReasonProvider = terminationReasonProvider
         self.terminationRequester = terminationRequester
         super.init()

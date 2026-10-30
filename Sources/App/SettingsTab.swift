@@ -8,6 +8,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case general
     case transcription
     case providers = "accounts"
+    case models
     case statistics
     case about
     case updates
@@ -19,6 +20,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: "General"
         case .transcription: "Transcription"
         case .providers: "Providers"
+        case .models: "Models"
         case .statistics: "Statistics"
         case .about: "About"
         case .updates: "Updates"
@@ -30,6 +32,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: "gearshape"
         case .transcription: "waveform"
         case .providers: "cloud"
+        case .models: "internaldrive"
         case .statistics: "chart.bar"
         case .about: "info.circle"
         case .updates: "arrow.down.circle"
@@ -41,6 +44,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: "Permissions, hotkey, and system behavior"
         case .transcription: "Choose a model and tune how it transcribes"
         case .providers: "Connect accounts and pick the active model"
+        case .models: "Download and manage local speech models"
         case .statistics: "Your dictation usage at a glance"
         case .about: "SpeakFlow version and credits"
         case .updates: "New versions, release notes, and installation"

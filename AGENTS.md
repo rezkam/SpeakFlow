@@ -265,6 +265,19 @@ These suite filters define the main-feature safety net and must not be removed w
 - Create the release version and tag from that same user-tested commit. If application
   changes are needed afterward, build a new RC and obtain a new user confirmation.
 
+## Local model consent and readiness
+
+- Startup, warm-up, recording, retry and regression gates never download model assets.
+- Initialize the library offline guard once before any loader starts. Never disable it for installation.
+- Only an explicit confirmation of the exact immutable manifest authorizes the independent installer.
+- Verify app-owned receipts, file sizes and hashes before local loading. External caches are not adopted.
+- Missing or corrupt required VAD blocks affected recording with actionable guidance. No silent fallback.
+- Core regression verifies a previously approved installation and fails if it is missing on supported hardware.
+- The bundled ASR catalog contains only reviewed immutable exports with complete download totals.
+- Local ASR configuration explicitly requests CPU plus Neural Engine; conflicting library overrides fail visibly.
+- Covered by `LocalSpeechCatalogTests`, `LocalSpeechAccelerationTests`, `LocalVADConsentTests`, `LocalVADReadinessTests`, `ExplicitModelInstallerTests`,
+  `LocalModelManifestTests`, `VADModelVerificationTests`, `VADModelCacheTests` and `ModelsScreenTests`.
+
 ## RC and Release
 
 Use `scripts/build-release.sh` from the repository root. During active development,
