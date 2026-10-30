@@ -6,7 +6,7 @@ import Testing
 @Suite("Native batch insertion", .serialized)
 struct BatchInsertionNativeTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_UI_PROBES"] == "1")) @MainActor
-    func nativeSelectionReplacement() async throws {
+    func nativeBulkCommit() async throws {
         let suite = "BatchInsertionNativeTests"
         guard NativeUIProbeSupport.isChild(for: suite) else {
             try NativeUIProbeSupport.runChild(suite: suite)
@@ -30,16 +30,18 @@ struct BatchInsertionNativeTests {
         inserter._testSetTargetProcessLiveness { _ in true }
         inserter._testSetFlagsProvider { [] }
         inserter.editorSnapshotForTesting = { .init(text: editor.string, selection: editor.selectedRange()) }
-        inserter.replaceSelectedTextForTesting = { _, text in editor.setAccessibilitySelectedText(text); return .success }
         var events = 0
         var failures = 0
-        inserter._testSetEventPoster { _ in events += 1 }
-        inserter.onDirectInsertionFailure = { failures += 1 }
-        inserter.insertTextDirectly("hello 🌍\nnext")
+        inserter._testSetEventPoster { event in
+            events += 1
+            if event.type == .keyDown, let native = NSEvent(cgEvent: event) { editor.keyDown(with: native) }
+        }
+        inserter.onBulkInsertionFailure = { failures += 1 }
+        inserter.insertTextInBulk("hello 🌍\nnext")
         await inserter.waitForPendingInsertions()
         #expect(editor.string == "prefix hello 🌍\nnext suffix")
         #expect(editor.selectedRange() == NSRange(location: 20, length: 0))
-        #expect(events == 0)
+        #expect(events == 2)
         #expect(failures == 0)
     }
 }

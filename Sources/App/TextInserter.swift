@@ -3,7 +3,7 @@ import ApplicationServices
 import OSLog
 import SpeakFlowCore
 
-/// Queues and delivers text to the captured UI element via Accessibility or CGEvent typing.
+/// Queues and delivers text to the captured UI element via Unicode text bursts or paced CGEvent typing.
 ///
 /// This component handles all text insertion operations by:
 /// - Capturing the currently focused accessibility element before recording starts
@@ -153,9 +153,8 @@ final class TextInserter: TextInserting {
     }
 
     var editorSnapshotForTesting: (() -> EditorSnapshot?)?
-    private var directDeliveryFailed = false
-    var onDirectInsertionFailure: (() -> Void)?
-    var replaceSelectedTextForTesting: ((AXUIElement, String) -> AXError)?
+    private var bulkDeliveryFailed = false
+    var onBulkInsertionFailure: (() -> Void)?
     var onDeliveryFailure: (() -> Void)?
     private var streamingActive = false
     private var streamingDeliveryFailed = false
@@ -411,12 +410,12 @@ final class TextInserter: TextInserting {
         }
     }
 
-    /// Queues one Accessibility selection replacement without clipboard access or typing.
-    func insertTextDirectly(_ text: String) {
+    /// Queues completed batch text in Unicode bursts without clipboard access or typing delays.
+    func insertTextInBulk(_ text: String) {
         let text = sanitizeTextForInsertion(text)
-        guard !text.isEmpty, !directDeliveryFailed else { return }
+        guard !text.isEmpty, !bulkDeliveryFailed else { return }
         guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
-            refuseDirectDelivery()
+            refuseBulkDelivery()
             return
         }
         queuedInsertionCount += 1
@@ -426,54 +425,53 @@ final class TextInserter: TextInserting {
             defer { self?.decrementQueuedInsertionCount(for: generation) }
             await previousTask?.value
             guard let self, self.isCurrent(generation), !Task.isCancelled,
-                  !self.directDeliveryFailed else { return }
-            await self.insertDirectly(text, generation: generation)
+                  !self.bulkDeliveryFailed else { return }
+            await self.insertBatchText(text, generation: generation)
         }
     }
 
-    private func refuseDirectDelivery() {
-        guard !directDeliveryFailed else { return }
-        directDeliveryFailed = true
-        observabilityEvent("direct_insertion_failed", level: .warning)
-        onDirectInsertionFailure?()
+    private func refuseBulkDelivery() {
+        guard !bulkDeliveryFailed else { return }
+        bulkDeliveryFailed = true
+        observabilityEvent("bulk_insertion_failed", level: .warning)
+        onBulkInsertionFailure?()
     }
 
-    private func insertDirectly(_ text: String, generation: UInt64) async {
-        while isCurrent(generation), !Task.isCancelled {
-            guard await ensureTargetFocused(generation: generation),
-                  await waitForModifiersReleased() else {
-                if isCurrent(generation), !Task.isCancelled { refuseDirectDelivery() }
-                return
-            }
-            guard isCurrent(generation), !Task.isCancelled else { return }
-            guard isTargetAppFrontmost(), !Self.hasActiveModifiers(flagsProvider()) else { continue }
-            guard let targetElement, let before = editorSnapshot() else {
-                refuseDirectDelivery()
-                return
-            }
-            let expectedText = (before.text as NSString).replacingCharacters(in: before.selection, with: text)
-            let expectedSelection = NSRange(location: before.selection.location + text.utf16.count, length: 0)
-            // Querying the editor can take time. Recheck focus and modifiers at the write boundary.
-            guard isTargetAppFrontmost(), !Self.hasActiveModifiers(flagsProvider()) else { continue }
-            let result = replaceSelectedTextForTesting?(targetElement, text)
-                ?? AXUIElementSetAttributeValue(targetElement, kAXSelectedTextAttribute as CFString, text as CFString)
-            guard isCurrent(generation), !Task.isCancelled else { return }
-            guard result == .success else {
-                refuseDirectDelivery()
-                return
-            }
-            // A successful AX call can be ignored by a custom editor. Never retry the write,
-            // type a fallback, or submit until the resulting content and caret are verified.
-            for _ in 0..<20 {
-                guard isCurrent(generation), !Task.isCancelled else { return }
-                if editorSnapshot() == EditorSnapshot(text: expectedText, selection: expectedSelection) {
-                    observabilityEvent("direct_insertion_completed")
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(25))
-            }
-            if isCurrent(generation), !Task.isCancelled { refuseDirectDelivery() }
+    private func insertBatchText(_ text: String, generation: UInt64) async {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+            refuseBulkDelivery()
             return
+        }
+        let chunks = BatchTextPayload.chunks(text)
+        for (index, chunk) in chunks.enumerated() {
+            guard isCurrent(generation), !Task.isCancelled else { return }
+            guard await ensureTargetFocused(generation: generation) else {
+                if isCurrent(generation), !Task.isCancelled { refuseBulkDelivery() }
+                return
+            }
+            // Space supplies a neutral backing key; the Unicode payload carries the text.
+            // Never turn embedded line breaks into synthetic Return or Tab keys.
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 49, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 49, keyDown: false) else {
+                refuseBulkDelivery()
+                return
+            }
+            var units = Array(chunk.utf16)
+            down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            down.flags = []
+            up.flags = []
+            guard await postGuardedKeyPair(down, up, generation: generation) else {
+                if isCurrent(generation), !Task.isCancelled { refuseBulkDelivery() }
+                return
+            }
+            if index + 1 < chunks.count {
+                // Let input queues drain and cancellation/focus changes run between bursts.
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+        if isCurrent(generation), !Task.isCancelled {
+            observabilityEvent("bulk_insertion_posted")
         }
     }
 
@@ -607,7 +605,7 @@ final class TextInserter: TextInserting {
             await previousTask?.value
 
             guard let self, self.isCurrent(generation), !Task.isCancelled else { return }
-            guard !self.directDeliveryFailed else { return }
+            guard !self.bulkDeliveryFailed else { return }
             if self.streamingActive &&
                 (self.streamingDeliveryFailed || self.streamingDesiredText != self.streamingPostedText) {
                 self.refuseStreamingDelivery()
@@ -670,7 +668,7 @@ final class TextInserter: TextInserting {
     /// Call this when the user manually stops recording or when an error occurs.
     /// This immediately stops all queued operations and clears the target element.
     func cancelAndReset() {
-        directDeliveryFailed = false
+        bulkDeliveryFailed = false
         pendingStreamingSnapshot = nil
         streamingReconciliationQueued = false
         streamingCommittedText = ""
@@ -695,7 +693,7 @@ final class TextInserter: TextInserting {
     /// finished and were typed successfully). Unlike `cancelAndReset()`, this
     /// doesn't interrupt any tasks — it just resets state for the next session.
     func reset() {
-        directDeliveryFailed = false
+        bulkDeliveryFailed = false
         pendingStreamingSnapshot = nil
         streamingReconciliationQueued = false
         streamingCommittedText = ""

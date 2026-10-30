@@ -35,7 +35,7 @@ final class RecordingController {
     private struct RecordingSession {
         let generation: UInt64
         var fullTranscript = ""
-        var directInsertionFailed = false
+        var bulkInsertionFailed = false
         /// A captured Enter asked for a synthetic Enter after finalization.
         var submitRequested = false
         /// Enter capture is one-shot per recording.
@@ -123,11 +123,11 @@ final class RecordingController {
         self.settings = settings
         self.transcription = transcription
         self.playSoundEffect = playSoundEffect
-        self.textInserter.onDirectInsertionFailure = { [weak self] in
+        self.textInserter.onBulkInsertionFailure = { [weak self] in
             guard let self else { return }
-            self.session.directInsertionFailed = true
+            self.session.bulkInsertionFailed = true
             self.appState.showBanner(
-                "Could not insert the batch result into this editor. Automatic submit is disabled. Review the text, then enable Type batch results in Transcription settings and try again.",
+                "Batch text delivery stopped before all text could be sent. Automatic submit is disabled. Return to the original field, then start a new dictation.",
                 style: .error, duration: 15
             )
         }
@@ -229,11 +229,11 @@ final class RecordingController {
                 if self.settings.batchTypeText {
                     self.textInserter.insertText(text + " ")
                 } else {
-                    self.textInserter.insertTextDirectly(text + " ")
+                    self.textInserter.insertTextInBulk(text + " ")
                 }
             }
             // Successful transcription — dismiss any previous error banner
-            if !self.session.directInsertionFailed {
+            if !self.session.bulkInsertionFailed {
                 self.resetRecordingErrorPresentation()
                 self.appState.dismissBanner()
             }

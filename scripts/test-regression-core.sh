@@ -59,7 +59,7 @@ REGRESSION_SUITES=(
   "TextInserterOwnershipTests"
   "BatchInsertionSettingsTests"
   "BatchInsertionRoutingTests"
-  "TextInserterDirectTests"
+  "TextInserterBulkTests"
   "TextInserterFocusTests"
   "TextInserterTargetCaptureTests"
   "ApplicationAccessibilityPreparationTests"

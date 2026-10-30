@@ -7,7 +7,7 @@ import Testing
 @Suite("Batch insertion settings")
 struct BatchInsertionSettingsTests {
     @Test @MainActor
-    func directInsertionIsDefaultAndTypingChoicePersists() throws {
+    func bulkInsertionIsDefaultAndTypingChoicePersists() throws {
         let defaults = try #require(UserDefaults(suiteName: "synthetic.batch-insertion.\(UUID().uuidString)"))
         let settings = Settings(defaults: defaults)
         #expect(!settings.batchTypeText)
@@ -41,27 +41,27 @@ struct BatchInsertionRoutingTests {
         streaming.handleEvent(.finalResult(TranscriptionResult(transcript: "help", isFinal: true, speechFinal: true)))
         #expect(inserter.replaceTailCallCount == 2)
         #expect(!inserter.insertedTexts.isEmpty)
-        #expect(inserter.directlyInsertedTexts.isEmpty)
+        #expect(inserter.bulkInsertedTexts.isEmpty)
     }
 
     @Test @MainActor
-    func directInsertionFailureBannerSurvivesLaterBatchResults() throws {
+    func bulkInsertionFailureBannerSurvivesLaterBatchResults() throws {
         let (controller, _, inserter, banner) = makeTestRecordingController()
         controller.isRecording = true
-        let reportFailure = try #require(inserter.onDirectInsertionFailure)
+        let reportFailure = try #require(inserter.onBulkInsertionFailure)
         reportFailure()
         let dismissals = banner.dismissCount
         controller.transcription.queueBridge.onTextReady?("next")
         #expect(banner.dismissCount == dismissals)
-        #expect(banner.bannerMessages.last?.0.contains("Type batch results") == true)
+        #expect(banner.bannerMessages.last?.0.contains("Automatic submit is disabled") == true)
     }
 
     @Test @MainActor
-    func batchDefaultsToDirectInsertion() {
+    func batchDefaultsToBulkInsertion() {
         let (controller, _, inserter, _) = makeTestRecordingController()
         controller.isRecording = true
         controller.transcription.queueBridge.onTextReady?("hello")
-        #expect(inserter.directlyInsertedTexts == ["hello "])
+        #expect(inserter.bulkInsertedTexts == ["hello "])
         #expect(inserter.insertedTexts.isEmpty)
     }
 
@@ -73,12 +73,12 @@ struct BatchInsertionRoutingTests {
         controller.isRecording = true
         controller.transcription.queueBridge.onTextReady?("hello")
         #expect(inserter.insertedTexts == ["hello "])
-        #expect(inserter.directlyInsertedTexts.isEmpty)
+        #expect(inserter.bulkInsertedTexts.isEmpty)
     }
 }
 
-@Suite("Direct text insertion", .serialized)
-struct TextInserterDirectTests {
+@Suite("Bulk text insertion", .serialized)
+struct TextInserterBulkTests {
     @MainActor
     private func makeInserter() -> TextInserter {
         let inserter = TextInserter._testMakeIsolatedInstance()
@@ -90,68 +90,49 @@ struct TextInserterDirectTests {
         return inserter
     }
 
+    private func payload(_ event: CGEvent) -> String {
+        var length = 0
+        var units = [UniChar](repeating: 0, count: BatchTextPayload.maxUTF16Length)
+        event.keyboardGetUnicodeString(maxStringLength: units.count, actualStringLength: &length, unicodeString: &units)
+        return String(utf16CodeUnits: units, count: length)
+    }
+
+    @Test(arguments: ["", "hello 🌍\nnext", String(repeating: "👩🏽‍💻e\u{301} ", count: 12), "e" + String(repeating: "\u{301}", count: 40)])
+    func payloadBoundsPreserveUnicode(text: String) {
+        let chunks = BatchTextPayload.chunks(text)
+        #expect(chunks.joined() == text)
+        #expect(chunks.allSatisfy { !$0.isEmpty && $0.utf16.count <= 20 })
+    }
+
     @Test @MainActor
-    func replacesOnlySelectionInOneWriteWithoutKeyEvents() async {
+    func unreadableEditorReceivesWholePayloadsWithoutAccessibilityTextWrites() async {
         let inserter = makeInserter()
-        var field = TextInserter.EditorSnapshot(text: "prefix old suffix", selection: NSRange(location: 7, length: 3))
-        inserter.editorSnapshotForTesting = { field }
-        var writes: [String] = []
-        var events = 0
-        inserter._testSetEventPoster { _ in events += 1 }
-        inserter.replaceSelectedTextForTesting = { element, text in
-            #expect(CFEqual(element, inserter.targetElement))
-            writes.append(text)
-            field.text = (field.text as NSString).replacingCharacters(in: field.selection, with: text)
-            field.selection = NSRange(location: field.selection.location + text.utf16.count, length: 0)
-            return .success
+        var snapshots = 0
+        inserter.editorSnapshotForTesting = { snapshots += 1; return nil }
+        var downs: [String] = []
+        var ups: [String] = []
+        var failures = 0
+        inserter.onBulkInsertionFailure = { failures += 1 }
+        inserter._testSetEventPoster { event in
+            #expect(event.flags.isEmpty)
+            #expect(event.getIntegerValueField(.keyboardEventKeycode) == 49)
+            if event.type == .keyDown { downs.append(payload(event)) }
+            if event.type == .keyUp { ups.append(payload(event)) }
         }
-        inserter.insertTextDirectly("hello 🌍\nnext")
+        let text = "hello 🌍\nnext " + String(repeating: "sample ", count: 12)
+        inserter.insertTextInBulk(text)
         await inserter.waitForPendingInsertions()
-        #expect(writes == ["hello 🌍\nnext"])
-        #expect(field.text == "prefix hello 🌍\nnext suffix")
-        #expect(events == 0)
+        #expect(downs == BatchTextPayload.chunks(text))
+        #expect(ups == downs)
+        #expect(downs.joined() == text)
+        #expect(downs.count < text.count)
+        #expect(snapshots == 0)
+        #expect(failures == 0)
     }
 
     @Test @MainActor
-    func unsupportedEditorDoesNotTypeOrSubmitAndReportsFailureOnce() async {
+    func focusAndModifiersGateBulkWriteAndEnterFollowsAllChunks() async throws {
         let inserter = makeInserter()
-        inserter.editorSnapshotForTesting = { .init(text: "prefix ", selection: NSRange(location: 7, length: 0)) }
-        var writes = 0
-        var events = 0
-        var failures = 0
-        inserter.replaceSelectedTextForTesting = { _, _ in writes += 1; return .attributeUnsupported }
-        inserter._testSetEventPoster { _ in events += 1 }
-        inserter.onDirectInsertionFailure = { failures += 1 }
-        inserter.insertTextDirectly("hello")
-        inserter.insertTextDirectly("next")
-        inserter.pressEnterKey()
-        await inserter.waitForPendingInsertions()
-        #expect(writes == 1)
-        #expect(events == 0)
-        #expect(failures == 1)
-    }
-    @Test @MainActor
-    func ignoredWriteBlocksSubmitWithoutRetryingOrTyping() async {
-        let inserter = makeInserter()
-        inserter.editorSnapshotForTesting = { .init(text: "", selection: NSRange(location: 0, length: 0)) }
-        var writes = 0
-        var events = 0
-        var failures = 0
-        inserter.replaceSelectedTextForTesting = { _, _ in writes += 1; return .success }
-        inserter._testSetEventPoster { _ in events += 1 }
-        inserter.onDirectInsertionFailure = { failures += 1 }
-        inserter.insertTextDirectly("hello")
-        inserter.pressEnterKey()
-        await inserter.waitForPendingInsertions()
-        #expect(writes == 1)
-        #expect(events == 0)
-        #expect(failures == 1)
-    }
-
-    @Test @MainActor
-    func focusAndModifiersGateDirectWriteAndEnterFollowsAllChunks() async throws {
-        let inserter = makeInserter()
-        var field = TextInserter.EditorSnapshot(text: "", selection: NSRange(location: 0, length: 0))
         var fieldMatches = false
         var focusChecked = false
         var held = true
@@ -163,17 +144,13 @@ struct TextInserterDirectTests {
             return .init(focusedPid: 42_424, field: fieldMatches ? .same : .different)
         }
         inserter._testSetFlagsProvider { heldChecked = true; return held ? .maskShift : [] }
-        inserter.editorSnapshotForTesting = { field }
-        inserter.replaceSelectedTextForTesting = { _, text in
+        inserter._testSetEventPoster { event in
+            guard event.type == .keyDown else { return }
             #expect(!held && fieldMatches)
-            trace.append(text)
-            field.text += text
-            field.selection.location = field.text.utf16.count
-            return .success
+            trace.append(event.getIntegerValueField(.keyboardEventKeycode) == 36 ? "Enter" : payload(event))
         }
-        inserter._testSetEventPoster { if $0.type == .keyDown { trace.append("Enter") } }
-        inserter.insertTextDirectly("first ")
-        inserter.insertTextDirectly("second ")
+        inserter.insertTextInBulk("first ")
+        inserter.insertTextInBulk("second ")
         inserter.pressEnterKey()
         try await waitUntil { focusChecked }
         #expect(trace.isEmpty)
@@ -183,21 +160,20 @@ struct TextInserterDirectTests {
         held = false
         await inserter.waitForPendingInsertions()
         #expect(trace == ["first ", "second ", "Enter"])
-        #expect(field.text == "first second ")
     }
 
     @Test(arguments: [false, true]) @MainActor
-    func retiringSessionStopsEveryQueuedDirectWrite(reset: Bool) async throws {
+    func retiringSessionStopsEveryQueuedBulkWrite(reset: Bool) async throws {
         let inserter = makeInserter()
         var heldChecked = false
         inserter._testSetFlagsProvider { heldChecked = true; return .maskCommand }
-        var writes = 0
         var events = 0
-        inserter.replaceSelectedTextForTesting = { _, _ in writes += 1; return .success }
+        var failures = 0
         inserter._testSetEventPoster { _ in events += 1 }
-        inserter.insertTextDirectly("old one")
+        inserter.onBulkInsertionFailure = { failures += 1 }
+        inserter.insertTextInBulk("old one")
         let firstTask = inserter.pendingTask
-        inserter.insertTextDirectly("old two")
+        inserter.insertTextInBulk("old two")
         inserter.pressEnterKey()
         let tailTask = inserter.pendingTask
         try await waitUntil { heldChecked }
@@ -205,49 +181,62 @@ struct TextInserterDirectTests {
         inserter._testSetFlagsProvider { [] }
         await firstTask?.value
         await tailTask?.value
-        #expect(writes == 0)
         #expect(events == 0)
-    }
-
-    @Test @MainActor
-    func missingTargetOrUnreadableEditorNeverWritesOrSubmits() async {
-        for hasTarget in [false, true] {
-            let inserter = makeInserter()
-            if !hasTarget { inserter.targetElement = nil; inserter.targetPid = 0 }
-            inserter.editorSnapshotForTesting = { nil }
-            var writes = 0
-            var events = 0
-            var failures = 0
-            inserter.replaceSelectedTextForTesting = { _, _ in writes += 1; return .success }
-            inserter._testSetEventPoster { _ in events += 1 }
-            inserter.onDirectInsertionFailure = { failures += 1 }
-            inserter.insertTextDirectly("hello")
-            inserter.pressEnterKey()
-            await inserter.waitForPendingInsertions()
-            #expect(writes == 0)
-            #expect(events == 0)
-            #expect(failures == 1)
-        }
-    }
-
-    @Test @MainActor
-    func retiredAcknowledgementCannotFailTheNextRecording() async throws {
-        let inserter = makeInserter()
-        var snapshots = 0
-        var failures = 0
-        inserter.editorSnapshotForTesting = {
-            snapshots += 1
-            return .init(text: "", selection: NSRange(location: 0, length: 0))
-        }
-        inserter.replaceSelectedTextForTesting = { _, _ in .success }
-        inserter.onDirectInsertionFailure = { failures += 1 }
-        inserter.insertTextDirectly("old")
-        let pending = inserter.pendingTask
-        // One initial snapshot plus twenty readbacks. Retire during the final wait.
-        try await waitUntil(interval: .milliseconds(1)) { snapshots == 21 }
-        inserter.cancelAndReset()
-        await pending?.value
         #expect(failures == 0)
     }
 
+    @Test @MainActor
+    func missingTargetNeverWritesOrSubmits() async {
+        let inserter = makeInserter()
+        inserter.targetElement = nil
+        inserter.targetPid = 0
+        var events = 0
+        var failures = 0
+        inserter._testSetEventPoster { _ in events += 1 }
+        inserter.onBulkInsertionFailure = { failures += 1 }
+        inserter.insertTextInBulk("hello")
+        inserter.pressEnterKey()
+        await inserter.waitForPendingInsertions()
+        #expect(events == 0)
+        #expect(failures == 1)
+    }
+
+    @Test @MainActor
+    func focusLossBetweenBurstsStopsTextAndWithholdsSubmit() async {
+        let inserter = makeInserter()
+        inserter._testSetFocusWaitTimeout(0.01)
+        var downs: [String] = []
+        var keyUps = 0
+        var failures = 0
+        inserter.onBulkInsertionFailure = { failures += 1 }
+        inserter._testSetEventPoster { event in
+            if event.type == .keyDown {
+                downs.append(payload(event))
+                inserter.testIsTargetFrontmost = false
+            } else if event.type == .keyUp { keyUps += 1 }
+        }
+        let text = String(repeating: "sample ", count: 20)
+        inserter.insertTextInBulk(text)
+        inserter.pressEnterKey()
+        await inserter.waitForPendingInsertions()
+        #expect(downs == [BatchTextPayload.chunks(text)[0]])
+        #expect(keyUps == 1)
+        #expect(failures == 1)
+    }
+
+    @Test @MainActor
+    func cancellingAfterKeyDownStillReleasesItAndRetiresRemainingBursts() async {
+        let inserter = makeInserter()
+        var downs = 0
+        var ups = 0
+        inserter._testSetEventPoster { event in
+            if event.type == .keyDown { downs += 1; inserter.cancelAndReset() }
+            if event.type == .keyUp { ups += 1 }
+        }
+        inserter.insertTextInBulk(String(repeating: "sample ", count: 20))
+        let pending = inserter.pendingTask
+        await pending?.value
+        #expect(downs == 1)
+        #expect(ups == 1)
+    }
 }

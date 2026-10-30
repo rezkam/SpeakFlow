@@ -59,12 +59,12 @@ These are protected product contracts mapped to regression suites.
   `TextInserterFieldIdentityTests`, `RecordingControllerTargetCaptureTests`.
 
 5a. Batch insertion contract
-- Batch results default to a direct Accessibility selection replacement without clipboard access or text key events.
+- Batch results default to bounded Unicode text bursts without clipboard access or per-character playback delays.
 - Users can enable Type batch results to use existing simulated typing instead.
 - Streaming interim text and corrections keep their existing typing path regardless of this setting.
-- Direct insertion retains captured-field focus, modifier, queue ordering, and recording cancellation checks.
-- Unsupported or unverified direct writes show an error, stop further direct delivery, and withhold submit Enter.
-- Covered by: `BatchInsertionSettingsTests`, `BatchInsertionRoutingTests`, `TextInserterDirectTests`, `BatchInsertionNativeTests`.
+- Bulk insertion retains captured-field focus, modifier, queue ordering, and recording cancellation checks.
+- Missing targets or interrupted event posting show an error, stop further bulk delivery, and withhold submit Enter.
+- Covered by: `BatchInsertionSettingsTests`, `BatchInsertionRoutingTests`, `TextInserterBulkTests`, `BatchInsertionNativeTests`.
 
 6. Modifier-safe typing contract
 - Never synthesize text while `Command`, `Control`, `Option`, or `Shift` is active.
