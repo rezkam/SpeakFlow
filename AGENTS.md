@@ -276,6 +276,8 @@ These suite filters define the main-feature safety net and must not be removed w
 - Transfer and integrity verification use bounded app-managed buffers. Cancellation retains only inert partial files.
 - The bundled ASR catalog contains only reviewed immutable exports with complete download totals.
 - Local ASR configuration explicitly requests CPU plus Neural Engine; conflicting library overrides fail visibly.
+- Local engines serialize inference. Recording leases outlive native session closure and protect finalization; cancelled or timed-out native work cannot reselect a model or release an engine still in use.
+- Covered by `LocalSpeechRuntimeTests` and `LocalSpeechProviderTests`. Real installed-engine probes are opt-in and never provision assets.
 - Covered by `LocalSpeechCatalogTests`, `LocalSpeechAccelerationTests`, `LocalVADConsentTests`, `LocalVADReadinessTests`, `ExplicitModelInstallerTests`,
   `ModelArtifactFileTests`, `ModelArtifactTransportTests`, `LocalModelManifestTests`, `VADModelVerificationTests`, `VADModelCacheTests` and `ModelsScreenTests`.
 

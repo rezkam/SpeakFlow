@@ -81,6 +81,8 @@ REGRESSION_SUITES=(
   "LocalModelManifestTests"
   "LocalSpeechCatalogTests"
   "LocalSpeechAccelerationTests"
+  "LocalSpeechRuntimeTests"
+  "LocalSpeechProviderTests"
   "VADTests"
   "LiveStreamingKeepAliveTests"
   "WebSocketSessionContractTests"

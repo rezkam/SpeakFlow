@@ -85,6 +85,23 @@ existing-file preservation and cancellation of a stalled transfer. Cancelled ins
 inert partials without publishing a receipt or usable destination. Installation exposes separate
 download, verification and preparation phases.
 
+`LocalSpeechRuntimeTests` covers idle residency, exact selection, last-lease release, expired
+work, non-cooperative load cancellation and timeout, cleanup exclusion and serialized inference.
+`LocalSpeechProviderTests` covers the recording WAV format, malformed audio rejection,
+cumulative streaming corrections, one trailing final, cancellation during native work and
+ordered final delivery through the existing live controller. Native session closure retains
+its owning recording lease until insertion and submit finish. Selecting another provider
+invalidates pending local selection without cancelling the recording already in progress.
+
+`LocalSpeechEngineIntegrationTests` is an explicit installed-assets probe. Set
+`SPEAKFLOW_RUN_LOCAL_SPEECH_PROBES=1`, `SPEAKFLOW_LOCAL_MODEL_CACHE_ROOT` to a previously
+approved isolated model store, and `SPEAKFLOW_PUBLIC_SPEECH_FIXTURE` to an approved generic
+mono 16 kHz speech fixture. Run `swift test --no-parallel --filter LocalSpeechEngineIntegrationTests`.
+The probe exercises both Parakeet sizes and native Nemotron through production runtime/provider
+adapters, without microphone capture or transcript persistence. It never downloads missing
+assets. Default tests skip it. Network-denied execution and the actual application are
+separate required release evidence; mock suites do not establish those results.
+
 `make test-regression-core` never provisions models. Install the reviewed VAD manifest
 explicitly first, then point `SPEAKFLOW_VAD_MODEL_CACHE_ROOT` at that isolated app-owned
 store. The gate verifies the installed assets and runs the existing real-model suites.
