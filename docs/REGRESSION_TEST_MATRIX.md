@@ -5,6 +5,7 @@ Run `make test-regression-core` and the serialized full suite with muted, isolat
 
 | Contract | Coverage |
 | --- | --- |
+| Batch results default to direct selection replacement; typing is optional; streaming routing stays unchanged; failures withhold submit | `BatchInsertionSettingsTests`, `BatchInsertionRoutingTests`, `TextInserterDirectTests` |
 | Corrections use successfully posted text, including queue rejection and partial typing/deletion | `StreamingTextDeliveryTests` |
 | Original-field evidence is required for text, deletion, and Enter | `TextInserterFieldIdentityTests` |
 | Prewarm accessibility off the main actor on app activation; request Electron's manual accessibility API; capture only at the hotkey and reject missing targets/app switches | `ApplicationAccessibilityPreparationTests`, `TextInserterTargetCaptureTests` |
@@ -53,3 +54,12 @@ capture, live provider interoperability, and audible sound quality require separ
 verification. Streaming insertion retains the 0.8.4 posted-key behavior: absent or stale accessibility text does not block live typing. The stricter per-character text/caret acknowledgement policy was removed because it caused first-character truncation in supported editors. Focus identity, modifier checks, recording generation, queued final delivery, and Enter ordering remain enforced. `TextInserterOwnershipTests` covers stale or absent accessibility values, clearing completed text, Unicode corrections, focus changes, cancellation, and withheld Enter after incomplete posting. Posted keys do not prove application consumption. Same-field manual caret moves or edits during an interim correction are not protected by content ownership checks.
 
 `TextInserterNativeEditorTests` opens a synthetic AppKit editor and checks actual native corrections and continued typing after clearing through a local event adapter. It does not test WindowServer delivery or cross-process accessibility. Final-event timeout submission protection is covered by `StreamingEventDrainTests`.
+
+`BatchInsertionNativeTests` verifies replacement of selected text in an AppKit editor
+through its native Accessibility setter. Run it with
+`SPEAKFLOW_RUN_UI_PROBES=1 swift test --no-parallel --filter BatchInsertionNativeTests`.
+Direct insertion never accesses the clipboard or emits text key events. Editors that reject
+selection replacement, or whose resulting text/caret cannot be verified, require the user
+to enable **Type batch results** in the active batch model's Transcription options. There is
+no automatic typing fallback. Streaming behavior is unchanged. The native probe uses a local
+adapter, so cross-process Accessibility delivery still needs a separate manual check.

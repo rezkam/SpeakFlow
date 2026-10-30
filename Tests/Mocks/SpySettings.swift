@@ -4,6 +4,7 @@ import Testing
 
 @MainActor
 final class SpySettings: SettingsProviding {
+    var batchTypeText = false
     var chunkDuration: ChunkDuration = .minute1
     var skipSilentChunks: Bool = true
     var vadEnabled: Bool = true

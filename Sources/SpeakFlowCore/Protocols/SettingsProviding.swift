@@ -5,6 +5,8 @@ import Foundation
 /// Batch recording settings (chunk size, silence skipping, and stop-finalization timeout).
 @MainActor
 public protocol BatchSettingsProviding: AnyObject {
+    /// False inserts each batch result directly; true uses simulated typing.
+    var batchTypeText: Bool { get set }
     var chunkDuration: ChunkDuration { get set }
     var skipSilentChunks: Bool { get set }
     var maxChunkDuration: Double { get }

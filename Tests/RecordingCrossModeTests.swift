@@ -99,7 +99,8 @@ struct RecordingCrossModeTests {
         try await waitUntil { responseFinished }
         try await waitUntilAsync { await f.transcription.queueBridge.isIdle() }
 
-        #expect(f.inserter.insertedTexts.isEmpty, "Expired batch delivery must not type after its submit has been queued")
+        #expect(f.inserter.insertedTexts.isEmpty)
+        #expect(f.inserter.directlyInsertedTexts.isEmpty, "Expired batch delivery must not type after its submit has been queued")
         #expect(f.controller.fullTranscript.isEmpty, "Expired results must not enter session accounting")
         enterGate.continuation.finish()
         await enterTask.value
@@ -146,10 +147,10 @@ struct RecordingCrossModeTests {
         retired("retired text", 50, true, "retired text")
         await f.batch.release()
         try await waitUntil { !f.controller.isProcessingFinal }
-        #expect(f.inserter.insertedTexts.joined().trimmingCharacters(in: .whitespaces) == "batch result")
+        #expect(f.inserter.directlyInsertedTexts.joined().trimmingCharacters(in: .whitespaces) == "batch result")
         #expect(f.inserter.deletedCounts.isEmpty)
         #expect(f.inserter.operations.filter { $0 == .pressEnterKey }.count == 1)
-        let text = try #require(f.inserter.operations.firstIndex { if case .insertText = $0 { return true }; return false })
+        let text = try #require(f.inserter.operations.firstIndex { if case .insertTextDirectly = $0 { return true }; return false })
         let enter = try #require(f.inserter.operations.firstIndex(of: .pressEnterKey))
         #expect(text < enter)
     }

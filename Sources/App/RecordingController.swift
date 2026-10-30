@@ -35,6 +35,7 @@ final class RecordingController {
     private struct RecordingSession {
         let generation: UInt64
         var fullTranscript = ""
+        var directInsertionFailed = false
         /// A captured Enter asked for a synthetic Enter after finalization.
         var submitRequested = false
         /// Enter capture is one-shot per recording.
@@ -122,6 +123,14 @@ final class RecordingController {
         self.settings = settings
         self.transcription = transcription
         self.playSoundEffect = playSoundEffect
+        self.textInserter.onDirectInsertionFailure = { [weak self] in
+            guard let self else { return }
+            self.session.directInsertionFailed = true
+            self.appState.showBanner(
+                "Could not insert the batch result into this editor. Automatic submit is disabled. Review the text, then enable Type batch results in Transcription settings and try again.",
+                style: .error, duration: 15
+            )
+        }
         self.textInserter.onDeliveryFailure = { [weak self] in
             self?.appState.showBanner(
                 "Text delivery stopped because the editor position or content could not be verified. Automatic submit is disabled. Review the text, then start a new dictation.",
@@ -217,11 +226,17 @@ final class RecordingController {
                 metadata: self.metadataForTextPayload(text)
             )
             if self.isRecording || self.isProcessingFinal {
-                self.textInserter.insertText(text + " ")
+                if self.settings.batchTypeText {
+                    self.textInserter.insertText(text + " ")
+                } else {
+                    self.textInserter.insertTextDirectly(text + " ")
+                }
             }
             // Successful transcription — dismiss any previous error banner
-            self.resetRecordingErrorPresentation()
-            self.appState.dismissBanner()
+            if !self.session.directInsertionFailed {
+                self.resetRecordingErrorPresentation()
+                self.appState.dismissBanner()
+            }
             // Update the VAD session controller for thinking-pause detection
             Task { [weak self] in
                 await self?.recorder?.updateTranscript(self?.fullTranscript ?? "")

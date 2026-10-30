@@ -3,7 +3,7 @@ import ApplicationServices
 import OSLog
 import SpeakFlowCore
 
-/// Queues and delivers text to the captured UI element via CGEvent keystroke synthesis.
+/// Queues and delivers text to the captured UI element via Accessibility or CGEvent typing.
 ///
 /// This component handles all text insertion operations by:
 /// - Capturing the currently focused accessibility element before recording starts
@@ -153,6 +153,9 @@ final class TextInserter: TextInserting {
     }
 
     var editorSnapshotForTesting: (() -> EditorSnapshot?)?
+    private var directDeliveryFailed = false
+    var onDirectInsertionFailure: (() -> Void)?
+    var replaceSelectedTextForTesting: ((AXUIElement, String) -> AXError)?
     var onDeliveryFailure: (() -> Void)?
     private var streamingActive = false
     private var streamingDeliveryFailed = false
@@ -408,6 +411,72 @@ final class TextInserter: TextInserting {
         }
     }
 
+    /// Queues one Accessibility selection replacement without clipboard access or typing.
+    func insertTextDirectly(_ text: String) {
+        let text = sanitizeTextForInsertion(text)
+        guard !text.isEmpty, !directDeliveryFailed else { return }
+        guard queuedInsertionCount < Config.maxQueuedTextInsertions else {
+            refuseDirectDelivery()
+            return
+        }
+        queuedInsertionCount += 1
+        let generation = queueGeneration
+        let previousTask = textInsertionTask
+        textInsertionTask = Task { @MainActor [weak self] in
+            defer { self?.decrementQueuedInsertionCount(for: generation) }
+            await previousTask?.value
+            guard let self, self.isCurrent(generation), !Task.isCancelled,
+                  !self.directDeliveryFailed else { return }
+            await self.insertDirectly(text, generation: generation)
+        }
+    }
+
+    private func refuseDirectDelivery() {
+        guard !directDeliveryFailed else { return }
+        directDeliveryFailed = true
+        observabilityEvent("direct_insertion_failed", level: .warning)
+        onDirectInsertionFailure?()
+    }
+
+    private func insertDirectly(_ text: String, generation: UInt64) async {
+        while isCurrent(generation), !Task.isCancelled {
+            guard await ensureTargetFocused(generation: generation),
+                  await waitForModifiersReleased() else {
+                if isCurrent(generation), !Task.isCancelled { refuseDirectDelivery() }
+                return
+            }
+            guard isCurrent(generation), !Task.isCancelled else { return }
+            guard isTargetAppFrontmost(), !Self.hasActiveModifiers(flagsProvider()) else { continue }
+            guard let targetElement, let before = editorSnapshot() else {
+                refuseDirectDelivery()
+                return
+            }
+            let expectedText = (before.text as NSString).replacingCharacters(in: before.selection, with: text)
+            let expectedSelection = NSRange(location: before.selection.location + text.utf16.count, length: 0)
+            // Querying the editor can take time. Recheck focus and modifiers at the write boundary.
+            guard isTargetAppFrontmost(), !Self.hasActiveModifiers(flagsProvider()) else { continue }
+            let result = replaceSelectedTextForTesting?(targetElement, text)
+                ?? AXUIElementSetAttributeValue(targetElement, kAXSelectedTextAttribute as CFString, text as CFString)
+            guard isCurrent(generation), !Task.isCancelled else { return }
+            guard result == .success else {
+                refuseDirectDelivery()
+                return
+            }
+            // A successful AX call can be ignored by a custom editor. Never retry the write,
+            // type a fallback, or submit until the resulting content and caret are verified.
+            for _ in 0..<20 {
+                guard isCurrent(generation), !Task.isCancelled else { return }
+                if editorSnapshot() == EditorSnapshot(text: expectedText, selection: expectedSelection) {
+                    observabilityEvent("direct_insertion_completed")
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+            if isCurrent(generation), !Task.isCancelled { refuseDirectDelivery() }
+            return
+        }
+    }
+
     /// Queues text for insertion into the focused element.
     ///
     /// The text is sanitized to allow only letters, numbers, punctuation, symbols,
@@ -538,6 +607,7 @@ final class TextInserter: TextInserting {
             await previousTask?.value
 
             guard let self, self.isCurrent(generation), !Task.isCancelled else { return }
+            guard !self.directDeliveryFailed else { return }
             if self.streamingActive &&
                 (self.streamingDeliveryFailed || self.streamingDesiredText != self.streamingPostedText) {
                 self.refuseStreamingDelivery()
@@ -600,6 +670,7 @@ final class TextInserter: TextInserting {
     /// Call this when the user manually stops recording or when an error occurs.
     /// This immediately stops all queued operations and clears the target element.
     func cancelAndReset() {
+        directDeliveryFailed = false
         pendingStreamingSnapshot = nil
         streamingReconciliationQueued = false
         streamingCommittedText = ""
@@ -624,6 +695,7 @@ final class TextInserter: TextInserting {
     /// finished and were typed successfully). Unlike `cancelAndReset()`, this
     /// doesn't interrupt any tasks — it just resets state for the next session.
     func reset() {
+        directDeliveryFailed = false
         pendingStreamingSnapshot = nil
         streamingReconciliationQueued = false
         streamingCommittedText = ""
