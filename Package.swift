@@ -66,7 +66,8 @@ let package = Package(
                 "DeepgramTest",
                 .product(name: "ConcurrencyExtras", package: "swift-concurrency-extras"),
             ],
-            path: "Tests"
+            path: "Tests",
+            exclude: ["Fixtures/SileroVAD"]
         ),
     ]
 )

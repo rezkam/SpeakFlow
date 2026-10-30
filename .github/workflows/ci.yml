@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -22,9 +23,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     name: ${{ matrix.os }} (Xcode ${{ matrix.xcode }})
+    env:
+      # Reviewed test-only files are in the checkout, never provisioned by a gate.
+      SPEAKFLOW_VAD_MODEL_CACHE_ROOT: ${{ github.workspace }}/Tests/Fixtures/SileroVAD
 
     steps:
       - uses: actions/checkout@v4.2.2
+
+      - name: Select macOS SDK
+        run: echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
 
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v4

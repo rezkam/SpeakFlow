@@ -273,6 +273,7 @@ These suite filters define the main-feature safety net and must not be removed w
 - Verify app-owned receipts, file sizes and hashes before local loading. External caches are not adopted.
 - Missing or corrupt required VAD blocks affected recording with actionable guidance. No silent fallback.
 - Core regression verifies a previously approved installation and fails if it is missing on supported hardware.
+- CI uses the approved Silero fixture in `Tests/Fixtures/SileroVAD`, excluded from SwiftPM targets and app packaging. Gates verify this checked-in fixture offline and never provision model files.
 - Transfer and integrity verification use bounded app-managed buffers. Cancellation retains only inert partial files.
 - The bundled ASR catalog contains only reviewed immutable exports with complete download totals.
 - The release offers Parakeet 0.6B v2 batch and Nemotron 1120 ms streaming. Parakeet 110M is retired; a saved retired selection stays unavailable until the user explicitly loads a replacement.

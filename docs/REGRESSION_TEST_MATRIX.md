@@ -144,6 +144,9 @@ separate required release evidence; mock suites do not establish those results.
 explicitly first, then point `SPEAKFLOW_VAD_MODEL_CACHE_ROOT` at that isolated app-owned
 store. The gate verifies the installed assets and runs the existing real-model suites.
 Missing assets on supported hardware fail the gate rather than silently skipping coverage.
+CI points this same offline gate at the approved, checked-in Silero fixture in
+`Tests/Fixtures/SileroVAD`. Its export and receipt are verified without installation
+or network transfer. SwiftPM excludes the directory from all build products.
 
 `ModelsScreenTests` opens the production Models view with synthetic isolated state,
 drives controller state through confirmation, cancellation and failed transfer, and checks retry
