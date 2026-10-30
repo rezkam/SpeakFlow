@@ -303,8 +303,8 @@ and approval of the release version and notes. Do not publish before that approv
   `SPEAKFLOW_UPDATE_PRIVATE_KEY_FILE`. Reuse the established signing identity and updater keys;
   never print or commit their values or the private key.
 - Set `SPEAKFLOW_SWIFT_SCRATCH_PATH` and `SPEAKFLOW_OBSERVABILITY_DIR` under `.agents/`,
-  plus `SPEAKFLOW_ISOLATED_STORAGE=1`. The script still uses explicit `/tmp` paths and writes
-  `SpeakFlow.app` and `SpeakFlow.dmg` in the repository root; `TMPDIR` does not redirect all output.
+  plus `SPEAKFLOW_ISOLATED_STORAGE=1`. The script keeps stage logs and temporary resources under `.agents/`, redacts diagnostics
+  before persistence, and writes `SpeakFlow.app` and `SpeakFlow.dmg` in the worktree root.
 
 ### RC
 

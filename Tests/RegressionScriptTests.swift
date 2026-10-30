@@ -50,7 +50,7 @@ struct RegressionScriptTests {
     }
     #endif
 
-    @Test(arguments: ["scripts/test-release-resources.sh", "scripts/test-release-privacy.sh", "scripts/test-portable-release.sh", "scripts/test-documentation-policy.sh", "scripts/test-local-rc-staging.sh"])
+    @Test(arguments: ["scripts/test-release-resources.sh", "scripts/test-release-privacy.sh", "scripts/test-portable-release.sh", "scripts/test-documentation-policy.sh", "scripts/test-local-rc-staging.sh", "scripts/test-private-stage-log.sh"])
     func releaseArtifactsAreSelfContainedAndPrivate(script: String) throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let pipe = Pipe()

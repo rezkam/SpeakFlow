@@ -111,6 +111,7 @@ private enum ModelsVisualProbe {
 
     static func show() {
         guard ProcessInfo.processInfo.environment["SPEAKFLOW_ISOLATED_STORAGE"] == "1" else { return }
+        if CommandLine.arguments.contains("--editor") { showEditor(); return }
         let removalFixture = CommandLine.arguments.contains("--delete-fixture")
         let relativeRoot = removalFixture ? ".agents/test-fixtures/model-delete-verification-20261030"
             : ".agents/test-fixtures/models-visual-\(UUID().uuidString)"
@@ -142,6 +143,29 @@ private enum ModelsVisualProbe {
         window.contentView = view
         Self.window = window
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private static func showEditor() {
+        let window = NSWindow(contentRect: NSRect(x: 180, y: 180, width: 680, height: 260),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Local dictation test editor"
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 680, height: 260))
+        scroll.hasVerticalScroller = true
+        let editor = NSTextView(frame: scroll.bounds)
+        editor.isRichText = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.font = .systemFont(ofSize: 20)
+        editor.textContainerInset = NSSize(width: 20, height: 20)
+        editor.string = "Fixture prefix. "
+        editor.setAccessibilityIdentifier("local-dictation-test-editor")
+        scroll.documentView = editor
+        window.contentView = scroll
+        Self.window = window
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(editor)
+        editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
     }
 }
 

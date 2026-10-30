@@ -107,16 +107,20 @@ install_and_verify() {
     fi
 
     step "Launch smoke test"
-    SMOKE_LOG="$(mktemp /tmp/speakflow-launch-smoke-XXXXXX.log)"
-    "/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME" >"$SMOKE_LOG" 2>&1 &
+    SMOKE_LOG="${RELEASE_RUN_DIR}/launch-smoke.log"
+    open_private_log "$SMOKE_LOG"
+    "/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME" >&"$SPEAKFLOW_PRIVATE_LOG_FD" 2>&1 &
     SMOKE_PID=$!
+    close_private_log_writer
     sleep 2
 
     if kill -0 "$SMOKE_PID" 2>/dev/null; then
         ok "Installed app process starts successfully"
         kill -TERM "$SMOKE_PID" 2>/dev/null || true
         wait "$SMOKE_PID" 2>/dev/null || true
+        finish_private_log 0 || fail "Launch diagnostics could not be finalized"
     else
+        finish_private_log 0 || true
         warn "Launch smoke-test log:"
         tail -n 60 "$SMOKE_LOG" | sed 's/^/  /'
         fail "Installed app exited during launch smoke test"
@@ -151,11 +155,11 @@ notarize_file() {
     local artifact_path="$1"
     local label="$2"
 
-    NOTARIZE_LOG="$(mktemp)"
+    NOTARIZE_LOG="$(mktemp "$RELEASE_RUN_DIR/notarize.XXXXXX")"
     set +e
     xcrun notarytool submit "$artifact_path" \
         --keychain-profile "$NOTARY_PROFILE" \
-        --wait 2>&1 | tee "$NOTARIZE_LOG" | sed 's/^/  /'
+        --wait 2>&1 | redact_diagnostics | tee "$NOTARIZE_LOG" | sed 's/^/  /'
     NOTARIZE_STATUS=${PIPESTATUS[0]}
     set -e
 
@@ -188,6 +192,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 APP_NAME="SpeakFlow"
 cd "$PROJECT_DIR"
+source "$SCRIPT_DIR/lib/private-stage-log.sh"
+mkdir -p "$PROJECT_DIR/.agents"
+RELEASE_RUN_DIR="$(mktemp -d "$PROJECT_DIR/.agents/release-run.XXXXXX")"
 
 # ── Required env vars ─────────────────────────────────────────────────────────
 # Die immediately with a clear message if any are missing.
@@ -358,12 +365,12 @@ fi
 # STAGE 2 — Tests
 # =============================================================================
 step "Running test suite"
-TEST_LOG="$(mktemp /tmp/speakflow-release-tests-XXXXXX.log)"
+TEST_LOG="${RELEASE_RUN_DIR}/tests.log"
 TEST_TIMEOUT_SECONDS="${SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS:-900}"
-SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-/tmp/speakflow-rc-build}"
+SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-$PROJECT_DIR/.agents/rc-build}"
 OBS_PROFILE="${SPEAKFLOW_OBSERVABILITY_PROFILE:-rc-tests-$(date +%Y%m%d%H%M%S)-$$}"
-OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-/tmp/speakflow-observability-tests/$OBS_PROFILE}"
-mkdir -p "$OBS_DIR"
+OBS_DIR="${SPEAKFLOW_OBSERVABILITY_DIR:-$RELEASE_RUN_DIR/observability/$OBS_PROFILE}"
+if [[ "$OBS_DIR" != /dev/null/* ]]; then mkdir -p "$OBS_DIR"; fi
 
 info "Test log: $TEST_LOG"
 info "Timeout: ${TEST_TIMEOUT_SECONDS}s (override with SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS)"
@@ -387,8 +394,10 @@ test_cmd=(
 if [[ -n "$SCRATCH_PATH" ]]; then
     test_cmd+=(--scratch-path "$SCRATCH_PATH")
 fi
-"${test_cmd[@]}" >"$TEST_LOG" 2>&1 &
+open_private_log "$TEST_LOG"
+"${test_cmd[@]}" >&"$SPEAKFLOW_PRIVATE_LOG_FD" 2>&1 &
 TEST_PID=$!
+close_private_log_writer
 TEST_START_TS=$(date +%s)
 LAST_HEARTBEAT_TS="$TEST_START_TS"
 TEST_TIMED_OUT=0
@@ -421,6 +430,8 @@ done
 
 wait "$TEST_PID"
 TEST_STATUS=$?
+finish_private_log "$TEST_STATUS"
+TEST_STATUS=$?
 set -e
 
 tail -n 5 "$TEST_LOG" 2>/dev/null | sed 's/^/  /'
@@ -447,14 +458,16 @@ build_cmd=(bash scripts/build-portable-release.sh)
 if [[ -n "$SCRATCH_PATH" ]]; then
     build_cmd+=(--scratch-path "$SCRATCH_PATH")
 fi
-BUILD_LOG="$(mktemp /tmp/speakflow-release-build-XXXXXX.log)"
+BUILD_LOG="${RELEASE_RUN_DIR}/build.log"
 BUILD_TIMEOUT_SECONDS="${SPEAKFLOW_RC_BUILD_TIMEOUT_SECONDS:-1800}"
 info "Build log: $BUILD_LOG"
 info "Build timeout: ${BUILD_TIMEOUT_SECONDS}s (override with SPEAKFLOW_RC_BUILD_TIMEOUT_SECONDS)"
 
 set +e
-"${build_cmd[@]}" >"$BUILD_LOG" 2>&1 &
+open_private_log "$BUILD_LOG"
+"${build_cmd[@]}" >&"$SPEAKFLOW_PRIVATE_LOG_FD" 2>&1 &
 BUILD_PID=$!
+close_private_log_writer
 BUILD_START_TS=$(date +%s)
 LAST_BUILD_HEARTBEAT_TS="$BUILD_START_TS"
 BUILD_TIMED_OUT=0
@@ -485,6 +498,8 @@ while kill -0 "$BUILD_PID" 2>/dev/null; do
 done
 
 wait "$BUILD_PID"
+BUILD_STATUS=$?
+finish_private_log "$BUILD_STATUS"
 BUILD_STATUS=$?
 set -e
 
@@ -526,7 +541,7 @@ swift scripts/release-resources.swift package "$BUILD_ROOT/release" "$APP_NAME.a
 bash scripts/embed-sparkle.sh "$BUILD_ROOT/release" "$APP_NAME.app"
 
 # App icon
-ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
+ICONSET_DIR="$(mktemp -d "$RELEASE_RUN_DIR/icon.XXXXXX")/AppIcon.iconset"
 mkdir -p "$ICONSET_DIR"
 SRC_ICON="Sources/Resources/AppIcon.png"
 for size in 16 32 128 256 512; do
@@ -630,7 +645,7 @@ if [[ "$MODE" == "release" ]]; then
     step "Notarizing app bundle"
     info "Submitting app bundle to Apple notary service before DMG packaging..."
 
-    APP_ZIP="$(mktemp /tmp/speakflow-app-XXXXXX).zip"
+    APP_ZIP="$(mktemp "$RELEASE_RUN_DIR/app.XXXXXX").zip"
     ditto -c -k --keepParent "$APP_NAME.app" "$APP_ZIP" \
         || fail "Failed to create app notarization zip"
 
@@ -761,7 +776,7 @@ else
     fi
 
     info "Creating release v${DISPLAY_VERSION}..."
-    NOTES_FILE="$(mktemp)"
+    NOTES_FILE="$(mktemp "$RELEASE_RUN_DIR/notes.XXXXXX")"
     printf '%s' "$NOTES" > "$NOTES_FILE"
     UPDATE_OUTPUT="$BUILD_ROOT/update-feed"
     mkdir -p "$UPDATE_OUTPUT"
@@ -783,7 +798,7 @@ else
 
     step "Verifying GitHub release asset"
     # Download the published DMG and verify its hash matches what we uploaded
-    VERIFY_DIR="$(mktemp -d)"
+    VERIFY_DIR="$(mktemp -d "$RELEASE_RUN_DIR/verify.XXXXXX")"
     gh release download "v${DISPLAY_VERSION}" \
         --pattern "*.dmg" \
         --dir "$VERIFY_DIR" 2>&1 | sed 's/^/  /'
