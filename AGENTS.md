@@ -2,6 +2,12 @@
 
 This file defines non-negotiable product behavior for any coding agent working in this repository.
 
+## Commit Signing
+
+Every commit must be cryptographically signed and verified by GitHub. Keep `commit.gpgsign`
+enabled and use `git commit -S`. Re-sign commits created by rebases, cherry-picks, or amendments.
+Never bypass the repository's required-signature rule.
+
 ## Prime Directive
 
 Do not silently remove, weaken, or bypass core product behavior.
