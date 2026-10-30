@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if ((BASH_VERSINFO[0] < 5)); then exec bash "$0" "$@"; fi
+if ((BASH_VERSINFO[0] < 5)); then
+    if ! bash -c '((BASH_VERSINFO[0] >= 5))'; then
+        echo 'FAIL: Bash 5 or newer is required; put it on PATH before running this test' >&2
+        exit 1
+    fi
+    exec bash "$0" "$@"
+fi
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT_DIR/.agents/tests"
 FIXTURE="$(mktemp -d "$ROOT_DIR/.agents/tests/private-stage-log.XXXXXX")"

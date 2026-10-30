@@ -33,6 +33,11 @@ jobs:
       - name: Select macOS SDK
         run: echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
 
+      - name: Install Bash 5
+        run: |
+          brew install bash
+          echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v4
         with:

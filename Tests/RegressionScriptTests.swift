@@ -5,6 +5,30 @@ private final class RegressionScriptBundleMarker: NSObject {}
 
 @Suite("Regression script contracts", .serialized)
 struct RegressionScriptTests {
+    @Test func unsupportedNativeBashFailsPromptlyInsteadOfReexecutingForever() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["scripts/test-private-stage-log.sh"]
+        process.currentDirectoryURL = root
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        process.environment = environment
+        process.standardOutput = pipe
+        process.standardError = pipe
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        try process.run()
+        let completed = exited.wait(timeout: .now() + 5) == .success
+        if !completed { process.terminate() }
+        process.waitUntilExit()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(completed, "An unsupported shell must fail promptly instead of re-executing itself forever")
+        #expect(process.terminationStatus != 0)
+        #expect(output.contains("Bash 5 or newer"))
+    }
+
     #if DEBUG
     @Test(arguments: [
         "scripts/test-e2e-runtime-policy.sh", "scripts/test-e2e-fixture-lifecycle.sh",
