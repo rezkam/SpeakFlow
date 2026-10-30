@@ -471,6 +471,7 @@ struct RecordingControllerSessionIdentityTests {
         first.onTextUpdate?("late", 0, true, "late")
         first.onTextUpdate?("", 5, false, "")
 
+        #expect(!inserter.operations.contains(.insertTextDirectly("late ")))
         #expect(!inserter.operations.contains(.insertText("late ")),
                 "A retired recording's trailing final must not be typed into the new recording")
         #expect(!inserter.operations.contains(.deleteChars(5)),
@@ -507,6 +508,7 @@ struct RecordingControllerSessionIdentityTests {
         first.onTextUpdate?("late", 0, true, "late")
 
         #expect(!inserter.operations.contains(.deleteChars(4)))
+        #expect(!inserter.operations.contains(.insertTextDirectly("late ")))
         #expect(!inserter.operations.contains(.insertText("late ")))
     }
 
@@ -624,10 +626,10 @@ struct RecordingControllerSessionIdentityTests {
         #expect(!inserter.operations.contains(.pressEnterKey))
         gate.continuation.finish()
         try await waitUntil(timeout: .seconds(2)) { inserter.operations.contains(.pressEnterKey) }
-        #expect(inserter.operations.contains(.insertText("tail ")))
+        #expect(inserter.operations.contains(.insertTextDirectly("tail ")))
         #expect(inserter.operations.contains(.pressEnterKey))
         #expect(!controller.isProcessingFinal)
-        if let text = inserter.operations.firstIndex(of: .insertText("tail ")),
+        if let text = inserter.operations.firstIndex(of: .insertTextDirectly("tail ")),
            let enter = inserter.operations.firstIndex(of: .pressEnterKey) {
             #expect(text < enter)
         }
@@ -745,7 +747,7 @@ struct RecordingControllerSessionIdentityTests {
         await transcription.queueBridge.submitResult(ticket: ticket, text: "tail")
         try await waitUntil(timeout: .seconds(5)) { inserter.operations.contains(.pressEnterKey) }
 
-        let textIndex = try #require(inserter.operations.firstIndex(of: .insertText("tail ")))
+        let textIndex = try #require(inserter.operations.firstIndex(of: .insertTextDirectly("tail ")))
         let enterIndex = try #require(inserter.operations.firstIndex(of: .pressEnterKey))
         #expect(textIndex < enterIndex, "The final chunk's text must be typed before Enter")
     }

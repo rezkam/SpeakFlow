@@ -256,6 +256,7 @@ public final class Settings {
     public static let shared = Settings()
 
     private enum Keys {
+        public static let batchTypeText = "settings.batch.typeText"
         public static let chunkDuration = "settings.chunkDuration"
         public static let skipSilentChunks = "settings.skipSilentChunks"
         public static let vadEnabled = "settings.vadEnabled"
@@ -320,6 +321,12 @@ public final class Settings {
     private func storedDouble(_ key: String) -> Double? {
         guard defaults.object(forKey: key) != nil else { return nil }
         return defaults.double(forKey: key)
+    }
+
+    /// Batch results appear at once by default, without using the clipboard.
+    public var batchTypeText: Bool {
+        get { defaults.bool(forKey: Keys.batchTypeText) }
+        set { defaults.set(newValue, forKey: Keys.batchTypeText) }
     }
 
     /// Maximum chunk duration before forced send

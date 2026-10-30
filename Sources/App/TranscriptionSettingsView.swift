@@ -91,6 +91,9 @@ struct TranscriptionSettingsView: View {
                 ? "Streaming options for \(provider.displayName) \(modelLabel(modelId)). Switch models to see different options."
                 : "Batch options for \(provider.displayName) \(modelLabel(modelId)). Switch models to see different options."
         ) {
+            if provider.mode == .batch {
+                BatchInsertionSetting(typeText: state.binding(for: \.batchTypeText))
+            }
             switch modelId {
             case "nova-3":
                 deepgramBasic

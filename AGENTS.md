@@ -58,6 +58,14 @@ These are protected product contracts mapped to regression suites.
 - Covered by: `TextInserterFocusTests`, `TextInserterCancellationTests`,
   `TextInserterFieldIdentityTests`, `RecordingControllerTargetCaptureTests`.
 
+5a. Batch insertion contract
+- Batch results default to a direct Accessibility selection replacement without clipboard access or text key events.
+- Users can enable Type batch results to use existing simulated typing instead.
+- Streaming interim text and corrections keep their existing typing path regardless of this setting.
+- Direct insertion retains captured-field focus, modifier, queue ordering, and recording cancellation checks.
+- Unsupported or unverified direct writes show an error, stop further direct delivery, and withhold submit Enter.
+- Covered by: `BatchInsertionSettingsTests`, `BatchInsertionRoutingTests`, `TextInserterDirectTests`, `BatchInsertionNativeTests`.
+
 6. Modifier-safe typing contract
 - Never synthesize text while `Command`, `Control`, `Option`, or `Shift` is active.
 - Prevent accidental shortcut combos from generated typing (for example `Cmd+Q`).

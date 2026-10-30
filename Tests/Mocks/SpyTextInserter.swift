@@ -8,6 +8,7 @@ final class SpyTextInserter: TextInserting {
         case captureTarget
         case replaceTail(replacingChars: Int, text: String)
         case insertText(String)
+        case insertTextDirectly(String)
         case deleteChars(Int)
         case pressEnterKey
         case cancelAndReset
@@ -15,6 +16,8 @@ final class SpyTextInserter: TextInserting {
         case waitForPendingInsertions
     }
 
+    var onDirectInsertionFailure: (() -> Void)?
+    var directlyInsertedTexts: [String] = []
     var targetPid: pid_t = 0
     var captureTargetCalled = false
     var insertedTexts: [String] = []
@@ -41,6 +44,11 @@ final class SpyTextInserter: TextInserting {
         captureTargetCalled = true
         operations.append(.captureTarget)
         return captureSucceeds
+    }
+
+    func insertTextDirectly(_ text: String) {
+        directlyInsertedTexts.append(text)
+        operations.append(.insertTextDirectly(text))
     }
 
     func insertText(_ text: String) {

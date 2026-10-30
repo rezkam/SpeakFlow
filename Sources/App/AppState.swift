@@ -89,6 +89,7 @@ final class AppState: BannerPresenting {
     // MARK: - Settings
     var currentHotkey: HotkeyType = .controlOptionD
     var chunkDuration: ChunkDuration = .seconds30
+    var batchTypeText = false
     var skipSilentChunks = true
     var launchAtLogin = false
 
@@ -169,6 +170,7 @@ final class AppState: BannerPresenting {
         activeProviderId = ProviderSettings.shared.activeProviderId
         currentHotkey = HotkeySettings.shared.currentHotkey
         chunkDuration = Settings.shared.chunkDuration
+        batchTypeText = Settings.shared.batchTypeText
         skipSilentChunks = Settings.shared.skipSilentChunks
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
         vadEnabled = Settings.shared.vadEnabled
