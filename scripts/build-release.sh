@@ -106,6 +106,11 @@ install_and_verify() {
         fail "Version mismatch — expected $MARKETING_VERSION, got $INSTALLED_VERSION"
     fi
 
+    if [[ "$SKIP_TESTS" == 1 ]]; then
+        info "Launch smoke test skipped at the user's request."
+        return 0
+    fi
+
     step "Launch smoke test"
     SMOKE_LOG="${RELEASE_RUN_DIR}/launch-smoke.log"
     open_private_log "$SMOKE_LOG"
