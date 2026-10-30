@@ -5,7 +5,7 @@ Run `make test-regression-core` and the serialized full suite with muted, isolat
 
 | Contract | Coverage |
 | --- | --- |
-| Batch results default to direct selection replacement; typing is optional; streaming routing stays unchanged; failures withhold submit | `BatchInsertionSettingsTests`, `BatchInsertionRoutingTests`, `TextInserterDirectTests` |
+| Batch results default to bounded Unicode bursts; paced typing is optional; streaming routing stays unchanged; interrupted posting withholds submit | `BatchInsertionSettingsTests`, `BatchInsertionRoutingTests`, `TextInserterBulkTests` |
 | Corrections use successfully posted text, including queue rejection and partial typing/deletion | `StreamingTextDeliveryTests` |
 | Original-field evidence is required for text, deletion, and Enter | `TextInserterFieldIdentityTests` |
 | Prewarm accessibility off the main actor on app activation; request Electron's manual accessibility API; capture only at the hotkey and reject missing targets/app switches | `ApplicationAccessibilityPreparationTests`, `TextInserterTargetCaptureTests` |
@@ -55,11 +55,13 @@ verification. Streaming insertion retains the 0.8.4 posted-key behavior: absent 
 
 `TextInserterNativeEditorTests` opens a synthetic AppKit editor and checks actual native corrections and continued typing after clearing through a local event adapter. It does not test WindowServer delivery or cross-process accessibility. Final-event timeout submission protection is covered by `StreamingEventDrainTests`.
 
-`BatchInsertionNativeTests` verifies replacement of selected text in an AppKit editor
-through its native Accessibility setter. Run it with
+`BatchInsertionNativeTests` verifies selection replacement in an AppKit editor using the
+batch Unicode event payload through a local event adapter. Run it with
 `SPEAKFLOW_RUN_UI_PROBES=1 swift test --no-parallel --filter BatchInsertionNativeTests`.
-Direct insertion never accesses the clipboard or emits text key events. Editors that reject
-selection replacement, or whose resulting text/caret cannot be verified, require the user
-to enable **Type batch results** in the active batch model's Transcription options. There is
-no automatic typing fallback. Streaming behavior is unchanged. The native probe uses a local
-adapter, so cross-process Accessibility delivery still needs a separate manual check.
+The batch path never accesses the clipboard or requires readable/writable Accessibility
+text and selection attributes. It posts Unicode text in bounded bursts without the
+per-character delay. Focus and modifier checks still gate each burst, cancellation retires
+queued work, and interrupted posting withholds submit Enter. Embedded newlines are not
+mapped to synthetic Return keys. The typing toggle retains the original paced path.
+Streaming behavior is unchanged. Posted events do not prove target application consumption;
+cross-process compatibility requires manual validation in the target editor or terminal.

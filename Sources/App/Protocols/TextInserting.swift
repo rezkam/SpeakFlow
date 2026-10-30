@@ -7,7 +7,7 @@ import Foundation
 protocol TextInserting: AnyObject {
     /// PID of the app that owned the target element when `captureTarget()` was called.
     var targetPid: pid_t { get }
-    var onDirectInsertionFailure: (() -> Void)? { get set }
+    var onBulkInsertionFailure: (() -> Void)? { get set }
     var onDeliveryFailure: (() -> Void)? { get set }
     func setObservabilitySessionId(_ sessionId: UUID?)
     /// Captures the focused field as the only destination for this recording.
@@ -20,8 +20,8 @@ protocol TextInserting: AnyObject {
     func replaceTail(replacingChars: Int, with text: String)
     /// Reconciles a complete segment against successfully posted recording text.
     func updateStreamingText(_ text: String, isFinal: Bool)
-    /// Inserts at the captured selection without clipboard access or key events.
-    func insertTextDirectly(_ text: String)
+    /// Inserts batch text in Unicode bursts without clipboard access or per-character delays.
+    func insertTextInBulk(_ text: String)
     func insertText(_ text: String)
     func deleteChars(_ count: Int)
     func pressEnterKey()
