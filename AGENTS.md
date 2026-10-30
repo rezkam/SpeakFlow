@@ -214,7 +214,7 @@ These suite filters define the main-feature safety net and must not be removed w
 
 ## Agent Change Policy
 
-1. Any change to core behavior requires tests in the same PR/patch.
+1. Any change to core behavior requires tests in the same commit or patch.
 2. Do not delete/disable regression suites to get green CI.
 3. Do not narrow assertions to hide regressions.
 4. If a new core feature is added, add regression tests and update:
@@ -242,12 +242,29 @@ These suite filters define the main-feature safety net and must not be removed w
 - `Tests/EnterSubmissionContractTests.swift`
 - `docs/REGRESSION_TEST_MATRIX.md`
 
+## Development and Delivery
+
+- Develop in an isolated Git worktree on a development branch. Keep the primary checkout
+  available for the user and preserve unrelated work.
+- This repository does not use pull requests. Do not create a PR or require PR readiness
+  as part of delivery. Generic PR workflows do not apply here.
+- Commit only the requested change and its necessary tests and documentation.
+- Develop and finalize a local RC first. Agents may run automated, native UI, and live
+  checks when authorized, and must honor user instructions to skip testing.
+- The user performs the final RC test and confirms both the exact tested commit and the
+  release version. Agent verification does not replace this final user approval.
+- After the user approves the RC, version, and release notes, push the tested commit
+  directly to remote `main` with a fast-forward. Do not create a merge commit, use a PR
+  merge flow, or rewrite the tested commit.
+- Create the release version and tag from that same user-tested commit. If application
+  changes are needed afterward, build a new RC and obtain a new user confirmation.
+
 ## RC and Release
 
 Use `scripts/build-release.sh` from the repository root. During active development,
 building, signing with the configured identity, replacing, installing, and opening a local RC
-are authorized without asking again. Obtain user approval before pushing any branch,
-choosing a release version, merging, or publishing a release.
+are authorized without asking again. Publication requires the user's final RC confirmation
+and approval of the release version and notes. Do not publish before that approval.
 
 - Put Bash 5 and a Swift toolchain supporting `Testing` and CryptoKit on PATH.
   Invoke `bash scripts/build-release.sh`, not the script's `/bin/bash` shebang or a login shell.
@@ -264,18 +281,20 @@ choosing a release version, merging, or publishing a release.
 1. Commit the changes locally, then run `bash scripts/build-release.sh rc` from that clean
    commit. Pushing is not required. RCs are signed and installed locally, never notarized
    or published, and have updates disabled.
-2. Check the installed `SpeakFlowBuildGitCommit`, then use Computer Use to open the installed
-   RC and verify the changed behavior and visual consistency. Fix issues and repeat before
-   handoff; a process-start check is not a UI test. Report any blocked verification.
-3. Ask the user to try the installed RC. Their confirmation applies to that exact SHA.
+2. Confirm the installed `SpeakFlowBuildGitCommit`. Agents may verify behavior and visual
+   consistency before handoff, subject to the user's testing instructions. Report checks
+   actually performed and any verification left to the user.
+3. Ask the user to try the installed RC and choose the release version. Their confirmation
+   applies to that exact SHA. Keep that commit unchanged for publication.
 
 ### Release
 
-1. Obtain approval for the release version and notes. Add a matching CHANGELOG section
-   if notes must appear in-app; otherwise both the feed and GitHub use "See CHANGELOG.md".
-   Any new commit requires a new RC and verification before release.
-2. Obtain explicit push, merge, and publication approval. Fast-forward main to the tested SHA with
-   `git push origin <sha>:main`; if the source commit changes, test a new RC.
+1. Obtain the user's final confirmation of the tested RC, release version, and release notes.
+   Add a matching CHANGELOG section before the final RC if notes must appear in-app;
+   otherwise the feed uses "See CHANGELOG.md" and GitHub notes can be supplied separately.
+2. Fast-forward remote `main` directly to the tested SHA with `git push origin <sha>:main`.
+   Do not open or merge a PR. If `main` has diverged, reconcile in a development worktree,
+   rebuild the RC, and obtain user confirmation of the new commit before proceeding.
 3. From that clean, pushed SHA, run:
    `SPEAKFLOW_RELEASE_VERSION=X.Y.Z SPEAKFLOW_CONFIRMED_LOCAL_RC_TESTED_SHA=<sha> bash scripts/build-release.sh release --yes`
    `--yes` skips script prompts, not user approval. Release signs, notarizes, staples, publishes
