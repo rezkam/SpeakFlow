@@ -236,8 +236,10 @@ These suite filters define the main-feature safety net and must not be removed w
 
 ## RC and Release
 
-Use `scripts/build-release.sh` from the repository root. Both modes run tests, build,
-sign, and replace `/Applications/SpeakFlow.app`; obtain approval for signing and replacement.
+Use `scripts/build-release.sh` from the repository root. During active development,
+building, signing with the configured identity, replacing, installing, and opening a local RC
+are authorized without asking again. Obtain user approval before pushing any branch,
+choosing a release version, merging, or publishing a release.
 
 - Put Bash 5 and a Swift toolchain supporting `Testing` and CryptoKit on PATH.
   Invoke `bash scripts/build-release.sh`, not the script's `/bin/bash` shebang or a login shell.
@@ -251,16 +253,20 @@ sign, and replace `/Applications/SpeakFlow.app`; obtain approval for signing and
 
 ### RC
 
-From a clean, pushed commit, run `bash scripts/build-release.sh rc`.
-RCs are signed and installed locally, never notarized or published, and have updates disabled.
-Check the installed `SpeakFlowBuildGitCommit`, open the app, and obtain the user's test
-confirmation for that exact SHA. The script's process-start check is not a UI test.
+1. Commit the changes locally, then run `bash scripts/build-release.sh rc` from that clean
+   commit. Pushing is not required. RCs are signed and installed locally, never notarized
+   or published, and have updates disabled.
+2. Check the installed `SpeakFlowBuildGitCommit`, then use Computer Use to open the installed
+   RC and verify the changed behavior and visual consistency. Fix issues and repeat before
+   handoff; a process-start check is not a UI test. Report any blocked verification.
+3. Ask the user to try the installed RC. Their confirmation applies to that exact SHA.
 
 ### Release
 
-1. Agree on the version and release notes before the RC. Add a matching CHANGELOG section
+1. Obtain approval for the release version and notes. Add a matching CHANGELOG section
    if notes must appear in-app; otherwise both the feed and GitHub use "See CHANGELOG.md".
-2. Obtain explicit merge and publication approval. Fast-forward main to the tested SHA with
+   Any new commit requires a new RC and verification before release.
+2. Obtain explicit push, merge, and publication approval. Fast-forward main to the tested SHA with
    `git push origin <sha>:main`; if the source commit changes, test a new RC.
 3. From that clean, pushed SHA, run:
    `SPEAKFLOW_RELEASE_VERSION=X.Y.Z SPEAKFLOW_CONFIRMED_LOCAL_RC_TESTED_SHA=<sha> bash scripts/build-release.sh release --yes`
