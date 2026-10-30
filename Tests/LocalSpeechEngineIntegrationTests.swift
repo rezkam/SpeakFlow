@@ -18,6 +18,18 @@ private actor InstalledSpeechEvents {
 @Suite("Installed local speech engines", .serialized,
        .enabled(if: ProcessInfo.processInfo.environment["SPEAKFLOW_RUN_LOCAL_SPEECH_PROBES"] == "1"))
 struct LocalSpeechEngineIntegrationTests {
+    @Test func approvedParakeetAcceptsAShortSyntheticTail() async throws {
+        let store = try #require(ProcessInfo.processInfo.environment["SPEAKFLOW_LOCAL_MODEL_CACHE_ROOT"])
+        let model = try #require(LocalSpeechCatalog.models().first { $0.id == .parakeetV2 })
+        let runtime = LocalSpeechRuntime(root: URL(fileURLWithPath: store, isDirectory: true))
+        let lease = try await runtime.acquire(model)
+        let wav = WavEncoder.encode(samples: Array(repeating: Float(0), count: 800), sampleRate: 16_000)
+        _ = try await LocalBatchSpeechProvider(lease: lease).transcribe(audio: wav)
+        await lease.release()
+        try await runtime.unload(model.id)
+        #expect(await runtime.snapshot().loaded.isEmpty)
+    }
+
     @Test(arguments: LocalSpeechModelID.allCases)
     func approvedInstalledModelsProduceTextThroughTheProductionRuntime(id: LocalSpeechModelID) async throws {
         let environment = ProcessInfo.processInfo.environment

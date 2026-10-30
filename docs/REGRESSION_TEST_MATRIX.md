@@ -90,6 +90,10 @@ download, verification and preparation phases.
 
 `LocalSpeechRuntimeTests` covers idle residency, exact selection, last-lease release, expired
 work, non-cooperative load cancellation and timeout, cleanup exclusion and serialized inference.
+`LocalBatchDeliveryTests` covers local producer backpressure, timer/VAD emission exclusion,
+stop-time drain coalescing, ordered text delivery, cancellation without insertion or submit,
+the finalization deadline during a blocked native drain, and short-tail padding to the pinned SDK minimum. Cloud batching remains concurrent.
+The opt-in installed-engine probe also sends a synthetic short tail through Parakeet.
 `LocalSpeechProviderTests` covers the recording WAV format, malformed audio rejection,
 cumulative streaming corrections, one trailing final, cancellation during native work and
 ordered final delivery through the existing live controller. Native session closure retains

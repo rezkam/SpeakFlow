@@ -2,6 +2,15 @@ import FluidAudio
 import Foundation
 
 public enum LocalSpeechEngines {
+    /// Preserve short captured tails while satisfying the pinned SDK input floor.
+    /// Padding is model input only; recording duration and usage remain unchanged.
+    static func parakeetInput(_ samples: [Float]) throws -> [Float] {
+        guard !samples.isEmpty else { throw LocalSpeechAudioError.invalidAudio }
+        let minimum = ASRConstants.minimumRequiredSamples(forSampleRate: 16_000)
+        guard samples.count < minimum else { return samples }
+        return samples + Array(repeating: 0, count: minimum - samples.count)
+    }
+
     public static func load(_ model: LocalSpeechModel, from directory: URL) async throws -> any LocalSpeechEngine {
         #if arch(arm64)
         ModelNetworkPolicy.initialize()
@@ -40,7 +49,7 @@ private actor LocalParakeetEngine: LocalBatchSpeechEngine {
     }
     func transcribe(samples: [Float]) async throws -> String {
         var state = try TdtDecoderState(decoderLayers: decoderLayers)
-        return try await manager.transcribe(samples, decoderState: &state).text
+        return try await manager.transcribe(LocalSpeechEngines.parakeetInput(samples), decoderState: &state).text
     }
     func cleanup() async {
         await manager.cleanup()

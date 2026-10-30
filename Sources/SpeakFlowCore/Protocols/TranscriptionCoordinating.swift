@@ -5,6 +5,7 @@ import Foundation
 public protocol TranscriptionCoordinating: AnyObject {
     var queueBridge: TranscriptionQueueBridge { get }
     func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk)
+    func transcribeAndWait(ticket: TranscriptionTicket, chunk: AudioChunk) async
     func cancelAll()
     func setMetricsSession(_ sessionId: UUID?)
     /// Set the batch provider to dispatch chunks through.

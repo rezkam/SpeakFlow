@@ -72,6 +72,15 @@ public final class Transcription {
     #endif
 
     public func transcribe(ticket: TranscriptionTicket, chunk: AudioChunk) {
+        _ = scheduleTranscription(ticket: ticket, chunk: chunk)
+    }
+
+    /// Local producers await completion instead of building a native inference backlog.
+    public func transcribeAndWait(ticket: TranscriptionTicket, chunk: AudioChunk) async {
+        await scheduleTranscription(ticket: ticket, chunk: chunk).value
+    }
+
+    private func scheduleTranscription(ticket: TranscriptionTicket, chunk: AudioChunk) -> Task<Void, Never> {
         // Use stable task IDs so each async task is removed from tracking on completion.
         let taskId = UUID()
         observabilityEvent(
@@ -235,6 +244,7 @@ public final class Transcription {
             }
         }
         processingTasks[taskId] = task
+        return task
     }
 
     public func cancelAll() {

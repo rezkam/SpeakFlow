@@ -483,7 +483,11 @@ final class RecordingController {
                     "speechProbability": String(format: "%.3f", chunk.speechProbability)
                 ]
             )
-            self.transcription.transcribe(ticket: ticket, chunk: chunk)
+            if provider is LocalBatchSpeechProvider {
+                await self.transcription.transcribeAndWait(ticket: ticket, chunk: chunk)
+            } else {
+                self.transcription.transcribe(ticket: ticket, chunk: chunk)
+            }
         }
         startingRecorder.onAutoEnd = { [weak self] in
             self?.observabilityEvent("batch_auto_end_triggered")
@@ -677,11 +681,15 @@ final class RecordingController {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let deadline = ContinuousClock.now + .seconds(timeout)
+            var drained = false
+            let localDeadline = self.watchLocalFinalizationDeadline(generation: generation, timeout: timeout, isDrained: { drained })
+            defer { localDeadline?.cancel() }
 
             // Wait until recorder.stop() has finished its async drain/flush pipeline.
             // Without this, we can observe a transient pending=0 before the final chunk
             // is even enqueued, which can complete finalization too early.
             await stoppingRecorder?.waitForStopCompletion()
+            drained = true
 
             while ContinuousClock.now < deadline {
                 if Task.isCancelled { return }
@@ -1372,5 +1380,24 @@ extension RecordingController {
         guard isPreparingLocalModel || session.localLease != nil else { return }
         cancelRecording()
         appState.showBanner("Local dictation cancelled because the Mac is going to sleep. Start a new recording after wake.", style: .info)
+    }
+}
+
+private extension RecordingController {
+    /// Native inference can outlive cancellation. The deadline must run independently
+    /// of the recorder drain, while the lease continues protecting that native work.
+    func watchLocalFinalizationDeadline(
+        generation: UInt64, timeout: Double, isDrained: @escaping @MainActor () -> Bool
+    ) -> Task<Void, Never>? {
+        guard session.localLease != nil else { return nil }
+        return Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(timeout)) } catch { return }
+            guard let self, self.ownsFinalization(generation) else { return }
+            let drained = isDrained()
+            let idle = await self.transcription.queueBridge.isIdle()
+            guard !Task.isCancelled, self.ownsFinalization(generation), !drained || !idle else { return }
+            self.presentRecordingError(message: LocalSpeechRuntimeError.finalizationTimedOut.localizedDescription)
+            self.cancelRecording()
+        }
     }
 }

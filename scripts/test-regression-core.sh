@@ -83,6 +83,7 @@ REGRESSION_SUITES=(
   "LocalSpeechAccelerationTests"
   "LocalSpeechRuntimeTests"
   "LocalSpeechProviderTests"
+  "LocalBatchDeliveryTests"
   "LocalRecordingPreparationTests"
   "KeyInterceptorPendingTests"
   "LocalModelsControllerTests"

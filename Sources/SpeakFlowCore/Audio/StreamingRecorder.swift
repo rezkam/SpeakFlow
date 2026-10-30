@@ -487,9 +487,11 @@ public final class StreamingRecorder {
     /// skipped; their samples stay queued for the next pass, so audio reaches
     /// the buffer and VAD in capture order.
     private var processingPass: Task<Void, Never>?
+    private var localChunkEmission: Task<Bool, Never>?
 
     private func scheduleProcessingPass() {
-        guard processingPass == nil else { return }
+        // Keep capture in its existing bounded queue while local inference is busy.
+        guard processingPass == nil, localChunkEmission == nil else { return }
         processingPass = Task { @MainActor [weak self] in
             await self?.processQueuedSamples()
             self?.processingPass = nil
@@ -839,6 +841,20 @@ public final class StreamingRecorder {
     ///   intentionally uses a much lower floor — see that constant's doc comment.
     @discardableResult
     private func sendChunkIfReady(reason: String, minimumDuration: Double? = nil) async -> Bool {
+        guard requiresLosslessAudio else {
+            return await prepareAndSendChunk(reason: reason, minimumDuration: minimumDuration)
+        }
+        // Timer and VAD callbacks share one local emission. Leave new samples in
+        // the bounded capture buffer until the current inference completes.
+        // Once stopped, the final drain owns all remaining samples.
+        guard state.getRecording(), localChunkEmission == nil else { return false }
+        let emission = Task { await self.prepareAndSendChunk(reason: reason, minimumDuration: minimumDuration) }
+        localChunkEmission = emission
+        defer { localChunkEmission = nil }
+        return await emission.value
+    }
+
+    private func prepareAndSendChunk(reason: String, minimumDuration: Double?) async -> Bool {
         guard !isDiscardingAudio, let buffer = audioBuffer else { return false }
         // Capture all Settings values BEFORE any await suspension points
         // to prevent concurrent @MainActor tasks from changing them mid-execution.
@@ -933,9 +949,11 @@ public final class StreamingRecorder {
         isCancelled = false
 
         let inFlightPass = processingPass
+        let inFlightEmission = localChunkEmission
         let stopTask = Task { [self] in
             // The stop-time drain continues where the in-flight pass ends.
             await inFlightPass?.value
+            _ = await inFlightEmission?.value
             audioFilter = nil
             idleNudgeController = nil
             turnClassifier = nil

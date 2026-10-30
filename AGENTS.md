@@ -284,6 +284,7 @@ These suite filters define the main-feature safety net and must not be removed w
 - A local streaming backlog fails visibly at the existing bounded queue limit. Never silently discard local audio or submit after a local inference failure.
 - Upstream checks are manual metadata only. Only bundled reviewed manifests authorize installations or compatible retained-version rollback. A changed source SHA never activates itself.
 - Named partial cleanup and installation removal require current exact-target confirmation; changed measured targets and symbolic links are refused. Other revisions and shared VAD remain untouched.
+- Local batch producers await inference and serialize timer/VAD emissions. Stop waits for any active emission before draining its final audio. Short nonempty Parakeet tails receive silence padding to the SDK minimum without changing captured duration. Covered by `LocalBatchDeliveryTests`.
 - Local batch inference rejects overlapping requests instead of retaining an unbounded audio backlog. Capture overflow, inference failure and local finalization deadlines cancel delivery and withhold submit.
 - Exact revisions cannot reuse another revision's resident engine. Replacement is blocked during active leases or native jobs.
 - Covered by `LocalRecordingPreparationTests`, `KeyInterceptorPendingTests`, `LocalModelsControllerTests`, `LocalModelSelectionTests`, `LocalModelVersionTests`, `VADInstallControllerTests`, `LocalModelRemovalTests`, `LocalModelResourceMonitorTests` and `LocalStreamingReliabilityTests`.

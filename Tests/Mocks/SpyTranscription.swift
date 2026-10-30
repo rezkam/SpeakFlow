@@ -15,6 +15,10 @@ final class SpyTranscription: TranscriptionCoordinating {
         transcribeCalls.append((ticket, chunk))
     }
 
+    func transcribeAndWait(ticket: TranscriptionTicket, chunk: AudioChunk) async {
+        transcribeCalls.append((ticket, chunk))
+    }
+
     func cancelAll() {
         cancelAllCount += 1
     }
