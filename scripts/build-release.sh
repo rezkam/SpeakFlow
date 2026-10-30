@@ -179,13 +179,19 @@ notarize_file() {
 # ── Mode & flags ──────────────────────────────────────────────────────────────
 MODE="${1:-}"
 YES=0
+SKIP_TESTS=0
 for arg in "$@"; do
     [[ "$arg" == "--yes" || "$arg" == "-y" ]] && YES=1
+    [[ "$arg" == "--skip-tests" ]] && SKIP_TESTS=1
 done
 
 if [[ "$MODE" != "rc" && "$MODE" != "local" && "$MODE" != "release" ]]; then
     printf "${RED}Usage: %s rc | local | release [--yes|-y]${RESET}\n" "$(basename "$0")" >&2
     exit 1
+fi
+
+if [[ "$SKIP_TESTS" == 1 && "$MODE" != rc ]]; then
+    fail "Skipping tests is supported only for a local RC"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -364,6 +370,10 @@ fi
 # =============================================================================
 # STAGE 2 — Tests
 # =============================================================================
+if [[ "$SKIP_TESTS" == 1 ]]; then
+    SCRATCH_PATH="${SPEAKFLOW_SWIFT_SCRATCH_PATH:-$PROJECT_DIR/.agents/rc-build}"
+    warn "Tests skipped at the user's explicit request. Local RC only."
+else
 step "Running test suite"
 TEST_LOG="${RELEASE_RUN_DIR}/tests.log"
 TEST_TIMEOUT_SECONDS="${SPEAKFLOW_RC_TEST_TIMEOUT_SECONDS:-900}"
@@ -448,6 +458,8 @@ else
         fail "Local production build and release are blocked because the test suite did not pass"
     fi
     confirm "Continue with RC build anyway?"
+fi
+
 fi
 
 # =============================================================================

@@ -309,7 +309,8 @@ and approval of the release version and notes. Do not publish before that approv
 ### RC
 
 1. Commit the changes locally, then run `bash scripts/build-release.sh rc` from that clean
-   commit. Pushing is not required. RCs are signed and installed locally, never notarized
+   commit. Pushing is not required. Use `rc --skip-tests` only when the user explicitly asks to
+   skip tests; the flag is rejected for other modes. RCs are signed and installed locally, never notarized
    or published, and have updates disabled.
 2. Confirm the installed `SpeakFlowBuildGitCommit`. Agents may verify behavior and visual
    consistency before handoff, subject to the user's testing instructions. Report checks
