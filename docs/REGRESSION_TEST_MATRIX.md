@@ -135,7 +135,7 @@ real microphone/insertion checks are still required separately.
 `SPEAKFLOW_RUN_LOCAL_SPEECH_PROBES=1`, `SPEAKFLOW_LOCAL_MODEL_CACHE_ROOT` to a previously
 approved isolated model store, and `SPEAKFLOW_PUBLIC_SPEECH_FIXTURE` to an approved generic
 mono 16 kHz speech fixture. Run `swift test --no-parallel --filter LocalSpeechEngineIntegrationTests`.
-The probe exercises both Parakeet sizes and native Nemotron through production runtime/provider
+The probe exercises Parakeet 0.6B v2 and native Nemotron through production runtime/provider
 adapters, without microphone capture or transcript persistence. It never downloads missing
 assets. Default tests skip it. Network-denied execution and the actual application are
 separate required release evidence; mock suites do not establish those results.

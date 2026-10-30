@@ -79,7 +79,7 @@ struct LocalModelsControllerTests {
         fixture.controller.reviewDownload(.parakeetV2)
         let review = try #require(fixture.controller.confirmation)
         #expect(review.manifests.map(\.id) == [LocalVADAssets.manifest.id, LocalSpeechModelID.parakeetV2.rawValue])
-        #expect(review.manifests.reduce(0) { $0 + $1.transferBytes } == 228_529_634)
+        #expect(review.manifests.reduce(0) { $0 + $1.transferBytes } == 464_413_247 + 1_063_425)
         fixture.controller.confirmation = nil
         #expect(fixture.requests.withLock { $0 } == 0)
         #expect(!FileManager.default.fileExists(atPath: fixture.root.path))
