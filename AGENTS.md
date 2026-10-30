@@ -236,38 +236,38 @@ These suite filters define the main-feature safety net and must not be removed w
 
 ## RC and Release
 
-Use `scripts/build-release.sh` for both. Never publish without the user's go-ahead.
+Use `scripts/build-release.sh` from the repository root. Both modes run tests, build,
+sign, and replace `/Applications/SpeakFlow.app`; obtain approval for signing and replacement.
 
-### Environment
-
-- Signing env (`SPEAKFLOW_BUNDLE_ID`, `SPEAKFLOW_SIGNING_IDENTITY`, `SPEAKFLOW_TEAM_ID`,
-  `SPEAKFLOW_NOTARY_PROFILE`) must be set. Never print or commit their values.
-- `swift` on PATH must ship the `Testing` module (Xcode or a swift.org toolchain).
-  Command Line Tools `/usr/bin/swift` fails with `no such module 'Testing'`.
-- Run under bash 5, not `/bin/bash` 3.2. Do not wrap in `bash -lc`: a login shell can
-  put 3.2 first, and `set -u` then breaks on empty arrays.
-- Keep build output under `.agents/`: set `SPEAKFLOW_SWIFT_SCRATCH_PATH`,
-  `SPEAKFLOW_OBSERVABILITY_DIR`, and `TMPDIR`, plus `SPEAKFLOW_ISOLATED_STORAGE=1`.
+- Put Bash 5 and a Swift toolchain supporting `Testing` and CryptoKit on PATH.
+  Invoke `bash scripts/build-release.sh`, not the script's `/bin/bash` shebang or a login shell.
+- Set `SPEAKFLOW_BUNDLE_ID`, `SPEAKFLOW_SIGNING_IDENTITY`, and `SPEAKFLOW_TEAM_ID`.
+  Release also requires `SPEAKFLOW_NOTARY_PROFILE`, `SPEAKFLOW_UPDATE_PUBLIC_KEY`, and
+  `SPEAKFLOW_UPDATE_PRIVATE_KEY_FILE`. Reuse the established signing identity and updater keys;
+  never print or commit their values or the private key.
+- Set `SPEAKFLOW_SWIFT_SCRATCH_PATH` and `SPEAKFLOW_OBSERVABILITY_DIR` under `.agents/`,
+  plus `SPEAKFLOW_ISOLATED_STORAGE=1`. The script still uses explicit `/tmp` paths and writes
+  `SpeakFlow.app` and `SpeakFlow.dmg` in the repository root; `TMPDIR` does not redirect all output.
 
 ### RC
 
-1. Build from a clean, pushed commit: `./scripts/build-release.sh rc`. It replaces
-   `/Applications/SpeakFlow.app` and does not upload anything.
-2. Confirm the installed app's `SpeakFlowBuildGitCommit` (Info.plist) is that commit.
-3. The user tests the RC. Their confirmation is tied to that exact SHA.
+From a clean, pushed commit, run `bash scripts/build-release.sh rc`.
+RCs are signed and installed locally, never notarized or published, and have updates disabled.
+Check the installed `SpeakFlowBuildGitCommit`, open the app, and obtain the user's test
+confirmation for that exact SHA. The script's process-start check is not a UI test.
 
 ### Release
 
-1. Put the tested SHA on `main` unchanged: fast-forward with
-   `git push origin <sha>:main`. GitHub merge buttons create a new SHA, which fails
-   the tested-RC gate.
-2. Pick the version with the user. CHANGELOG.md is not bumped per release, so pass it:
-   `SPEAKFLOW_RELEASE_VERSION=X.Y.Z SPEAKFLOW_CONFIRMED_LOCAL_RC_TESTED_SHA=<sha> ./scripts/build-release.sh release --yes`
-3. The script tests, builds, signs, notarizes, staples, publishes `vX.Y.Z` with the DMG,
-   re-downloads and verifies it, then installs it.
-4. Without a CHANGELOG section the notes read "See CHANGELOG.md". Replace them with
-   `gh release edit vX.Y.Z --notes-file <file>` (Features and Fixes, user-facing).
-5. The Homebrew tap updates the cask automatically. Check its `sha256` matches the DMG.
+1. Agree on the version and release notes before the RC. Add a matching CHANGELOG section
+   if notes must appear in-app; otherwise both the feed and GitHub use "See CHANGELOG.md".
+2. Obtain explicit merge and publication approval. Fast-forward main to the tested SHA with
+   `git push origin <sha>:main`; if the source commit changes, test a new RC.
+3. From that clean, pushed SHA, run:
+   `SPEAKFLOW_RELEASE_VERSION=X.Y.Z SPEAKFLOW_CONFIRMED_LOCAL_RC_TESTED_SHA=<sha> bash scripts/build-release.sh release --yes`
+   `--yes` skips script prompts, not user approval. Release signs, notarizes, staples, publishes
+   the DMG and appcast, verifies the downloaded artifact, and installs it locally.
+4. Verify the Homebrew tap workflow succeeded and its version and checksum match the release.
+   Editing GitHub notes afterward does not change the appcast's in-app notes.
 
 ### Menu bar icon missing (macOS 26)
 
