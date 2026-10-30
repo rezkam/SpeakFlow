@@ -51,7 +51,7 @@ struct LocalModelsControllerTests {
             VADModelCacheSnapshot(isLoaded: vadLoaded.withLock { $0 }, isLoading: false)
         }))
         let runtime = LocalSpeechRuntime(root: root, verify: { _, directory in directory }, load: { model, _ in
-            if model.id != .parakeet110M { throw LocalSpeechRuntimeError.loadFailed }
+            if model.id != .parakeetV2 { throw LocalSpeechRuntimeError.loadFailed }
             return ModelsFixtureEngine()
         })
         let state = ModelsSelectionFixture()
@@ -60,8 +60,8 @@ struct LocalModelsControllerTests {
             return root.appendingPathComponent(model.manifest.installationName)
         }, remove: { target in
             removed.withLock { $0.append(target.lastPathComponent) }
-            if target.lastPathComponent == models.first(where: { $0.id == .parakeet110M })?.manifest.installationName {
-                available.withLock { $0.remove(.parakeet110M) }
+            if target.lastPathComponent == models.first(where: { $0.id == .parakeetV2 })?.manifest.installationName {
+                available.withLock { $0.remove(.parakeetV2) }
             }
         })
         let selection = LocalModelsSelection(current: { state.id }, commit: { state.id = $0; state.commits += 1 },
@@ -76,9 +76,9 @@ struct LocalModelsControllerTests {
         await fixture.controller.refresh()
         #expect(fixture.requests.withLock { $0 } == 0)
         #expect(!FileManager.default.fileExists(atPath: fixture.root.path))
-        fixture.controller.reviewDownload(.parakeet110M)
+        fixture.controller.reviewDownload(.parakeetV2)
         let review = try #require(fixture.controller.confirmation)
-        #expect(review.manifests.map(\.id) == [LocalVADAssets.manifest.id, LocalSpeechModelID.parakeet110M.rawValue])
+        #expect(review.manifests.map(\.id) == [LocalVADAssets.manifest.id, LocalSpeechModelID.parakeetV2.rawValue])
         #expect(review.manifests.reduce(0) { $0 + $1.transferBytes } == 228_529_634)
         fixture.controller.confirmation = nil
         #expect(fixture.requests.withLock { $0 } == 0)
@@ -88,75 +88,75 @@ struct LocalModelsControllerTests {
     @MainActor @Test func confirmedFailedDownloadKeepsThePreviousSelectionAndAllowsRetry() async throws {
         let fixture = try fixture(vadInstalled: true)
         await fixture.controller.refresh()
-        fixture.controller.reviewDownload(.parakeet110M)
+        fixture.controller.reviewDownload(.parakeetV2)
         fixture.controller.confirmOperation()
-        try await waitUntil { !fixture.controller.isBusy && fixture.controller.entry(.parakeet110M).hasError }
+        try await waitUntil { !fixture.controller.isBusy && fixture.controller.entry(.parakeetV2).hasError }
         #expect(fixture.requests.withLock { $0 } == 1)
         #expect(fixture.selection.id == "fixture-cloud" && fixture.selection.commits == 0)
-        #expect(fixture.controller.canDownload(.parakeet110M))
+        #expect(fixture.controller.canDownload(.parakeetV2))
     }
 
     @MainActor @Test func loadSelectsOnlyAfterSuccessAndUnloadKeepsFilesAndSelection() async throws {
         let fixture = try fixture(vadInstalled: true)
-        fixture.available.withLock { $0 = [.parakeet110M, .parakeetV2] }
+        fixture.available.withLock { $0 = [.parakeetV2, .nemotron1120] }
         await fixture.controller.refresh()
-        fixture.controller.load(.parakeet110M)
+        fixture.controller.load(.parakeetV2)
         try await waitUntil { !fixture.controller.isBusy && fixture.selection.commits == 1 }
         let selected = fixture.selection.id
-        #expect(selected.contains(LocalSpeechModelID.parakeet110M.rawValue))
-        fixture.controller.load(.parakeetV2)
-        try await waitUntil { !fixture.controller.isBusy && fixture.controller.entry(.parakeetV2).hasError }
+        #expect(selected.contains(LocalSpeechModelID.parakeetV2.rawValue))
+        fixture.controller.load(.nemotron1120)
+        try await waitUntil { !fixture.controller.isBusy && fixture.controller.entry(.nemotron1120).hasError }
         #expect(fixture.selection.id == selected && fixture.selection.commits == 1)
-        fixture.controller.unload(.parakeet110M)
-        try await waitUntil { !fixture.controller.isBusy && !fixture.controller.runtimeState.loaded.contains(.parakeet110M) }
+        fixture.controller.unload(.parakeetV2)
+        try await waitUntil { !fixture.controller.isBusy && !fixture.controller.runtimeState.loaded.contains(.parakeetV2) }
         #expect(fixture.selection.id == selected)
-        #expect(fixture.controller.entry(.parakeet110M).isInstalled)
+        #expect(fixture.controller.entry(.parakeetV2).isInstalled)
         #expect(fixture.removed.withLock { $0.isEmpty })
     }
 
     @MainActor @Test func deletionRequiresConfirmationAndCannotActOnAnInUseModel() async throws {
         let fixture = try fixture(vadInstalled: true)
-        fixture.available.withLock { $0.insert(.parakeet110M) }
+        fixture.available.withLock { $0.insert(.parakeetV2) }
         await fixture.controller.refresh()
-        let model = try #require(fixture.controller.models.first { $0.id == .parakeet110M })
+        let model = try #require(fixture.controller.models.first { $0.id == .parakeetV2 })
         let installation = fixture.root.appendingPathComponent(model.manifest.installationName)
         try FileManager.default.createDirectory(at: installation, withIntermediateDirectories: true)
         let lease = try await fixture.runtime.acquire(model)
         await fixture.controller.refreshRuntime()
-        fixture.controller.reviewDelete(.parakeet110M)
+        fixture.controller.reviewDelete(.parakeetV2)
         #expect(fixture.controller.confirmation == nil)
         #expect(fixture.removed.withLock { $0.isEmpty })
         await lease.release()
         await fixture.controller.refreshRuntime()
-        fixture.controller.reviewDelete(.parakeet110M)
+        fixture.controller.reviewDelete(.parakeetV2)
         #expect(fixture.controller.confirmation?.kind == .delete)
         #expect(fixture.removed.withLock { $0.isEmpty })
         fixture.controller.confirmOperation()
-        try await waitUntil { !fixture.controller.isBusy && !fixture.controller.entry(.parakeet110M).isInstalled }
+        try await waitUntil { !fixture.controller.isBusy && !fixture.controller.entry(.parakeetV2).isInstalled }
         #expect(fixture.removed.withLock { $0 } == [model.manifest.installationName])
         #expect(fixture.controller.vad.isInstalled)
     }
 
     @MainActor @Test func missingVADDisablesBatchLoadWithoutAnImplicitDependencyDownload() async throws {
         let fixture = try fixture()
-        fixture.available.withLock { $0.insert(.parakeet110M) }
+        fixture.available.withLock { $0.insert(.parakeetV2) }
         await fixture.controller.refresh()
-        #expect(!fixture.controller.canLoad(.parakeet110M))
+        #expect(!fixture.controller.canLoad(.parakeetV2))
         #expect(fixture.requests.withLock { $0 } == 0)
         #expect(fixture.selection.commits == 0)
     }
 
     @MainActor @Test func missingFilesDoNotPreventUnloadingAnAlreadyResidentModel() async throws {
         let fixture = try fixture(vadInstalled: true)
-        fixture.available.withLock { $0.insert(.parakeet110M) }
+        fixture.available.withLock { $0.insert(.parakeetV2) }
         await fixture.controller.refresh()
-        fixture.controller.load(.parakeet110M)
+        fixture.controller.load(.parakeetV2)
         try await waitUntil { !fixture.controller.isBusy && fixture.selection.commits == 1 }
-        fixture.available.withLock { $0.remove(.parakeet110M) }
+        fixture.available.withLock { $0.remove(.parakeetV2) }
         await fixture.controller.refresh()
-        #expect(!fixture.controller.entry(.parakeet110M).isInstalled)
-        #expect(fixture.controller.canUnload(.parakeet110M))
-        fixture.controller.unload(.parakeet110M)
+        #expect(!fixture.controller.entry(.parakeetV2).isInstalled)
+        #expect(fixture.controller.canUnload(.parakeetV2))
+        fixture.controller.unload(.parakeetV2)
         try await waitUntil { !fixture.controller.isBusy }
         #expect(await fixture.runtime.snapshot().loaded.isEmpty)
     }
@@ -166,7 +166,7 @@ struct LocalModelsControllerTests {
 
 extension LocalModelsControllerTests {
     @MainActor @Test func retainedReviewedVersionCanBeBrowsedThenExplicitlyLoadedForRollback() async throws {
-        let original = try #require(LocalSpeechCatalog.models().first { $0.id == .parakeet110M })
+        let original = try #require(LocalSpeechCatalog.models().first { $0.id == .parakeetV2 })
         let manifest = original.manifest
         let older = LocalSpeechModel(id: original.id, name: original.name, mode: original.mode,
             manifest: LocalModelManifest(id: manifest.id, repository: manifest.repository,
@@ -196,7 +196,7 @@ extension LocalModelsControllerTests {
         let checker = LocalModelUpdateChecker(fetch: { _ in Data("{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}".utf8) })
         fixture.controller.checkForUpdates(using: checker)
         try await waitUntil { !fixture.controller.checkingUpdates }
-        #expect(fixture.controller.entry(.parakeet110M).updateNotice != nil)
+        #expect(fixture.controller.entry(.parakeetV2).updateNotice != nil)
         #expect(fixture.selection.commits == 0)
         #expect(fixture.requests.withLock { $0 } == 0)
         #expect(fixture.removed.withLock { $0.isEmpty })
@@ -204,16 +204,16 @@ extension LocalModelsControllerTests {
 
     @MainActor @Test func anOfflineUpdateCheckPreservesTheWorkingSelection() async throws {
         let fixture = try fixture(vadInstalled: true)
-        fixture.available.withLock { $0.insert(.parakeet110M) }
+        fixture.available.withLock { $0.insert(.parakeetV2) }
         await fixture.controller.refresh()
-        fixture.controller.load(.parakeet110M)
+        fixture.controller.load(.parakeetV2)
         try await waitUntil { !fixture.controller.isBusy && fixture.selection.commits == 1 }
         let selected = fixture.selection.id
         fixture.controller.checkForUpdates(using: LocalModelUpdateChecker(fetch: { _ in throw LocalModelError.transferFailed }))
         try await waitUntil { !fixture.controller.checkingUpdates }
         #expect(fixture.controller.updateCheckFailed)
         #expect(fixture.selection.id == selected && fixture.selection.commits == 1)
-        #expect(fixture.controller.entry(.parakeet110M).isInstalled)
+        #expect(fixture.controller.entry(.parakeetV2).isInstalled)
         #expect(fixture.requests.withLock { $0 } == 0)
     }
 }
@@ -223,14 +223,14 @@ extension LocalModelsControllerTests {
     @MainActor @Test func anInterruptedRevisionCanBeReviewedForNamedPartialCleanup() async throws {
         let fixture = try fixture(vadInstalled: true)
         await fixture.controller.refresh()
-        fixture.controller.reviewDownload(.parakeet110M)
+        fixture.controller.reviewDownload(.parakeetV2)
         fixture.controller.confirmOperation()
-        try await waitUntil { !fixture.controller.isBusy && fixture.controller.entry(.parakeet110M).hasError }
-        #expect(fixture.controller.canDelete(.parakeet110M))
-        fixture.controller.reviewDelete(.parakeet110M)
+        try await waitUntil { !fixture.controller.isBusy && fixture.controller.entry(.parakeetV2).hasError }
+        #expect(fixture.controller.canDelete(.parakeetV2))
+        fixture.controller.reviewDelete(.parakeetV2)
         let confirmation = try #require(fixture.controller.confirmation)
         #expect(!confirmation.removalTargets.isEmpty)
-        #expect(confirmation.removalTargets.allSatisfy { $0.name.hasPrefix("partial-parakeet-110m-") })
+        #expect(confirmation.removalTargets.allSatisfy { $0.name.hasPrefix("partial-parakeet-v2-") })
         #expect(fixture.removed.withLock { $0.isEmpty })
         fixture.controller.confirmation = nil
         #expect(fixture.removed.withLock { $0.isEmpty })
@@ -241,7 +241,7 @@ extension LocalModelsControllerTests {
 extension LocalModelsControllerTests {
     @MainActor @Test func partialCleanupCanKeepTheInstalledLoadedRevision() async throws {
         let fixture = try fixture(vadInstalled: true)
-        let model = try #require(fixture.controller.models.first { $0.id == .parakeet110M })
+        let model = try #require(fixture.controller.models.first { $0.id == .parakeetV2 })
         let partialName = "partial-\(model.manifest.installationName)-\(UUID().uuidString)"
         for name in [model.manifest.installationName, partialName] {
             try FileManager.default.createDirectory(at: fixture.root.appendingPathComponent(name), withIntermediateDirectories: true)
@@ -266,8 +266,8 @@ extension LocalModelsControllerTests {
         let original = preferences.preloadOnLaunch
         defer { preferences.preloadOnLaunch = original }
         let fixture = try fixture(vadInstalled: true)
-        fixture.available.withLock { $0 = [.parakeet110M] }
-        fixture.selection.id = try #require(fixture.controller.models.first { $0.id == .parakeet110M }).providerID
+        fixture.available.withLock { $0 = [.parakeetV2] }
+        fixture.selection.id = try #require(fixture.controller.models.first { $0.id == .parakeetV2 }).providerID
         preferences.preloadOnLaunch = false
         await fixture.controller.bootstrap()
         #expect(fixture.vadLoads.withLock { $0 } == 0)
@@ -276,7 +276,7 @@ extension LocalModelsControllerTests {
         await fixture.controller.bootstrap()
         try await waitUntil { !fixture.controller.isBusy }
         #expect(fixture.vadLoads.withLock { $0 } == 1)
-        #expect(await fixture.runtime.snapshot().loaded == [.parakeet110M])
+        #expect(await fixture.runtime.snapshot().loaded == [.parakeetV2])
         #expect(fixture.requests.withLock { $0 } == 0)
     }
 
@@ -286,8 +286,8 @@ extension LocalModelsControllerTests {
         defer { preferences.preloadOnLaunch = original }
         preferences.preloadOnLaunch = true
         let fixture = try fixture(vadInstalled: true, vadLoadFails: true)
-        fixture.available.withLock { $0 = [.parakeet110M] }
-        fixture.selection.id = try #require(fixture.controller.models.first { $0.id == .parakeet110M }).providerID
+        fixture.available.withLock { $0 = [.parakeetV2] }
+        fixture.selection.id = try #require(fixture.controller.models.first { $0.id == .parakeetV2 }).providerID
         await fixture.controller.bootstrap()
         try await waitUntil { !fixture.controller.isBusy }
         #expect(fixture.vadLoads.withLock { $0 } == 1)

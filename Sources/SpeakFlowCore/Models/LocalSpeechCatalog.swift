@@ -1,7 +1,6 @@
 import Foundation
 
 public enum LocalSpeechModelID: String, CaseIterable, Codable, Sendable {
-    case parakeet110M = "parakeet-110m"
     case parakeetV2 = "parakeet-v2"
     case nemotron1120 = "nemotron-latin-1120"
 }
@@ -62,7 +61,6 @@ public enum LocalSpeechCatalog {
         let name: String
         let mode: LocalSpeechMode
         switch id {
-        case .parakeet110M: name = "Parakeet 110M"; mode = .batch
         case .parakeetV2: name = "Parakeet 0.6B v2"; mode = .batch
         case .nemotron1120: name = "Nemotron 3.5 Streaming 0.6B"; mode = .streaming
         }

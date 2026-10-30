@@ -31,7 +31,7 @@ struct LocalRecordingPreparationTests {
         let engine: RecordingLocalEngine
     }
 
-    @MainActor private func setup(_ id: LocalSpeechModelID = .parakeet110M) throws -> Fixture {
+    @MainActor private func setup(_ id: LocalSpeechModelID = .parakeetV2) throws -> Fixture {
         let model = try #require(LocalSpeechCatalog.models().first { $0.id == id })
         let gate = RecordingLoadGate(), engine = RecordingLocalEngine()
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

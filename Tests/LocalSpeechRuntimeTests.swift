@@ -58,7 +58,7 @@ struct LocalSpeechRuntimeTests {
     private var root: URL { URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent(".agents/test-fixtures/runtime-\(UUID().uuidString)") }
 
-    private func model(_ id: LocalSpeechModelID = .parakeet110M) throws -> LocalSpeechModel {
+    private func model(_ id: LocalSpeechModelID = .parakeetV2) throws -> LocalSpeechModel {
         try #require(LocalSpeechCatalog.models().first { $0.id == id })
     }
 
@@ -84,10 +84,10 @@ struct LocalSpeechRuntimeTests {
         let old = RuntimeFixtureEngine(), next = RuntimeFixtureEngine()
         let runtime = LocalSpeechRuntime(root: root, verify: { _, directory in directory },
             load: { model, _ in
-                if model.id == .parakeet110M { return old }
+                if model.id == .parakeetV2 { return old }
                 return next
             })
-        let small = try model(), large = try model(.parakeetV2)
+        let small = try model(), large = try model(.nemotron1120)
         let lease = try await runtime.acquire(small)
         try await runtime.loadAndSelect(large)
         let state = await runtime.snapshot()
@@ -104,22 +104,22 @@ struct LocalSpeechRuntimeTests {
         try await runtime.unload(large.id)
     }
 
-    @Test func failedVerificationOrLoadKeepsThePreviousSelection() async throws {
+    @Test(arguments: [false, true])
+    func failedVerificationOrLoadKeepsThePreviousSelection(failVerification: Bool) async throws {
         let engine = RuntimeFixtureEngine()
         let runtime = LocalSpeechRuntime(root: root, verify: { model, directory in
-            if model.id == .nemotron1120 { throw LocalModelError.invalidAssets }
+            if failVerification && model.id == .nemotron1120 { throw LocalModelError.invalidAssets }
             return directory
         }, load: { model, _ in
-            if model.id == .parakeetV2 { throw LocalModelError.invalidAssets }
+            if !failVerification && model.id == .nemotron1120 { throw LocalModelError.invalidAssets }
             return engine
         })
         let small = try model()
         try await runtime.loadAndSelect(small)
-        for candidate in [try model(.parakeetV2), try model(.nemotron1120)] {
-            await #expect(throws: LocalModelError.invalidAssets) { try await runtime.loadAndSelect(candidate) }
-            let state = await runtime.snapshot()
-            #expect(state.selected == small.id && state.loaded == [small.id])
-        }
+        let candidate = try model(.nemotron1120)
+        await #expect(throws: LocalModelError.invalidAssets) { try await runtime.loadAndSelect(candidate) }
+        let state = await runtime.snapshot()
+        #expect(state.selected == small.id && state.loaded == [small.id])
         #expect(await engine.cleanups == 0)
         try await runtime.unload(small.id)
     }
@@ -191,10 +191,10 @@ struct LocalSpeechRuntimeTests {
         let held = RuntimeBusyEngine(inference: inference), next = RuntimeFixtureEngine()
         let runtime = LocalSpeechRuntime(root: root, verify: { _, directory in directory },
             load: { model, _ in
-                if model.id == .parakeet110M { return held }
+                if model.id == .parakeetV2 { return held }
                 return next
             })
-        let small = try model(), large = try model(.parakeetV2)
+        let small = try model(), large = try model(.nemotron1120)
         let lease = try await runtime.acquire(small)
         let work = Task { try await lease.transcribe(samples: [0]) }
         try await waitUntilAsync { await inference.started }
@@ -215,10 +215,10 @@ struct LocalSpeechRuntimeTests {
         let next = RuntimeFixtureEngine()
         let runtime = LocalSpeechRuntime(root: root, verify: { _, directory in directory },
             load: { model, _ in
-                if model.id == .parakeet110M { return old }
+                if model.id == .parakeetV2 { return old }
                 return next
             })
-        let small = try model(), large = try model(.parakeetV2)
+        let small = try model(), large = try model(.nemotron1120)
         try await runtime.loadAndSelect(small)
         let switchTask = Task { try await runtime.loadAndSelect(large) }
         try await waitUntilAsync { await gate.started }

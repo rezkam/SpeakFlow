@@ -19,7 +19,7 @@ enum ModelsScreenFixtures {
     static func make(root: URL, vad: VADInstallController,
                      available: @escaping @Sendable () -> Bool = { false }, allowFixtureRemoval: Bool = false) throws -> LocalModelsController {
         let catalog = try LocalSpeechCatalog.models()
-        guard let expectedName = catalog.first(where: { $0.id == .parakeet110M })?.manifest.installationName else {
+        guard let expectedName = catalog.first(where: { $0.id == .parakeetV2 })?.manifest.installationName else {
             throw LocalModelError.invalidManifest
         }
         let installer = ExplicitModelInstaller(root: root, fetch: { _, _, _, _ in throw LocalModelError.transferFailed },

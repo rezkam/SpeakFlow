@@ -73,8 +73,10 @@ refuses capture. `LocalVADReadinessTests` distinguishes batch VAD dependencies f
 streaming endpointing. `VADInstallControllerTests` rejects stale availability checks.
 `LocalModelManifestTests` verifies root and nested export paths, exact repository components,
 reserved receipts and file-directory collisions on case-insensitive storage.
-`LocalSpeechCatalogTests` verifies the three reviewed English exports, complete byte totals and
-strict catalog membership. `LocalSpeechAccelerationTests` checks the explicit CPU plus Neural Engine
+`LocalSpeechCatalogTests` verifies the two reviewed English exports (Parakeet 0.6B v2 batch and
+Nemotron 1120 ms streaming), complete byte totals, strict catalog membership and rejection of
+the retired Parakeet 110M identifier. Runtime and controller fixtures use the remaining models
+for selection, load failure and lease coverage. `LocalSpeechAccelerationTests` checks the explicit CPU plus Neural Engine
 configuration and rejects conflicting library compute overrides, including under CI.
 `ExplicitModelInstallerTests` covers verified installation of both export layouts, denied or changed consent,
 checksums, receipts, unsafe paths, symlinks, cancellation and insufficient storage.

@@ -321,7 +321,8 @@ struct StatisticsSettingsView: View {
         default:
             ProviderRegistry.shared.provider(for: providerId)?.displayName
                 ?? LocalModelsController.shared.reviewedModels.first(where: { $0.providerID == providerId })?.name
-                ?? (providerId.hasPrefix("local:") ? "Local model (older revision)" : providerId)
+                ?? (providerId.hasPrefix("local:parakeet-110m:") ? "Parakeet 110M (retired)"
+                    : providerId.hasPrefix("local:") ? "Local model (older revision)" : providerId)
         }
     }
 

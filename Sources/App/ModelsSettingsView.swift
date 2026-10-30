@@ -21,6 +21,7 @@ struct ModelsSettingsView: View {
                 .lineLimit(2).frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .topLeading)
                 .accessibilityHidden(models.resourceWarning == nil)
             if let error = models.catalogError { Text(error).foregroundStyle(Theme.red) }
+            if let notice = models.selectionNotice { Text(notice).foregroundStyle(Theme.text2) }
             ForEach(models.models) { model in
                 LocalSpeechModelCard(model: model, controller: models)
             }

@@ -78,6 +78,11 @@ final class LocalModelsController {
     var recordingBusy: Bool { selection.busy() }
     var supported: Bool { selection.supported }
     var selectedProviderID: String { selection.current() }
+    var selectionNotice: String? {
+        selectedProviderID.hasPrefix("local:parakeet-110m:")
+            ? "Parakeet 110M was removed from this release. Load a model below to select it. No replacement is selected automatically."
+            : nil
+    }
 
     init(models: [LocalSpeechModel], store: LocalModelsStore, runtime: LocalSpeechRuntime,
          vad: VADInstallController, selection: LocalModelsSelection, reviewedVersions: [LocalSpeechModel] = []) {

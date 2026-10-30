@@ -7,11 +7,12 @@ import Testing
 struct LocalSpeechCatalogTests {
     @Test func approvedExportsHaveCompleteImmutableManifests() throws {
         let models = try LocalSpeechCatalog.models()
-        #expect(models.map(\.id) == [.parakeet110M, .parakeetV2, .nemotron1120])
-        #expect(models.map(\.manifest.transferBytes) == [227_466_209, 464_413_247, 611_340_223])
-        #expect(models.map(\.mode) == [.batch, .batch, .streaming])
+        #expect(LocalSpeechModelID(rawValue: "parakeet-110m") == nil)
+        #expect(models.map(\.id) == [.parakeetV2, .nemotron1120])
+        #expect(models.map(\.manifest.transferBytes) == [464_413_247, 611_340_223])
+        #expect(models.map(\.mode) == [.batch, .streaming])
         #expect(models.allSatisfy { $0.languages == ["en"] && $0.fluidAudioVersion == "0.18.0" })
-        #expect(models.map(\.manifest.artifacts.count) == [16, 21, 22])
+        #expect(models.map(\.manifest.artifacts.count) == [21, 22])
         for model in models { try model.manifest.validate() }
         let streaming = try #require(models.first { $0.id == .nemotron1120 })
         #expect(streaming.manifest.modelDirectory == "latin/1120ms")
@@ -25,11 +26,17 @@ struct LocalSpeechCatalogTests {
                 try LocalSpeechCatalog.models(manifests: invalid)
             }
         }
-        let unexpected = LocalModelManifest(id: "nemotron-latin-2240", repository: manifests[2].repository,
-            revision: manifests[2].revision, license: manifests[2].license,
-            modelDirectory: manifests[2].modelDirectory, artifacts: manifests[2].artifacts)
+        let unexpected = LocalModelManifest(id: "nemotron-latin-2240", repository: manifests[1].repository,
+            revision: manifests[1].revision, license: manifests[1].license,
+            modelDirectory: manifests[1].modelDirectory, artifacts: manifests[1].artifacts)
         #expect(throws: LocalModelError.invalidManifest) {
             try LocalSpeechCatalog.models(manifests: manifests + [unexpected])
+        }
+        let retired = LocalModelManifest(id: "parakeet-110m", repository: manifests[0].repository,
+            revision: manifests[0].revision, license: manifests[0].license,
+            modelDirectory: manifests[0].modelDirectory, artifacts: manifests[0].artifacts)
+        #expect(throws: LocalModelError.invalidManifest) {
+            try LocalSpeechCatalog.models(manifests: [retired, manifests[1]])
         }
     }
 

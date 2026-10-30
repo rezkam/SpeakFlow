@@ -72,7 +72,7 @@ struct LocalSpeechProviderTests {
     @Test func batchDecodesOnlyTheRecordingWAVAndRetainsItsModelIdentity() async throws {
         let engine = ProviderBatchEngine()
         let runtime = LocalSpeechRuntime(root: root, verify: { _, directory in directory }, load: { _, _ in engine })
-        let model = try model(.parakeet110M), lease = try await runtime.acquire(model)
+        let model = try model(.parakeetV2), lease = try await runtime.acquire(model)
         let provider = LocalBatchSpeechProvider(lease: lease)
         #expect(provider.id == model.providerID)
         #expect(provider.mode == .batch && provider.isConfigured)
@@ -216,7 +216,7 @@ extension LocalSpeechProviderTests {
     @Test func aBatchProviderRejectsOverlapInsteadOfGrowingANativeBacklog() async throws {
         let gate = ProviderPauseGate(), engine = ProviderBlockedBatchEngine(gate: gate)
         let runtime = LocalSpeechRuntime(root: root, verify: { _, root in root }, load: { _, _ in engine })
-        let lease = try await runtime.acquire(model(.parakeet110M))
+        let lease = try await runtime.acquire(model(.parakeetV2))
         let provider = LocalBatchSpeechProvider(lease: lease)
         let audio = WavEncoder.encode(samples: [0, 0], sampleRate: 16000)
         let first = Task { try await provider.transcribe(audio: audio) }

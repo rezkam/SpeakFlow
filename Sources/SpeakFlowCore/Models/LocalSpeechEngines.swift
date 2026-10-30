@@ -8,9 +8,9 @@ public enum LocalSpeechEngines {
         let configuration = try LocalSpeechCompute.configuration()
         do {
             switch model.id {
-            case .parakeet110M, .parakeetV2:
+            case .parakeetV2:
                 let models = try AsrModels.loadLocal(from: directory,
-                    version: model.id == .parakeet110M ? .tdtCtc110m : .v2, configuration: configuration)
+                    version: .v2, configuration: configuration)
                 let manager = AsrManager()
                 try await manager.loadModels(models)
                 return LocalParakeetEngine(manager: manager, decoderLayers: models.version.decoderLayers)
