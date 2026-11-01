@@ -295,6 +295,10 @@ final class LocalModelsController {
                 try await self.runtime.loadAndSelect(model)
                 try Task.checkCancellation()
                 guard self.selectionGeneration == generation, self.selection.current() == previous else { throw CancellationError() }
+                guard !self.selection.busy() else {
+                    await self.runtime.clearSelection()
+                    throw LocalModelError.busy
+                }
             } catch {
                 if error is CancellationError { await self.runtime.clearSelection() }
                 throw error

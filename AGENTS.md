@@ -271,7 +271,7 @@ These suite filters define the main-feature safety net and must not be removed w
 - Initialize the library offline guard once before any loader starts. Never disable it for installation.
 - Only an explicit confirmation of the exact immutable manifest authorizes the independent installer.
 - Verify app-owned receipts, file sizes and hashes before local loading. External caches are not adopted.
-- Missing or corrupt required VAD blocks affected recording with actionable guidance. No silent fallback.
+- Missing or corrupt required VAD blocks local batch recording with actionable guidance. Cloud providers never require local ASR or VAD assets and local-model operations do not block cloud capture. Cloud batch may use verified optional VAD; otherwise its manual-stop mode is visible, without changing the saved VAD preference or loading missing assets. Covered by `CloudProviderIndependenceTests` and `LocalVADReadinessTests`. No silent provider fallback.
 - Core regression verifies a previously approved installation and fails if it is missing on supported hardware.
 - CI uses the approved Silero fixture in `Tests/Fixtures/SileroVAD`, excluded from SwiftPM targets and app packaging. Gates verify this checked-in fixture offline and never provision model files.
 - Transfer and integrity verification use bounded app-managed buffers. Cancellation retains only inert partial files.

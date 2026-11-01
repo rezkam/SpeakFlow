@@ -60,10 +60,12 @@ struct TranscriptionSettingsView: View {
             }
             SettingRow(
                 "Auto-end on silence",
-                description: "Stop the recording automatically after a sustained pause, so you do not have to press the hotkey again."
+                description: state.usesBasicCloudBatchRecording ? AppState.basicCloudBatchNotice
+                    : "Stop the recording automatically after a sustained pause, so you do not have to press the hotkey again."
             ) {
                 Toggle("", isOn: autoEndBinding(for: activeProvider))
                     .labelsHidden()
+                    .disabled(state.usesBasicCloudBatchRecording)
             }
             if isAutoEndEnabled(for: activeProvider) {
                 SettingSliderRow(
@@ -606,14 +608,13 @@ struct TranscriptionSettingsView: View {
     // MARK: - Helpers
 
     private func autoEndBinding(for provider: (any TranscriptionProvider)?) -> Binding<Bool> {
-        if provider?.mode == .streaming {
-            state.binding(for: \.streamingAutoEndEnabled)
-        } else {
-            state.binding(for: \.autoEndEnabled)
-        }
+        if state.usesBasicCloudBatchRecording { return .constant(false) }
+        if provider?.mode == .streaming { return state.binding(for: \.streamingAutoEndEnabled) }
+        return state.binding(for: \.autoEndEnabled)
     }
 
     private func isAutoEndEnabled(for provider: (any TranscriptionProvider)?) -> Bool {
+        if state.usesBasicCloudBatchRecording { return false }
         if provider?.mode == .streaming { return state.streamingAutoEndEnabled }
         return state.autoEndEnabled
     }

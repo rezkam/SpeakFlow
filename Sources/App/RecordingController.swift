@@ -308,10 +308,6 @@ final class RecordingController {
     func startRecording() {
         guard !updateInstallationInProgress() else { return }
         guard !isRecording, !isPreparingLocalModel else { return }
-        guard !modelOperationInProgress() else {
-            presentRecordingError(message: "A model operation is running. Finish or cancel it in Models before dictating.")
-            return
-        }
         resetRecordingErrorPresentation()
         session.latestStreamingError = nil
         applyObservabilityConfigurationFromSettings()
@@ -351,8 +347,13 @@ final class RecordingController {
             return
         }
 
+        if provider is any LocalRecordingPreparing, modelOperationInProgress() {
+            presentRecordingError(message: "A model operation is running. Finish or cancel it in Models before dictating.")
+            return
+        }
+        let useLocalVAD: Bool
         do {
-            try validateModelAssets(provider.mode, settings.vadEnabled)
+            useLocalVAD = try batchUsesLocalVAD(provider)
         } catch {
             playSoundEffect(.error)
             presentRecordingError(message: (error as? LocalModelError)?.localizedDescription
@@ -365,10 +366,10 @@ final class RecordingController {
             prepareLocalRecording(local)
             return
         }
-        beginCapturedRecording(provider: provider)
+        beginCapturedRecording(provider: provider, useLocalVAD: useLocalVAD)
     }
 
-    private func beginCapturedRecording(provider: any TranscriptionProvider, lease: LocalSpeechLease? = nil) {
+    private func beginCapturedRecording(provider: any TranscriptionProvider, lease: LocalSpeechLease? = nil, useLocalVAD: Bool = true) {
         replaceSession()
         session.localLease = lease
 
@@ -386,7 +387,7 @@ final class RecordingController {
         if let streaming = provider as? any StreamingTranscriptionProvider {
             startStreamingRecording(provider: streaming)
         } else if let batch = provider as? any BatchTranscriptionProvider {
-            startBatchRecording(provider: batch)
+            startBatchRecording(provider: batch, useLocalVAD: useLocalVAD)
         }
         onStateChanged?()
     }
@@ -425,18 +426,6 @@ final class RecordingController {
         return true
     }
 
-    private func signalRecordingStarted(provider: any TranscriptionProvider) {
-        playSoundEffect(.start)
-        observabilityEvent(
-            "recording_started",
-            metadata: [
-                "providerId": provider.id,
-                "providerMode": provider.mode.rawValue,
-                "targetPid": String(textInserter.targetPid)
-            ]
-        )
-    }
-
     private func signalStreamingCaptureStarted(provider: any StreamingTranscriptionProvider) {
         playSoundEffect(.start)
         observabilityEvent(
@@ -451,11 +440,11 @@ final class RecordingController {
 
     // MARK: - Batch Recording
 
-    private func startBatchRecording(provider: any BatchTranscriptionProvider) {
+    private func startBatchRecording(provider: any BatchTranscriptionProvider, useLocalVAD: Bool) {
         transcription.setActiveBatchProvider(provider)
         observabilityEvent("batch_recording_starting", metadata: ["providerId": provider.id])
         let generation = session.generation
-        let startingRecorder = StreamingRecorder()
+        let startingRecorder = StreamingRecorder(localVADEnabled: useLocalVAD)
         startingRecorder.requiresLosslessAudio = provider is LocalBatchSpeechProvider
         recorder = startingRecorder
         startingRecorder.onCaptureError = { [weak self] error in
@@ -527,6 +516,9 @@ final class RecordingController {
                     language: self.languageForStats(providerId: provider.id)
                 )
                 self.signalRecordingStarted(provider: provider)
+                if !useLocalVAD, !(provider is LocalBatchSpeechProvider) {
+                    self.appState.showBanner(AppState.basicCloudBatchNotice, style: .info, duration: 8)
+                }
                 self.observabilityEvent("batch_recording_started")
             }
         }
@@ -1384,6 +1376,32 @@ extension RecordingController {
 }
 
 private extension RecordingController {
+    func signalRecordingStarted(provider: any TranscriptionProvider) {
+        playSoundEffect(.start)
+        observabilityEvent(
+            "recording_started",
+            metadata: [
+                "providerId": provider.id,
+                "providerMode": provider.mode.rawValue,
+                "targetPid": String(textInserter.targetPid)
+            ]
+        )
+    }
+
+    func batchUsesLocalVAD(_ provider: any TranscriptionProvider) throws -> Bool {
+        guard provider.mode == .batch, settings.vadEnabled else { return false }
+        let requiresVAD = provider is any LocalRecordingPreparing
+        // Cloud capture remains independent while local files are being changed.
+        if !requiresVAD, modelOperationInProgress() { return false }
+        do {
+            try validateModelAssets(provider.mode, true)
+            return true
+        } catch {
+            if requiresVAD { throw error }
+            return false
+        }
+    }
+
     /// Native inference can outlive cancellation. The deadline must run independently
     /// of the recorder drain, while the lease continues protecting that native work.
     func watchLocalFinalizationDeadline(

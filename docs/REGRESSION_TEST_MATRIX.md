@@ -70,8 +70,11 @@ cross-process compatibility requires manual validation in the target editor or t
 ## Explicit local model installation
 
 `LocalVADConsentTests` verifies that missing assets explain installation and corrupt VAD
-refuses capture. `LocalVADReadinessTests` distinguishes batch VAD dependencies from cloud
-streaming endpointing. `VADInstallControllerTests` rejects stale availability checks.
+refuses capture when required. `LocalVADReadinessTests` limits the required asset gate to
+local batch providers. `CloudProviderIndependenceTests` covers cloud batch and streaming
+without local assets, including during local-model operations, the unchanged VAD preference,
+and explicit model-free recording that never enters the VAD loader. Verified optional VAD
+remains usable by cloud batch. The UI exposes manual stopping when optional VAD is absent. `VADInstallControllerTests` rejects stale availability checks.
 `LocalModelManifestTests` verifies root and nested export paths, exact repository components,
 reserved receipts and file-directory collisions on case-insensitive storage.
 `LocalSpeechCatalogTests` verifies the two reviewed English exports (Parakeet 0.6B v2 batch and

@@ -75,6 +75,7 @@ REGRESSION_SUITES=(
   "VADModelCacheTests"
   "LocalVADConsentTests"
   "LocalVADReadinessTests"
+  "CloudProviderIndependenceTests"
   "ExplicitModelInstallerTests"
   "ModelArtifactFileTests"
   "ModelArtifactTransportTests"

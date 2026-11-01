@@ -30,6 +30,12 @@ struct GeneralSettingsView: View {
                 .background(Theme.accentSoft)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
             }
+            if state.usesBasicCloudBatchRecording {
+                Text(AppState.basicCloudBatchNotice)
+                    .font(.callout)
+                    .foregroundStyle(Theme.text2)
+                    .padding(14)
+            }
             MicrophoneSettingsView(isRecording: state.isRecording, permissionGranted: state.microphoneGranted)
             permissionsSection
             activationSection

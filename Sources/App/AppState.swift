@@ -51,7 +51,16 @@ final class AppState: BannerPresenting {
     }
 
     var needsVADInstallation: Bool {
-        vadEnabled && providerRegistry.provider(for: activeProviderId)?.mode == .batch && !vadAvailability()
+        guard let provider = providerRegistry.provider(for: activeProviderId) else { return false }
+        return provider is any LocalRecordingPreparing && provider.mode == .batch && vadEnabled && !vadAvailability()
+    }
+
+    static let basicCloudBatchNotice = "Cloud batch dictation is ready. Stop with the hotkey or Enter. Speech-based auto-end needs optional VAD."
+
+    var usesBasicCloudBatchRecording: Bool {
+        guard let provider = providerRegistry.provider(for: activeProviderId), provider.isConfigured,
+              provider.mode == .batch, !(provider is any LocalRecordingPreparing) else { return false }
+        return !vadEnabled || !vadAvailability()
     }
 
     /// Whether a specific provider is configured and ready to use.

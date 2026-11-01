@@ -4,6 +4,13 @@ import Testing
 @testable import SpeakFlow
 @testable import SpeakFlowCore
 
+private actor ModelSelectionGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+    func wait() async { started = true; await withCheckedContinuation { continuation = $0 } }
+    func open() { continuation?.resume(); continuation = nil }
+}
+
 private actor ModelsFixtureEngine: LocalBatchSpeechEngine {
     func transcribe(samples: [Float]) async throws -> String { "fixture words" }
     func cleanup() async {}
@@ -28,7 +35,7 @@ struct LocalModelsControllerTests {
         let vadLoads: OSAllocatedUnfairLock<Int>
     }
 
-    @MainActor private func fixture(vadInstalled: Bool = false, vadLoadFails: Bool = false, retained: [LocalSpeechModel] = []) throws -> Fixture {
+    @MainActor private func fixture(vadInstalled: Bool = false, vadLoadFails: Bool = false, retained: [LocalSpeechModel] = [], beforeLoad: @escaping @Sendable () async -> Void = {}) throws -> Fixture {
         let models = try LocalSpeechCatalog.models()
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent(".agents/test-fixtures/models-operations-\(UUID().uuidString)")
@@ -51,6 +58,7 @@ struct LocalModelsControllerTests {
             VADModelCacheSnapshot(isLoaded: vadLoaded.withLock { $0 }, isLoading: false)
         }))
         let runtime = LocalSpeechRuntime(root: root, verify: { _, directory in directory }, load: { model, _ in
+            await beforeLoad()
             if model.id != .parakeetV2 { throw LocalSpeechRuntimeError.loadFailed }
             return ModelsFixtureEngine()
         })
@@ -69,6 +77,20 @@ struct LocalModelsControllerTests {
         let controller = LocalModelsController(models: models, store: store, runtime: runtime, vad: vad, selection: selection, reviewedVersions: retained)
         return Fixture(controller: controller, selection: state, runtime: runtime, root: root,
             available: available, requests: requests, removed: removed, vadLoads: vadLoads)
+    }
+
+    @MainActor @Test func aLocalLoadCannotChangeSelectionAfterCloudRecordingStarts() async throws {
+        let gate = ModelSelectionGate()
+        let fixture = try fixture(vadInstalled: true, beforeLoad: { await gate.wait() })
+        fixture.available.withLock { $0 = [.parakeetV2] }
+        await fixture.controller.refresh()
+        fixture.controller.load(.parakeetV2)
+        try await waitUntilAsync { await gate.started }
+        fixture.selection.busy = true
+        await gate.open()
+        try await waitUntil { !fixture.controller.isBusy }
+        #expect(fixture.selection.id == "fixture-cloud" && fixture.selection.commits == 0)
+        #expect(fixture.controller.entry(.parakeetV2).hasError)
     }
 
     @MainActor @Test func browseAndCancelledReviewNeverTransferOrCreateAStore() async throws {

@@ -242,16 +242,20 @@ public final class StreamingRecorder {
 
     private let microphoneSelection: MicrophoneSelection?
     private let settings: any SettingsProviding
+    /// Per-recording policy. Disabling optional local VAD never changes the saved preference.
+    public let localVADEnabled: Bool
 
     private let playSoundEffect: (SoundEffect) -> Void
 
     public init(
         settings: any SettingsProviding = Settings.shared,
+        localVADEnabled: Bool = true,
         microphoneSelection: MicrophoneSelection? = nil,
         playSoundEffect: @escaping (SoundEffect) -> Void = { $0.play() }
     ) {
         self.microphoneSelection = microphoneSelection
         self.settings = settings
+        self.localVADEnabled = localVADEnabled
         self.playSoundEffect = playSoundEffect
     }
 
@@ -583,11 +587,11 @@ public final class StreamingRecorder {
         }
         let settings = self.settings
 
-        guard settings.vadEnabled && VADProcessor.isAvailable else {
+        guard localVADEnabled && settings.vadEnabled && VADProcessor.isAvailable else {
             if !VADProcessor.isAvailable {
                 Logger.audio.info("VAD not available on \(PlatformSupport.platformDescription). Using fallback mode.")
             } else {
-                Logger.audio.info("VAD disabled in settings. Using fallback mode.")
+                Logger.audio.info("Local VAD disabled for this recording. Using volume-based chunking.")
             }
             state.setVADActive(false)
             return

@@ -16,6 +16,14 @@ struct ActiveModelBanner: View {
         VStack(spacing: 8) {
             if activeProvider == nil || configuredProviders.isEmpty {
                 emptyState
+                if !allModels.isEmpty {
+                    Button("Choose another model") {
+                        withAnimation(.easeOut(duration: 0.15)) { isOpen.toggle() }
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("active-model.choose-alternative")
+                    if isOpen { popover }
+                }
             } else {
                 connectedState
                 if isOpen { popover }
